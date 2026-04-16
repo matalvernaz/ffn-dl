@@ -25,6 +25,126 @@ def _detect_site(url):
     return FFNScraper
 
 
+def _build_scraper(url, args):
+    """Build a scraper instance for the given URL using CLI args."""
+    scraper_cls = _detect_site(url)
+    kwargs = {
+        "max_retries": args.max_retries,
+        "use_cache": not args.no_cache,
+    }
+    if args.delay_min is not None and args.delay_max is not None:
+        kwargs["delay_range"] = (args.delay_min, args.delay_max)
+    elif args.delay_min is not None or args.delay_max is not None:
+        d_min = args.delay_min if args.delay_min is not None else 1.0
+        d_max = args.delay_max if args.delay_max is not None else 5.0
+        kwargs["delay_range"] = (d_min, d_max)
+    return scraper_cls(**kwargs)
+
+
+def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=0):
+    """Download and export a single story. Returns True on success, False on error."""
+    scraper = _build_scraper(url, args)
+
+    def progress(current, total, title, cached):
+        tag = " (cached)" if cached else ""
+        print(f"  [{current}/{total}] {title}{tag}")
+
+    try:
+        story_id = scraper.parse_story_id(url)
+        if update_path:
+            print(
+                f"Checking story {story_id} on {scraper.site_name} "
+                f"(existing file has {existing_chapters} chapters)..."
+            )
+        else:
+            print(f"Downloading story {story_id} from {scraper.site_name}...")
+
+        story = scraper.download(
+            url,
+            progress_callback=progress,
+            skip_chapters=existing_chapters,
+        )
+
+        new_count = len(story.chapters)
+        words = story.metadata.get("words", "?")
+        status = story.metadata.get("status", "Unknown")
+
+        if update_path and new_count == 0:
+            print(f"\n  Up to date — no new chapters.")
+            return True
+
+        print()
+        print(f"  Title:    {story.title}")
+        print(f"  Author:   {story.author}")
+        if update_path:
+            total = existing_chapters + new_count
+            print(f"  Chapters: {total} ({new_count} new)")
+        else:
+            print(f"  Chapters: {new_count}")
+        print(f"  Words:    {words}")
+        print(f"  Status:   {status}")
+
+        if update_path:
+            # For update, we need the full story to re-export.
+            # Re-download everything (cache makes this fast).
+            print("\n  Re-exporting full story...")
+            story = scraper.download(url, skip_chapters=0)
+
+        if args.format == "audio":
+            from .tts import generate_audiobook
+
+            def audio_progress(current, total, title):
+                print(f"  Synthesizing [{current}/{total}] {title}")
+
+            print("\nGenerating audiobook...")
+            path = generate_audiobook(
+                story, str(output_dir), progress_callback=audio_progress
+            )
+        else:
+            exporter = EXPORTERS[args.format]
+            path = exporter(story, str(output_dir), template=args.name)
+        print(f"\nSaved to: {path}")
+
+        if args.clean_cache:
+            scraper.clean_cache(story_id)
+
+        return True
+
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return False
+    except StoryNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return False
+    except CloudflareBlockError as exc:
+        print(f"Blocked: {exc}", file=sys.stderr)
+        return False
+    except RateLimitError as exc:
+        print(f"\nRate limited: {exc}", file=sys.stderr)
+        print(
+            "Try increasing --delay-min / --delay-max or wait before retrying.",
+            file=sys.stderr,
+        )
+        return False
+    except ImportError as exc:
+        print(f"Missing dependency: {exc}", file=sys.stderr)
+        return False
+
+
+def _read_batch_file(path):
+    """Read URLs from a batch file, skipping blank lines and comments."""
+    urls = []
+    batch_path = Path(path)
+    if not batch_path.is_file():
+        raise FileNotFoundError(f"Batch file not found: {path}")
+    with open(batch_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                urls.append(line)
+    return urls
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="ffn-dl",
@@ -38,11 +158,20 @@ def main(argv=None):
     )
     parser.add_argument(
         "url",
-        nargs="?",
+        nargs="*",
         help=(
-            "Story URL or numeric ID "
+            "One or more story URLs or numeric IDs "
             "(e.g. https://www.fanfiction.net/s/12345, "
             "https://ficwad.com/story/76962, or just 12345)"
+        ),
+    )
+    parser.add_argument(
+        "-b",
+        "--batch",
+        metavar="FILE",
+        help=(
+            "Read URLs from a file (one per line; blank lines and "
+            "lines starting with # are skipped)"
         ),
     )
     parser.add_argument(
@@ -108,12 +237,17 @@ def main(argv=None):
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
-
     args = parser.parse_args(argv)
 
-    # Resolve --update mode
-    existing_chapters = 0
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(message)s",
+    )
+
+    # --- Resolve --update mode (single-file, no batch) ---
     if args.update:
+        if args.batch:
+            parser.error("--update and --batch cannot be used together")
         update_path = Path(args.update)
         url = extract_source_url(update_path)
         existing_chapters = count_chapters(update_path)
@@ -122,121 +256,89 @@ def main(argv=None):
             args.format = fmt_map.get(update_path.suffix.lower(), "epub")
         if args.output is None:
             args.output = str(update_path.parent)
-    elif args.url:
-        url = args.url
-    else:
-        parser.error("either a URL or --update FILE is required")
+        if args.format is None:
+            args.format = "epub"
+        output_dir = Path(args.output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            ok = _download_one(
+                url,
+                args,
+                output_dir,
+                update_path=update_path,
+                existing_chapters=existing_chapters,
+            )
+        except KeyboardInterrupt:
+            print("\nCancelled. Re-run the same command to resume.")
+            sys.exit(130)
+        sys.exit(0 if ok else 1)
+
+    # --- Collect URLs from positional args and --batch file ---
+    urls = list(args.url) if args.url else []
+
+    if args.batch:
+        try:
+            urls.extend(_read_batch_file(args.batch))
+        except FileNotFoundError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    if not urls:
+        parser.error("either a URL, --batch FILE, or --update FILE is required")
 
     if args.format is None:
         args.format = "epub"
     if args.output is None:
         args.output = "."
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(message)s",
-    )
-
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    scraper_cls = _detect_site(url)
+    # --- Single URL: preserve original exit-code behaviour ---
+    if len(urls) == 1:
+        try:
+            ok = _download_one(urls[0], args, output_dir)
+        except KeyboardInterrupt:
+            print("\nCancelled. Re-run the same command to resume.")
+            sys.exit(130)
+        sys.exit(0 if ok else 1)
 
-    kwargs = {
-        "max_retries": args.max_retries,
-        "use_cache": not args.no_cache,
-    }
-    if args.delay_min is not None and args.delay_max is not None:
-        kwargs["delay_range"] = (args.delay_min, args.delay_max)
-    elif args.delay_min is not None or args.delay_max is not None:
-        d_min = args.delay_min if args.delay_min is not None else 1.0
-        d_max = args.delay_max if args.delay_max is not None else 5.0
-        kwargs["delay_range"] = (d_min, d_max)
-
-    scraper = scraper_cls(**kwargs)
-
-    def progress(current, total, title, cached):
-        tag = " (cached)" if cached else ""
-        print(f"  [{current}/{total}] {title}{tag}")
+    # --- Multiple URLs: batch mode with summary ---
+    succeeded = 0
+    failed = 0
+    failures = []
 
     try:
-        story_id = scraper.parse_story_id(url)
-        if args.update:
-            print(
-                f"Checking story {story_id} on {scraper.site_name} "
-                f"(existing file has {existing_chapters} chapters)..."
-            )
-        else:
-            print(f"Downloading story {story_id} from {scraper.site_name}...")
-
-        story = scraper.download(
-            url,
-            progress_callback=progress,
-            skip_chapters=existing_chapters,
-        )
-
-        new_count = len(story.chapters)
-        words = story.metadata.get("words", "?")
-        status = story.metadata.get("status", "Unknown")
-
-        if args.update and new_count == 0:
-            print(f"\n  Up to date — no new chapters.")
-            sys.exit(0)
-
-        print()
-        print(f"  Title:    {story.title}")
-        print(f"  Author:   {story.author}")
-        if args.update:
-            total = existing_chapters + new_count
-            print(f"  Chapters: {total} ({new_count} new)")
-        else:
-            print(f"  Chapters: {new_count}")
-        print(f"  Words:    {words}")
-        print(f"  Status:   {status}")
-
-        if args.update:
-            # For update, we need the full story to re-export.
-            # Re-download everything (cache makes this fast).
-            print("\n  Re-exporting full story...")
-            story = scraper.download(url, skip_chapters=0)
-
-        if args.format == "audio":
-            from .tts import generate_audiobook
-
-            def audio_progress(current, total, title):
-                print(f"  Synthesizing [{current}/{total}] {title}")
-
-            print("\nGenerating audiobook...")
-            path = generate_audiobook(
-                story, str(output_dir), progress_callback=audio_progress
-            )
-        else:
-            exporter = EXPORTERS[args.format]
-            path = exporter(story, str(output_dir), template=args.name)
-        print(f"\nSaved to: {path}")
-
-        if args.clean_cache:
-            scraper.clean_cache(story_id)
-
-    except (ValueError, FileNotFoundError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
-    except StoryNotFoundError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
-    except CloudflareBlockError as exc:
-        print(f"Blocked: {exc}", file=sys.stderr)
-        sys.exit(2)
-    except RateLimitError as exc:
-        print(f"\nRate limited: {exc}", file=sys.stderr)
-        print(
-            "Try increasing --delay-min / --delay-max or wait before retrying.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    except ImportError as exc:
-        print(f"Missing dependency: {exc}", file=sys.stderr)
-        sys.exit(1)
+        for i, url in enumerate(urls, 1):
+            print(f"\n{'='*60}")
+            print(f"[{i}/{len(urls)}] {url}")
+            print(f"{'='*60}")
+            ok = _download_one(url, args, output_dir)
+            if ok:
+                succeeded += 1
+            else:
+                failed += 1
+                failures.append(url)
     except KeyboardInterrupt:
-        print("\nCancelled. Re-run the same command to resume.")
+        print("\nCancelled.")
+        # Count remaining URLs as not attempted
+        remaining = len(urls) - (succeeded + failed)
+        print(f"\n{'='*60}")
+        print(f"Batch interrupted — {succeeded} succeeded, {failed} failed, "
+              f"{remaining} not attempted.")
+        if failures:
+            print("Failed URLs:")
+            for u in failures:
+                print(f"  {u}")
         sys.exit(130)
+
+    print(f"\n{'='*60}")
+    print(f"Batch complete — {succeeded} succeeded, {failed} failed "
+          f"out of {len(urls)} total.")
+    if failures:
+        print("Failed URLs:")
+        for u in failures:
+            print(f"  {u}")
+    print(f"{'='*60}")
+    sys.exit(0 if failed == 0 else 1)
