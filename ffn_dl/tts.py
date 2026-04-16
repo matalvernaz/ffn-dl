@@ -113,8 +113,31 @@ _DIALOGUE_RE = re.compile(
 )
 
 # After a closing quote: "dialogue," Name verbed  OR  "dialogue," verbed Name
-# Name matches proper nouns OR pronouns (he/she/they/it)
-_NAME_PAT = r"(?P<name>(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)|(?:he|she|they|it|He|She|They|It))"
+# Name matches: optional honorific/title ("Mrs.", "Professor", "Aunt", etc.)
+# followed by 1–2 proper-noun tokens — OR a pronoun. This keeps titled
+# speakers intact ("Mrs. Weasley", "Professor McGonagall") instead of
+# splitting them into two fake characters.
+_TITLE_PREFIX = (
+    r"(?:"
+    r"Mr\.?|Mrs\.?|Ms\.?|Miss|Mister|Mistress|"
+    r"Dr\.?|Prof\.?|Professor|"
+    r"Sir|Lord|Lady|Madam|Madame|Dame|"
+    r"Aunt|Auntie|Uncle|Master|"
+    r"Captain|Cap|Colonel|Commander|General|Major|Lieutenant|Lt\.?|"
+    r"Sergeant|Sgt\.?|Officer|Agent|Detective|"
+    r"Headmaster|Headmistress|Auror|Deputy|"
+    r"King|Queen|Prince|Princess|Duke|Duchess|Count|Countess|"
+    r"Brother|Sister|Father|Mother|Reverend|Cardinal|Bishop"
+    r")\s+"
+)
+_PROPER_TOKENS = r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?"
+_NAME_PAT = (
+    r"(?P<name>"
+    rf"(?:{_TITLE_PREFIX})?{_PROPER_TOKENS}"
+    r"|"
+    r"(?:he|she|they|it|He|She|They|It)"
+    r")"
+)
 _AFTER_NAME_VERB = re.compile(rf"\s*{_NAME_PAT}\s+(?P<verb>\w+)")
 _AFTER_VERB_NAME = re.compile(
     rf"\s*(?P<verb>\w+)\s+{_NAME_PAT}"
@@ -123,7 +146,9 @@ _AFTER_VERB_NAME = re.compile(
 
 # Before an opening quote: Name verbed, "dialogue"
 _BEFORE_ATTRIB = re.compile(
-    r"(?P<name>[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)"
+    r"(?P<name>"
+    rf"(?:{_TITLE_PREFIX})?{_PROPER_TOKENS}"
+    r")"
     r'\s+(?P<verb>\w+)\s*,\s*$'
 )
 
@@ -139,6 +164,18 @@ _SPEECH_VERBS = {
     "observed", "commented", "declared", "announced", "explained",
     "offered", "interrupted", "repeated", "admitted", "confessed",
     "acknowledged", "rasped", "breathed", "grunted", "stated",
+    "ordered", "commanded", "barked", "scolded", "warned", "chided",
+    "teased", "retorted", "countered", "responded", "intoned",
+    "drawled", "mumbled", "complained", "whined", "grumbled",
+    "gasped", "snorted", "scoffed", "huffed", "sneered", "spat",
+    "pleaded", "begged", "prayed", "greeted", "crooned", "cooed",
+    "lisped", "spluttered", "babbled", "squeaked", "squealed",
+    "piped", "chirped", "quipped", "boasted", "bragged", "promised",
+    "vowed", "swore", "confided", "admitted", "asserted", "argued",
+    "cautioned", "prompted", "urged", "insisted", "reminded",
+    "assured", "reassured", "soothed", "coaxed", "consoled",
+    "reasoned", "clarified", "elaborated", "finished", "concluded",
+    "agreed", "corrected", "apologized", "apologised",
 }
 
 
@@ -152,7 +189,25 @@ class Segment:
 
 
 _PRONOUNS = {"he", "she", "they", "it"}
-_PROPER_NAME_RE = re.compile(r"\b([A-Z][a-z]{2,})\b")
+# Proper-name regex: allows internal caps (McGonagall, MacKenzie, O'Brien)
+# and apostrophes. Length ≥ 3 so 2-letter abbreviations (Mr, Dr) are skipped.
+_PROPER_NAME_RE = re.compile(r"\b([A-Z][a-zA-Z']{1,}[a-z])\b")
+
+# Honorifics/titles that should NOT be treated as standalone character
+# names when resolving a pronoun back to a speaker.
+_NAME_SKIP_TITLES = {
+    "Mr", "Mrs", "Ms", "Miss", "Mister", "Mistress",
+    "Dr", "Prof", "Professor",
+    "Sir", "Lord", "Lady", "Madam", "Madame", "Dame",
+    "Aunt", "Auntie", "Uncle", "Master",
+    "Captain", "Cap", "Colonel", "Commander", "General",
+    "Major", "Lieutenant", "Sergeant", "Officer", "Agent", "Detective",
+    "Headmaster", "Headmistress", "Auror", "Deputy",
+    "King", "Queen", "Prince", "Princess",
+    "Duke", "Duchess", "Count", "Countess",
+    "Brother", "Sister", "Father", "Mother",
+    "Reverend", "Cardinal", "Bishop",
+}
 
 
 def parse_segments(text):
@@ -182,14 +237,36 @@ def parse_segments(text):
 
         def _resolve_pronoun():
             """When attribution uses a pronoun, find the nearest name in
-            the preceding narration text (more accurate than last_speaker)."""
+            the preceding narration text. Returns a full titled name
+            when the match is preceded by an honorific ("Mrs. Weasley",
+            "Professor McGonagall") so speakers are not split into a
+            spurious "Weasley" character."""
             window = text[max(0, match.start() - 200) : match.start()]
-            names = _PROPER_NAME_RE.findall(window)
-            # Filter out common non-name words
+            # Find all (start_offset, name) tuples
+            matches = [(m.start(), m.group(1)) for m in _PROPER_NAME_RE.finditer(window)]
             skip = {"The", "This", "That", "But", "And", "She", "His",
-                    "Her", "They", "Then", "When", "What", "How", "Not"}
-            names = [n for n in names if n not in skip]
-            return names[-1] if names else last_speaker
+                    "Her", "They", "Then", "When", "What", "How", "Not",
+                    # Common vocatives inside dialogue that get
+                    # mistaken for narrator-side proper nouns:
+                    "Boys", "Girls", "Children", "Kids", "Gentlemen",
+                    "Ladies", "Everyone", "Anyone", "Someone", "Nobody",
+                    "Friends", "Folks", "Lads", "Lasses", "Guys",
+                    "Yeah", "Well", "Oh", "Hey", "Hi", "Hello"}
+            # Drop honorifics and common non-name words
+            candidates = [
+                (pos, n) for pos, n in matches
+                if n not in skip and n not in _NAME_SKIP_TITLES
+            ]
+            if not candidates:
+                return last_speaker
+            pos, name = candidates[-1]
+            # If a title word immediately precedes this name, include it.
+            preceding = window[max(0, pos - 20):pos].rstrip()
+            for title in _NAME_SKIP_TITLES:
+                # Match "Mrs.", "Mr ", "Professor ", "Aunt ", etc.
+                if preceding.endswith(title) or preceding.endswith(title + "."):
+                    return f"{title} {name}"
+            return name
 
         am = _AFTER_NAME_VERB.match(after_text)
         if am and am.group("verb").lower() in _SPEECH_VERBS:
@@ -245,41 +322,358 @@ _FEMALE_SUFFIXES = (
     "ella", "anna", "ette", "ine", "elle", "issa", "ina",
     "lia", "ria", "dia", "sia", "nie", "ley", "lie",
 )
+
+# Titles and honorifics. Stripped from name parts; gendered variants also
+# directly imply a gender (strongest hint — overrides name lookup).
+_MALE_TITLES = {
+    "mr", "mister", "sir", "lord", "master", "uncle",
+    "king", "prince", "duke", "count", "baron", "earl",
+    "brother", "father", "bro", "grandpa", "grandfather",
+    "headmaster",
+}
+_FEMALE_TITLES = {
+    "mrs", "ms", "miss", "madam", "madame", "lady",
+    "mistress", "aunt", "auntie",
+    "queen", "princess", "duchess", "countess", "baroness",
+    "sister", "mother", "mum", "mom", "grandma", "grandmother",
+    "headmistress", "dame",
+}
+_NEUTRAL_TITLES = {
+    "professor", "prof", "doctor", "dr",
+    "captain", "cap", "colonel", "commander", "general",
+    "major", "lieutenant", "lt", "sergeant", "sgt",
+    "officer", "agent", "detective",
+    "elder", "senator", "councillor", "mayor",
+    "minister", "director", "chief",
+    "reverend", "rev", "cardinal", "bishop",
+    "auror", "deputy",
+}
+
+# ----------------------------------------------------------------
+# First-name overrides. These are canonical characters from widely
+# written fandoms where the first name alone pins the gender. Kept
+# lowercase; names with ambiguous real-world use (e.g. Lee, Morgan,
+# Robin) are included ONLY when the fandom dominates usage in
+# fanfiction corpora.
+# ----------------------------------------------------------------
 _FEMALE_NAMES = {
-    "hermione", "ginny", "luna", "fleur", "lily", "rose", "taylor",
-    "alice", "claire", "eve", "grace", "iris", "ivy", "jane", "joy",
-    "kate", "mae", "may", "faith", "hope", "dawn", "willow", "buffy",
-    "joan", "ann", "beth", "ruth", "jean", "nell", "fern", "rachel",
-    "lillian", "myrtle", "mrytle", "madison", "morgan", "arya", "sansa",
-    "cersei", "daenerys", "misty", "susan", "sarah", "mary", "nancy",
-    "helen", "karen", "wendy", "carol", "janet", "robin", "amber",
-    "crystal", "heather", "brooke", "paige", "quinn", "skitter",
-    "piper", "phoebe", "cordelia", "tara", "anya", "glory", "drusilla",
+    # Harry Potter
+    "hermione", "ginny", "ginevra", "luna", "fleur", "lily", "rose",
+    "molly", "lucy", "roxanne", "dominique", "victoire", "audrey",
+    "petunia", "marge", "bellatrix", "narcissa", "andromeda",
+    "nymphadora", "dora", "tonks", "minerva", "pomona", "poppy",
+    "sybill", "sybil", "rolanda", "aurora", "septima", "charity",
+    "bathsheda", "dolores", "umbridge", "amelia", "astoria", "daphne",
+    "pansy", "millicent", "tracey", "katie", "angelina", "alicia",
+    "cho", "romilda", "lavender", "parvati", "padma", "marietta",
+    "penelope", "queenie", "porpentina", "tina", "olympe", "perenelle",
+    "hestia", "rita", "hannah", "susan", "megan", "ariana", "kendra",
+    "gabrielle", "apolline", "ivy", "alicia", "vernity", "fluer",
+    "hedwig", "mrs.norris", "nagini", "myrtle", "mrytle",
+    "hooch", "sprout", "pomfrey", "sinistra", "vector", "burbage",
+    "babbling", "skeeter", "mcgonagall", "trelawney",
+    # Worm (Parahumans)
+    "taylor", "lisa", "tattletale", "bitch", "rachel", "dinah",
+    "skitter", "weaver", "amy", "panacea", "vicky", "victoria",
+    "aisha", "imp", "riley", "bonesaw", "emma",
+    "madison", "sophia", "shadowstalker", "missy", "vista",
+    "theresa", "alexandria", "rebecca", "contessa", "fortuna",
+    "ciara", "valkyrie", "cauldron", "bakuda", "purity",
+    "noelle", "sundancer", "marissa", "narwhal",
+    # Buffy / Angel
+    "buffy", "willow", "dawn", "faith", "anya", "tara", "cordelia",
+    "kendra", "darla", "drusilla", "harmony", "glory",
+    # note: Buffy's "Fred" (Winifred Burkle) is F but collides with HP's
+    # Fred Weasley (M) — HP dominance in fanfic corpora wins, so "fred"
+    # is in _MALE_NAMES only. Buffy fic using Winifred's nickname will
+    # need manual voice-map override.
+    "winifred",
+    "joyce", "jenny", "kate", "lilah", "eve",
+    # Game of Thrones / ASOIAF
+    "arya", "sansa", "cersei", "catelyn", "daenerys", "dany",
+    "margaery", "shae", "ygritte", "brienne", "melisandre",
+    "myrcella", "gilly", "lysa", "olenna", "ellaria", "missandei",
+    "yara", "asha", "osha",
+    # Lord of the Rings
+    "eowyn", "arwen", "galadriel", "rosie", "lobelia",
+    # Percy Jackson / Riordan
+    "annabeth", "thalia", "hazel", "rachel", "silena", "bianca",
+    "calypso", "piper",  # already above
+    "clarisse", "zoe", "reyna", "drew", "artemis", "aphrodite",
+    "athena", "hera", "persephone", "demeter", "hestia",
+    # Marvel (MCU / 616)
+    "natasha", "wanda", "pepper", "jane", "darcy", "peggy",
+    "nebula", "gamora", "mantis", "okoye", "shuri", "nakia",
+    "ramonda", "valkyrie",  # name collision with Worm ok
+    "carol", "maria", "monica", "jessica", "kamala", "ava",
+    "hope", "yelena", "melina", "morgan",  # morgan stark
+    "may", "mj", "michelle", "liz", "betty",
+    # DC
+    "diana", "lois", "selina", "barbara", "kara", "harley",
+    "ivy", "donna", "cassandra", "stephanie", "zatanna",
+    "raven", "starfire", "koriand'r", "mera", "iris",
+    # Naruto
+    "sakura", "hinata", "ino", "tenten", "temari", "kushina",
+    "tsunade", "anko", "kurenai", "konan", "mei", "mebuki",
+    "karin", "shizune",
+    # Bleach
+    "rukia", "orihime", "yoruichi", "rangiku", "momo", "hinamori",
+    "nemu", "soifon", "unohana", "nanao", "isane", "kiyone",
+    "retsu", "neliel", "nel", "harribel", "apacci", "mila",
+    # One Piece
+    "nami", "robin", "boa", "hancock", "nico", "vivi", "shirahoshi",
+    "carrot", "reiju", "tashigi", "hina", "perona", "tsuru",
+    # Fullmetal Alchemist
+    "winry", "riza", "hawkeye", "izumi", "lan", "lanfan", "mei",
+    # Miscellaneous common / fantasy
+    "alice", "claire", "eve", "grace", "iris", "jane", "joy",
+    "kate", "mae", "may", "faith", "hope", "dawn", "willow",
+    "joan", "ann", "beth", "ruth", "jean", "nell", "fern",
+    "rachel", "lillian", "madison", "morgan", "misty",
+    "sarah", "mary", "nancy", "helen", "karen", "wendy",
+    "janet", "robin", "amber", "crystal", "heather", "brooke",
+    "paige", "quinn", "phoebe", "sansa", "piper",
+    "emma", "olivia", "sophia", "ava", "mia", "isabella",
+    "charlotte", "amelia", "harper", "evelyn", "abigail",
+    "emily", "elizabeth", "avery", "sofia", "ella", "madison",
+    "scarlett", "victoria", "aria", "grace", "chloe", "camila",
+    "penelope", "riley", "zoey", "nora", "lily", "eleanor",
+    "hannah", "lillian", "addison", "aubrey", "ellie", "stella",
+    "natalie", "zoe", "leah", "hazel", "violet", "aurora",
+    "savannah", "audrey", "brooklyn", "bella", "claire", "skylar",
+    "lucy", "paisley", "everly", "anna", "caroline", "nova",
+    "genesis", "emilia", "kennedy", "samantha", "maya", "willow",
+    "kinsley", "naomi", "aaliyah", "elena", "sarah", "ariana",
+    "allison", "gabriella", "alice", "madelyn", "cora", "ruby",
+    "eva", "serenity", "autumn", "adeline", "hailey", "gianna",
+    "valentina", "isla", "eliana", "quinn", "nevaeh", "ivy",
+    "sadie", "piper", "lydia", "alexa", "josephine", "emery",
+    "julia", "delilah", "arianna", "vivian", "kaylee", "sophie",
+    "brielle", "madeline", "peyton", "rylee", "clara", "hadley",
+    "melanie", "mackenzie", "reagan", "adalynn", "liliana",
+    "aubree", "jade", "katherine", "isabelle", "natalia", "raelynn",
+    "maria", "athena", "ximena", "arya",  # already above
 }
+
 _MALE_NAMES = {
-    "harry", "ron", "draco", "james", "albus", "sirius", "remus",
-    "jack", "john", "max", "sam", "ben", "tom", "dan", "bob", "jim",
-    "brian", "kevin", "mark", "paul", "peter", "sean", "adam", "carl",
-    "dean", "eric", "greg", "hugh", "ian", "karl", "leon", "neil",
-    "owen", "alan", "chad", "luke", "finn", "ross", "kurt", "seth",
-    "michael", "micheal", "danny", "dumbledore", "snape", "neville",
-    "fred", "george", "arthur", "bill", "charlie", "percy", "hagrid",
-    "voldemort", "robert", "william", "richard", "edward", "henry",
-    "charles", "david", "joseph", "george", "frank", "ray", "cole",
-    "angel", "spike", "xander", "giles", "wesley", "gunn", "connor",
+    # Harry Potter — main cast
+    "harry", "ron", "ronald", "draco", "james", "albus", "sirius",
+    "remus", "severus", "neville", "dean", "seamus", "oliver",
+    "cedric", "viktor", "lucius", "regulus", "kingsley", "rufus",
+    "cornelius", "horace", "alastor", "filius", "gilderoy",
+    "percy", "fred", "george", "arthur", "bill", "charlie",
+    "hagrid", "rubeus", "voldemort", "tom", "riddle",
+    "colin", "dennis", "peter", "pettigrew", "wormtail",
+    "padfoot", "prongs", "moony", "hadrian",
+    "igor", "karkaroff", "barty", "bartemius", "crouch",
+    "dudley", "vernon", "quirrell", "quirinus",
+    "aberforth", "gellert", "grindelwald", "argus", "filch",
+    "bane", "firenze", "grawp", "dobby", "kreacher",
+    "rodolphus", "rabastan", "evan", "rosier", "antonin",
+    "dolohov", "walden", "macnair", "corban", "yaxley",
+    "amycus", "augustus", "rookwood", "thorfinn", "rowle",
+    "scrimgeour", "scabior", "fenrir", "greyback", "travers",
+    "dedalus", "diggle", "elphias", "mundungus", "fletcher",
+    "lee", "jordan",  # Lee Jordan — Fred & George's friend
+    "blaise", "zabini", "theodore", "nott", "gregory", "goyle",
+    "vincent", "crabbe", "marcus", "flint", "terry", "boot",
+    "michael", "corner", "anthony", "goldstein", "ernie",
+    "macmillan", "justin", "finch-fletchley", "zacharias",
+    "smith", "wayne", "moon", "roger", "davies", "adrian",
+    "pucey", "miles", "bletchley", "cormac", "mclaggen",
+    "kevin", "entwhistle", "rolf", "newt", "newton", "theseus",
+    "scamander", "graves", "jacob", "kowalski", "credence",
+    "ollivander", "xenophilius", "ludo", "bagman", "ludovic",
+    "augustus", "broderick", "bode", "sturgis", "podmore",
+    "michael", "gibbon", "jugson", "selwyn", "nicolas", "flamel",
+    "aberforth", "ignotus", "cadmus", "antioch", "peverell",
+    "salazar", "godric", "wulfric", "percival", "brian",
+    "teddy", "ted", "fabian", "gideon", "prewett", "marius",
+    # Marauders / Weasley / misc shortenings
+    "moony", "wormy", "padfoot", "prongs",
+    # Worm / Parahumans
+    "brian", "grue", "alec", "regent",
+    "jeff", "clockblocker", "dean", "gallant", "carlos",
+    "aegis", "chris", "armsmaster", "colin",
+    "legend", "keith", "scion", "eidolon", "hero",
+    "myrddin", "accord", "lung", "kaiser", "hookwolf",
+    "stormtiger", "crusader", "krieg",
+    "oni_lee", "uber", "leet", "skidmark", "mush",
+    "aster", "theo", "coil", "calvert",
+    # Buffy / Angel
+    "xander", "giles", "rupert", "angel", "angelus", "spike",
+    "william", "oz", "riley", "wesley", "gunn", "connor",
+    "lorne", "doyle", "graham", "forrest",
+    # Game of Thrones / ASOIAF
+    "eddard", "ned", "robb", "jon", "bran", "rickon", "theon",
+    "tyrion", "jaime", "tywin", "joffrey", "tommen", "stannis",
+    "renly", "robert", "rhaegar", "viserys", "aemon", "aegon",
+    "samwell", "sam", "gendry", "jorah", "tormund", "ramsay",
+    "roose", "walder", "littlefinger", "petyr", "baelish",
+    "varys", "bronn", "sandor", "gregor", "podrick", "edmure",
+    "robin", "davos", "beric", "thoros", "mance", "jeor",
+    # Lord of the Rings
+    "frodo", "sam", "samwise", "merry", "meriadoc", "pippin",
+    "peregrin", "gandalf", "mithrandir", "aragorn", "elessar",
+    "legolas", "gimli", "boromir", "faramir", "denethor",
+    "theoden", "eomer", "elrond", "celeborn", "thranduil",
+    "saruman", "sauron", "bilbo", "gollum", "smeagol",
+    "beorn", "radagast", "balin", "thorin", "dwalin", "oin",
+    "gloin", "fili", "kili", "bofur", "bombur", "bifur",
+    # Percy Jackson
+    "percy", "grover", "luke", "chiron", "tyson", "nico",
+    "jason", "leo", "frank", "malcolm", "connor", "travis",
+    "will", "apollo", "ares", "zeus", "poseidon", "hades",
+    "hermes", "hephaestus", "dionysus",
+    # Marvel (MCU / 616)
+    "tony", "steve", "bucky", "thor", "loki", "clint", "bruce",
+    "stephen", "vision", "sam", "rhodey", "rhodes", "peter",
+    "miles", "matt", "wade", "logan", "scott", "hank",
+    "charles", "erik", "kurt", "bobby", "warren", "remy",
+    "victor", "tchalla", "killmonger", "thanos", "nick", "fury",
+    "phil", "coulson", "happy", "ned", "flash", "eugene",
+    "johnny", "ben", "reed", "doc", "norman", "harry",  # already
+    "eddie", "kraven", "vulture", "electro", "sandman",
+    "mysterio", "quentin", "beck",
+    # DC
+    "bruce", "clark", "diana_m",  # Diana = F
+    "arthur", "wally", "dick", "jason", "tim", "damian",
+    "barry", "hal", "john_stewart", "kyle", "oliver",
+    "lex", "joker", "riddler", "penguin", "oswald",
+    # Naruto / Bleach / One Piece
+    "naruto", "sasuke", "kakashi", "itachi", "obito", "madara",
+    "minato", "jiraiya", "iruka", "shikamaru", "choji", "neji",
+    "lee",  # Rock Lee — already covered
+    "gaara", "kankuro", "kiba", "shino", "sai", "yamato",
+    "orochimaru", "hashirama", "tobirama", "hiruzen", "asuma",
+    "ichigo", "renji", "byakuya", "uryu", "chad", "sado", "aizen",
+    "luffy", "zoro", "sanji", "usopp", "ace", "sabo",
+    # Generic / modern / classic
+    "jack", "john", "max", "ben", "tom", "dan", "bob", "jim",
+    "brian", "kevin", "mark", "paul", "sean", "adam", "carl",
+    "eric", "greg", "hugh", "ian", "karl", "leon", "neil",
+    "owen", "alan", "chad", "luke", "finn", "ross", "kurt",
+    "seth", "michael", "micheal", "danny", "robert", "william",
+    "richard", "edward", "henry", "charles", "david", "joseph",
+    "frank", "ray", "cole", "ryan", "nathan", "nathaniel",
+    "zachary", "christopher", "christian", "christophe",
+    "andrew", "joshua", "matthew", "daniel", "anthony",
+    "thomas", "joseph", "steven", "stephen", "kenneth",
+    "edward", "timothy", "jason", "jeffrey", "scott",
+    "benjamin", "samuel", "raymond", "patrick", "alexander",
+    "jack", "dennis", "jerry", "tyler", "aaron", "jose",
+    "henry", "adam", "douglas", "nathan", "zachary", "walter",
+    "kyle", "harold", "carl", "arthur", "roger", "lawrence",
+    "terry", "albert", "jesse", "dylan", "bryan", "joe",
+    "jordan", "billy", "bruce", "russell", "ronald",
+    "philip", "craig", "alan", "shawn", "gary", "gerald",
+    "bobby", "johnny", "ricky", "tony", "tommy", "louis",
+    "wayne", "roy",
+    # Pet/shortened fanfic-common
+    "noah", "liam", "ethan", "mason", "caleb", "colton",
+    "hunter", "owen", "wyatt", "grayson", "levi", "ezra",
+    "jaxon", "asher", "carter", "landon", "blake",
 }
+
+
+# Single-gender canonical SURNAMES. Used when the speaker string has no
+# first name (e.g. the text tags them as just "Snape" or "McGonagall").
+# Only list surnames where ALL canonical characters with that surname
+# share one gender — ambiguous family names (Weasley, Potter, Malfoy,
+# Stark, Black) are deliberately omitted.
+_MALE_SURNAMES = {
+    "snape", "dumbledore", "hagrid", "voldemort", "riddle",
+    "filch", "slughorn", "lockhart", "moody", "flitwick",
+    "kingsley", "shacklebolt", "scrimgeour", "fudge",
+    "diggory", "krum", "ollivander", "xenophilius",
+    "grindelwald", "flamel", "dolohov", "yaxley", "greyback",
+    "pettigrew", "wormtail", "scabior", "bagman",
+    "quirrell", "karkaroff",
+    "gandalf", "aragorn", "legolas", "gimli", "elrond",
+    "saruman", "sauron", "bilbo", "frodo", "samwise",
+    "skywalker",  # ambiguous across Star Wars — but fic usage = Luke dominant
+    "kakashi", "itachi", "jiraiya", "orochimaru",
+    "naruto", "sasuke",
+    "grue", "regent", "armsmaster", "coil",
+}
+_FEMALE_SURNAMES = {
+    "mcgonagall", "umbridge", "pomfrey", "sprout", "hooch",
+    "trelawney", "sinistra", "vector", "burbage", "skeeter",
+    "bones", "delacour", "granger", "greengrass",
+    "parkinson", "bulstrode", "johnson", "spinnet", "bell",
+    "chang", "vane", "brown", "patil", "norris",  # Mrs. Norris
+    "tonks", "maxime", "pince", "padma",
+    "galadriel", "arwen", "eowyn",
+    "panacea",  # always Amy Dallon in Worm
+    "skitter",  # always Taylor Hebert in Worm
+    "tattletale",  # always Lisa Wilbourn in Worm
+    "targaryen",  # ambiguous but Daenerys dominant in fic — skip
+}
+_FEMALE_SURNAMES.discard("targaryen")  # explicit: surname is ambiguous
+
+
+def _strip_titles(parts):
+    """Strip leading honorifics/titles from a name's words.
+
+    Returns (remaining_parts, gender_hint_or_None). Gendered titles
+    (Mr., Mrs., Aunt, Sir, Lady, …) set the hint; neutral titles
+    (Professor, Doctor, Captain, …) are stripped without a hint.
+    """
+    hint = None
+    cleaned = list(parts)
+    while cleaned:
+        token = cleaned[0].lower().rstrip(".,:;!?'\u2019")
+        if token in _MALE_TITLES:
+            hint = hint or "male"
+            cleaned = cleaned[1:]
+        elif token in _FEMALE_TITLES:
+            hint = hint or "female"
+            cleaned = cleaned[1:]
+        elif token in _NEUTRAL_TITLES:
+            cleaned = cleaned[1:]
+        else:
+            break
+    return cleaned, hint
 
 
 def _guess_gender_from_name(name):
-    """Heuristic gender from first name patterns."""
-    first = name.split()[0].lower()
+    """Heuristic gender from a full speaker name string.
+
+    Priority: gendered title > first-name lookup > canonical surname
+    lookup > suffix heuristics. Returns None when ambiguous.
+    """
+    parts = name.split()
+    if not parts:
+        return None
+
+    parts, title_hint = _strip_titles(parts)
+    if title_hint:
+        return title_hint
+
+    if not parts:
+        return None
+
+    first = parts[0].lower().rstrip(".,:;!?'\u2019")
+    last = parts[-1].lower().rstrip(".,:;!?'\u2019") if len(parts) > 1 else None
 
     if first in _FEMALE_NAMES:
         return "female"
     if first in _MALE_NAMES:
         return "male"
 
-    # Suffix heuristics
+    # Canonical single-gender surname — only used when first name is
+    # unknown (avoid overriding a known first name with a weaker signal).
+    if last and last in _FEMALE_SURNAMES:
+        return "female"
+    if last and last in _MALE_SURNAMES:
+        return "male"
+    # If the speaker is tagged with JUST a surname (single token), check it.
+    if first in _FEMALE_SURNAMES:
+        return "female"
+    if first in _MALE_SURNAMES:
+        return "male"
+
+    # Suffix heuristics on the first name
     if first.endswith(_FEMALE_SUFFIXES) or first.endswith("a"):
         return "female"
 
