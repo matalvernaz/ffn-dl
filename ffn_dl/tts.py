@@ -370,8 +370,8 @@ class VoiceMapper:
         self.mapping[name] = voice
         return voice
 
-    def get(self, name):
-        return self.mapping.get(name, NARRATOR_VOICE)
+    def get(self, name, default=None):
+        return self.mapping.get(name, default or NARRATOR_VOICE)
 
 
 # ── Audio generation ──────────────────────────────────────────────
@@ -445,21 +445,31 @@ _TTS_CONCURRENCY = 5
 
 
 async def _generate_with_semaphore(sem, seg, voice, path, idx, ch_num):
-    """Generate one segment with a concurrency limiter."""
+    """Generate one segment with a concurrency limiter (retries up to 3 times)."""
     async with sem:
-        try:
-            ok = await _generate_segment_audio(seg, voice, path)
-            if ok and path.exists() and path.stat().st_size > 0:
-                return path
-        except Exception as exc:
-            logger.warning(
-                "TTS failed for segment %d (ch %d): %s", idx, ch_num, exc
-            )
+        for attempt in range(1, 4):
+            try:
+                ok = await _generate_segment_audio(seg, voice, path)
+                if ok and path.exists() and path.stat().st_size > 0:
+                    return path
+            except Exception as exc:
+                if attempt < 3:
+                    logger.debug(
+                        "TTS attempt %d/3 failed for segment %d (ch %d): %s",
+                        attempt, idx, ch_num, exc,
+                    )
+                    await asyncio.sleep(2)
+                else:
+                    logger.warning(
+                        "TTS failed after 3 attempts for segment %d (ch %d): %s",
+                        idx, ch_num, exc,
+                    )
     return None
 
 
-async def generate_chapter_audio(segments, voice_mapper, output_path, chapter_num=0):
+async def generate_chapter_audio(segments, voice_mapper, output_path, chapter_num=0, narrator_voice=None):
     """Generate audio for a full chapter's worth of segments."""
+    narrator = narrator_voice or NARRATOR_VOICE
     segments = _merge_small_segments(segments)
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="ffn-tts-"))
@@ -470,7 +480,7 @@ async def generate_chapter_audio(segments, voice_mapper, output_path, chapter_nu
     for i, seg in enumerate(segments):
         if not seg.text:
             continue
-        voice = voice_mapper.get(seg.speaker) if seg.speaker else NARRATOR_VOICE
+        voice = voice_mapper.get(seg.speaker, narrator) if seg.speaker else narrator
         seg_path = tmp_dir / f"seg_{i:06d}.mp3"
         tasks.append((i, seg_path, _generate_with_semaphore(
             sem, seg, voice, seg_path, i, chapter_num
@@ -609,13 +619,15 @@ def _check_ffmpeg():
         )
 
 
-def generate_audiobook(story, output_dir, progress_callback=None):
+def generate_audiobook(story, output_dir, progress_callback=None, narrator_voice=None):
     """Generate an M4B audiobook from a Story with character voice mapping.
 
+    narrator_voice overrides the default NARRATOR_VOICE constant.
     progress_callback(current_chapter, total_chapters, title) is called
     after each chapter is synthesized.
     """
     _check_ffmpeg()
+    narrator = narrator_voice or NARRATOR_VOICE
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -670,7 +682,7 @@ def generate_audiobook(story, output_dir, progress_callback=None):
             continue
 
         success = asyncio.run(
-            generate_chapter_audio(segs, mapper, ch_path, chapter_num=i)
+            generate_chapter_audio(segs, mapper, ch_path, chapter_num=i, narrator_voice=narrator)
         )
         if success:
             chapter_files.append(ch_path)

@@ -68,6 +68,17 @@ def _meta_fields(story: Story) -> list[tuple[str, str]]:
     fields.append(("Chapters", str(len(story.chapters))))
     if "words" in m:
         fields.append(("Words", m["words"]))
+        try:
+            total_words = int(m["words"].replace(",", ""))
+            total_minutes = max(1, round(total_words / 250))
+            if total_minutes >= 60:
+                hours, minutes = divmod(total_minutes, 60)
+                reading_time = f"{hours} hours {minutes} minutes"
+            else:
+                reading_time = f"{total_minutes} minutes"
+            fields.append(("Reading Time", reading_time))
+        except (ValueError, AttributeError):
+            pass
     if "date_updated" in m:
         fields.append(("Updated", _format_epoch(m["date_updated"])))
     elif "updated" in m:
@@ -176,9 +187,15 @@ def export_html(
             f.write(f"{row}\n")
         f.write("</table>\n<hr>\n")
 
-        for ch in story.chapters:
+        # Table of Contents
+        f.write('<nav id="toc">\n<h2>Table of Contents</h2>\n<ol>\n')
+        for i, ch in enumerate(story.chapters, 1):
+            f.write(f'<li><a href="#chapter-{i}">{escape(ch.title)}</a></li>\n')
+        f.write("</ol>\n</nav>\n<hr>\n")
+
+        for i, ch in enumerate(story.chapters, 1):
             ch_title = escape(ch.title)
-            f.write(f'<div class="chapter"><h2>{ch_title}</h2>\n')
+            f.write(f'<div class="chapter" id="chapter-{i}"><h2>{ch_title}</h2>\n')
             f.write(ch.html)
             f.write("\n</div><hr>\n")
 
