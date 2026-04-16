@@ -3,12 +3,25 @@
 import asyncio
 import json
 import logging
+import os
 import re
+import shutil
+import subprocess
+import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
 
 import edge_tts
+
+
+def _find_tool(name):
+    """Find ffmpeg/ffprobe — bundled with PyInstaller or on PATH."""
+    if getattr(sys, "frozen", False):
+        bundled = Path(sys._MEIPASS) / (name + (".exe" if os.name == "nt" else ""))
+        if bundled.exists():
+            return str(bundled)
+    return shutil.which(name) or name
 
 from .exporters import html_to_text
 from .models import Story
@@ -412,18 +425,15 @@ async def generate_chapter_audio(segments, voice_mapper, output_path, chapter_nu
         for sf in segment_files:
             f.write(f"file '{sf}'\n")
 
-    import subprocess
-
     result = subprocess.run(
         [
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            FFMPEG, "-y", "-f", "concat", "-safe", "0",
             "-i", str(list_file), "-c", "copy", str(output_path),
         ],
         capture_output=True,
     )
 
     # Clean up temp dir
-    import shutil
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if result.returncode != 0:
@@ -435,8 +445,6 @@ async def generate_chapter_audio(segments, voice_mapper, output_path, chapter_nu
 
 def build_m4b(chapter_files, story, output_path, cover_path=None):
     """Merge per-chapter MP3s into a single M4B with chapter markers."""
-    import subprocess
-
     if not chapter_files:
         return None
 
@@ -452,7 +460,7 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
     merged = tmp_dir / "merged.mp3"
     subprocess.run(
         [
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            FFMPEG, "-y", "-f", "concat", "-safe", "0",
             "-i", str(list_file), "-c", "copy", str(merged),
         ],
         capture_output=True,
@@ -473,7 +481,7 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
             # Get duration using ffprobe
             probe = subprocess.run(
                 [
-                    "ffprobe", "-v", "quiet", "-show_entries",
+                    FFPROBE, "-v", "quiet", "-show_entries",
                     "format=duration", "-of", "csv=p=0", str(cf),
                 ],
                 capture_output=True,
@@ -492,7 +500,7 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
 
     # Convert to M4B (AAC in M4A container) with chapter metadata
     cmd = [
-        "ffmpeg", "-y",
+        FFMPEG, "-y",
         "-i", str(merged),
         "-i", str(chapters_meta),
         "-map_metadata", "1",
@@ -518,13 +526,14 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
 # ── Main entry point ──────────────────────────────────────────────
 
 
+FFMPEG = _find_tool("ffmpeg")
+FFPROBE = _find_tool("ffprobe")
+
+
 def _check_ffmpeg():
     """Verify ffmpeg is available, raise a helpful error if not."""
-    import subprocess
     try:
-        subprocess.run(
-            ["ffmpeg", "-version"], capture_output=True, check=True
-        )
+        subprocess.run([FFMPEG, "-version"], capture_output=True, check=True)
     except FileNotFoundError:
         raise RuntimeError(
             "ffmpeg is required for audiobook generation but was not found.\n"
