@@ -15,6 +15,8 @@ dependencies = [
 
 [project.optional-dependencies]
 epub = ["ebooklib>=0.18"]
+audio = ["edge-tts>=7.0"]
+all = ["ebooklib>=0.18", "edge-tts>=7.0"]
 
 [project.scripts]
 ffn-dl = "ffn_dl.cli:main"

@@ -51,10 +51,11 @@ def main(argv=None):
         metavar="FILE",
         help="Update an existing file — reads source URL, downloads new chapters",
     )
+    all_formats = sorted(EXPORTERS) + ["audio"]
     parser.add_argument(
         "-f",
         "--format",
-        choices=sorted(EXPORTERS),
+        choices=all_formats,
         default=None,
         help="Output format (default: epub, or inferred from --update file)",
     )
@@ -199,8 +200,19 @@ def main(argv=None):
             print("\n  Re-exporting full story...")
             story = scraper.download(url, skip_chapters=0)
 
-        exporter = EXPORTERS[args.format]
-        path = exporter(story, str(output_dir), template=args.name)
+        if args.format == "audio":
+            from .tts import generate_audiobook
+
+            def audio_progress(current, total, title):
+                print(f"  Synthesizing [{current}/{total}] {title}")
+
+            print("\nGenerating audiobook...")
+            path = generate_audiobook(
+                story, str(output_dir), progress_callback=audio_progress
+            )
+        else:
+            exporter = EXPORTERS[args.format]
+            path = exporter(story, str(output_dir), template=args.name)
         print(f"\nSaved to: {path}")
 
         if args.clean_cache:
