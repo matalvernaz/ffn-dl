@@ -48,11 +48,14 @@ class FicWadScraper(BaseScraper):
 
         author_span = storylist.find("span", class_="author")
         author = "Unknown Author"
+        author_url = ""
         if author_span:
             a_tag = author_span.find("a")
             author = a_tag.get_text(strip=True) if a_tag else author_span.get_text(strip=True)
             if author.lower().startswith("by"):
                 author = author[2:].strip()
+            if a_tag and a_tag.get("href"):
+                author_url = FICWAD_BASE + a_tag["href"]
 
         summary_bq = storylist.find("blockquote", class_="summary")
         summary = summary_bq.get_text(strip=True) if summary_bq else ""
@@ -98,6 +101,7 @@ class FicWadScraper(BaseScraper):
         return {
             "title": title,
             "author": author,
+            "author_url": author_url,
             "summary": summary,
             "extra": extra,
         }
@@ -192,6 +196,7 @@ class FicWadScraper(BaseScraper):
             author=meta["author"],
             summary=meta["summary"],
             url=story_url,
+            author_url=meta.get("author_url", ""),
             metadata=meta["extra"],
         )
 

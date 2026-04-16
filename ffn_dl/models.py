@@ -17,5 +17,6 @@ class Story:
     author: str
     summary: str
     url: str
+    author_url: str = ""
     chapters: list[Chapter] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)

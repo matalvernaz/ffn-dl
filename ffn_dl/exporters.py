@@ -1,6 +1,7 @@
 """Export a Story to EPUB, HTML, or plain text."""
 
 import re
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 
@@ -17,12 +18,7 @@ def _safe_filename(name):
 
 
 def format_filename(story: Story, template: str = DEFAULT_TEMPLATE) -> str:
-    """Build a filename (no extension) from a template and story metadata.
-
-    Supported placeholders:
-        {title}  {author}  {id}  {words}  {status}  {rating}
-        {language}  {chapters}
-    """
+    """Build a filename (no extension) from a template and story metadata."""
     fields = {
         "title": story.title,
         "author": story.author,
@@ -43,19 +39,55 @@ def format_filename(story: Story, template: str = DEFAULT_TEMPLATE) -> str:
     return _safe_filename(raw)
 
 
+# ── Metadata helpers ──────────────────────────────────────────────
+
+
+def _format_epoch(ts):
+    """Format an epoch timestamp as YYYY-MM-DD."""
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def _meta_fields(story: Story) -> list[tuple[str, str]]:
+    """Return an ordered list of (label, value) pairs for the story header."""
+    m = story.metadata
+    fields = []
+    fields.append(("Title", story.title))
+    fields.append(("Author", story.author))
+    if "category" in m:
+        fields.append(("Category", m["category"]))
+    if "genre" in m:
+        fields.append(("Genre", m["genre"].replace(",", ", ")))
+    if "characters" in m:
+        fields.append(("Characters", m["characters"]))
+    if story.summary:
+        fields.append(("Summary", story.summary))
+    if "status" in m:
+        fields.append(("Status", m["status"]))
+    if "rating" in m:
+        fields.append(("Rating", m["rating"]))
+    fields.append(("Chapters", str(len(story.chapters))))
+    if "words" in m:
+        fields.append(("Words", m["words"]))
+    if "date_updated" in m:
+        fields.append(("Updated", _format_epoch(m["date_updated"])))
+    elif "updated" in m:
+        fields.append(("Updated", m["updated"]))
+    if "date_published" in m:
+        fields.append(("Published", _format_epoch(m["date_published"])))
+    elif "published" in m:
+        fields.append(("Published", m["published"]))
+    fields.append(("Downloaded", datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")))
+    fields.append(("Source", story.url))
+    return fields
+
+
 # ── HTML → plain-text converter ───────────────────────────────────
 
 
 def html_to_text(html: str) -> str:
-    """Convert chapter HTML to readable plain text.
-
-    Preserves paragraph breaks, scene breaks (<hr>), and line breaks (<br>).
-    Inline tags (<em>, <strong>, etc.) stay inline instead of being split
-    onto separate lines.
-    """
+    """Convert chapter HTML to readable plain text."""
     soup = BeautifulSoup(html, "html.parser")
 
-    # Replace <br> with newline markers before extracting text
     for br in soup.find_all("br"):
         br.replace_with("\n")
 
@@ -69,7 +101,6 @@ def html_to_text(html: str) -> str:
             if child.name == "hr":
                 parts.append("* * *")
             else:
-                # get_text() correctly inlines <em>, <strong>, <span>, etc.
                 text = child.get_text().strip()
                 if text:
                     parts.append(text)
@@ -87,11 +118,8 @@ def export_txt(
     path = Path(output_dir) / filename
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write(f"{story.title}\n")
-        f.write(f"by {story.author}\n\n")
-        if story.summary:
-            f.write(f"Summary: {story.summary}\n")
-        f.write(f"Source: {story.url}\n")
+        for label, value in _meta_fields(story):
+            f.write(f"{label}: {value}\n")
         f.write("=" * 60 + "\n")
 
         for ch in story.chapters:
@@ -109,29 +137,44 @@ def export_html(
 
     title_esc = escape(story.title)
     author_esc = escape(story.author)
-    summary_esc = escape(story.summary)
+
+    # Build the metadata table rows — Author and Source are links
+    meta_rows = []
+    for label, value in _meta_fields(story):
+        val_esc = escape(value)
+        if label == "Author" and story.author_url:
+            cell = f'<a href="{escape(story.author_url)}">{val_esc}</a>'
+        elif label == "Source":
+            cell = f'<a href="{escape(value)}">{val_esc}</a>'
+        elif label == "Summary":
+            cell = f'<em>{val_esc}</em>'
+        else:
+            cell = val_esc
+        meta_rows.append(f"<tr><th>{label}</th><td>{cell}</td></tr>")
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(
-            f"<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
+            f'<!DOCTYPE html>\n<html lang="en">\n<head>\n'
             f'<meta charset="utf-8">\n'
             f"<title>{title_esc} by {author_esc}</title>\n"
             f"<style>\n"
             f"body{{max-width:800px;margin:2em auto;padding:0 1em;"
             f"font-family:Georgia,serif;line-height:1.6}}\n"
             f"h1{{text-align:center}}\n"
-            f".author{{text-align:center;color:#555}}\n"
-            f".summary{{font-style:italic;border-left:3px solid #ccc;"
-            f"padding-left:1em;margin:1em 0}}\n"
+            f".meta-table{{border-collapse:collapse;margin:1em 0;width:100%}}\n"
+            f".meta-table th{{text-align:right;padding:.25em 1em .25em 0;"
+            f"vertical-align:top;white-space:nowrap;color:#555}}\n"
+            f".meta-table td{{padding:.25em 0;vertical-align:top}}\n"
             f".chapter{{margin:2em 0}}\n"
             f".chapter h2{{border-bottom:1px solid #ddd;padding-bottom:.3em}}\n"
+            f"a{{color:#36c}}\n"
             f"</style>\n</head>\n<body>\n"
             f"<h1>{title_esc}</h1>\n"
-            f'<p class="author">by {author_esc}</p>\n'
+            f'<table class="meta-table">\n'
         )
-        if story.summary:
-            f.write(f'<p class="summary">{summary_esc}</p>\n')
-        f.write("<hr>\n")
+        for row in meta_rows:
+            f.write(f"{row}\n")
+        f.write("</table>\n<hr>\n")
 
         for ch in story.chapters:
             ch_title = escape(ch.title)
@@ -158,7 +201,6 @@ def _fetch_cover_image(cover_url):
     return None
 
 
-# ISO 639-1 mapping for common FFN languages
 _LANG_CODES = {
     "english": "en", "spanish": "es", "french": "fr", "german": "de",
     "italian": "it", "portuguese": "pt", "russian": "ru", "japanese": "ja",
@@ -187,24 +229,18 @@ def export_epub(
     book.add_metadata("DC", "source", story.url)
     book.add_metadata("DC", "publisher", "fanfiction.net")
 
-    # Language — map to ISO 639-1 code
     lang = meta.get("language", "English")
     book.set_language(_LANG_CODES.get(lang.lower(), "en"))
 
-    # Dates from epoch timestamps
-    from datetime import datetime, timezone
-
     if "date_published" in meta:
-        dt = datetime.fromtimestamp(meta["date_published"], tz=timezone.utc)
-        book.add_metadata("DC", "date", dt.strftime("%Y-%m-%d"))
+        book.add_metadata("DC", "date", _format_epoch(meta["date_published"]))
     if "date_updated" in meta:
         dt = datetime.fromtimestamp(meta["date_updated"], tz=timezone.utc)
         book.add_metadata("DC", "modified", dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
-    # Subject tags — genres, characters, rating, status (shows up in Calibre)
     tags = []
     if "genre" in meta:
-        tags.extend(g.strip() for g in meta["genre"].split("/"))
+        tags.extend(g.strip() for g in re.split(r"[/,]", meta["genre"]))
     if "characters" in meta:
         tags.extend(c.strip() for c in meta["characters"].split(","))
     if "rating" in meta:
@@ -215,7 +251,6 @@ def export_epub(
         if tag:
             book.add_metadata("DC", "subject", tag)
 
-    # Calibre series metadata (use story title as series if multi-chapter)
     if len(story.chapters) > 1:
         book.add_metadata(
             None, "meta", "", {"name": "calibre:series", "content": story.title}
@@ -224,29 +259,49 @@ def export_epub(
             None, "meta", "", {"name": "calibre:series_index", "content": "1"}
         )
 
-    # Cover image
     cover_url = meta.get("cover_url")
     if cover_url:
         result = _fetch_cover_image(cover_url)
         if result:
             img_bytes, media_type = result
             ext = "jpg" if "jpeg" in media_type else media_type.split("/")[-1]
-            cover_item = epub.EpubItem(
-                uid="cover-image",
-                file_name=f"images/cover.{ext}",
-                media_type=media_type,
-                content=img_bytes,
-            )
-            book.add_item(cover_item)
             book.set_cover(f"images/cover.{ext}", img_bytes)
 
     css = epub.EpubItem(
         uid="style",
         file_name="style/default.css",
         media_type="text/css",
-        content=b"body{font-family:Georgia,serif;line-height:1.6}",
+        content=b"body{font-family:Georgia,serif;line-height:1.6}"
+        b"table{border-collapse:collapse;margin:1em 0}"
+        b"th{text-align:right;padding:.25em 1em .25em 0;vertical-align:top;color:#555}"
+        b"td{padding:.25em 0;vertical-align:top}"
+        b"a{color:#36c}",
     )
     book.add_item(css)
+
+    # Title page with metadata
+    title_page = epub.EpubHtml(
+        title="Title Page", file_name="title.xhtml", lang="en"
+    )
+    rows = []
+    for label, value in _meta_fields(story):
+        val_esc = escape(value)
+        if label == "Author" and story.author_url:
+            cell = f'<a href="{escape(story.author_url)}">{val_esc}</a>'
+        elif label == "Source":
+            cell = f'<a href="{escape(value)}">{val_esc}</a>'
+        elif label == "Summary":
+            cell = f"<em>{val_esc}</em>"
+        else:
+            cell = val_esc
+        rows.append(f"<tr><th>{label}</th><td>{cell}</td></tr>")
+    title_html = (
+        f"<h1>{escape(story.title)}</h1>\n"
+        f'<table>\n{"".join(rows)}\n</table>'
+    )
+    title_page.content = title_html.encode("utf-8")
+    title_page.add_item(css)
+    book.add_item(title_page)
 
     epub_chapters = []
     for ch in story.chapters:
@@ -261,10 +316,10 @@ def export_epub(
         book.add_item(ec)
         epub_chapters.append(ec)
 
-    book.toc = epub_chapters
+    book.toc = [title_page] + epub_chapters
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
-    book.spine = ["nav"] + epub_chapters
+    book.spine = ["nav", title_page] + epub_chapters
 
     filename = format_filename(story, template) + ".epub"
     path = Path(output_dir) / filename

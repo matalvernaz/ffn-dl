@@ -238,6 +238,16 @@ class FFNScraper(BaseScraper):
 
         author_tag = profile.find("a", class_="xcontrast_txt", href=re.compile(r"/u/"))
         author = author_tag.get_text(strip=True) if author_tag else "Unknown Author"
+        author_url = ""
+        if author_tag and author_tag.get("href"):
+            author_url = FFN_BASE + author_tag["href"]
+
+        # Category / fandom from breadcrumb links above the profile
+        pre_links = soup.find(id="pre_story_links")
+        category = ""
+        if pre_links:
+            cat_parts = [a.get_text(strip=True) for a in pre_links.find_all("a")]
+            category = " > ".join(cat_parts) if cat_parts else ""
 
         summary_div = profile.find("div", class_="xcontrast_txt", style=True)
         summary = summary_div.get_text(strip=True) if summary_div else ""
@@ -266,6 +276,8 @@ class FFNScraper(BaseScraper):
         extra = {}
         if cover_url:
             extra["cover_url"] = cover_url
+        if category:
+            extra["category"] = category
 
         meta_span = profile.find("span", class_="xgray")
         if meta_span:
@@ -308,6 +320,7 @@ class FFNScraper(BaseScraper):
         return {
             "title": title,
             "author": author,
+            "author_url": author_url,
             "summary": summary,
             "num_chapters": num_chapters,
             "chapter_titles": {str(k): v for k, v in chapter_titles.items()},
@@ -341,6 +354,7 @@ class FFNScraper(BaseScraper):
             author=meta["author"],
             summary=meta["summary"],
             url=story_url,
+            author_url=meta.get("author_url", ""),
             metadata=meta["extra"],
         )
 
