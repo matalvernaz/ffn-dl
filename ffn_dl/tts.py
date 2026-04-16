@@ -106,10 +106,12 @@ EMOTION_PROSODY = {
 # ── Dialogue parsing ──────────────────────────────────────────────
 
 
-# Match quoted speech — handles straight, curly, and mixed quote styles
+# Match quoted speech — handles straight, curly, and mixed quote styles.
+# Minimum 2 chars so short exclamations ("Hi!", "No!", "Box?") still
+# register as dialogue.
 _ANY_QUOTE = '[\"\u201c\u201d]'
 _DIALOGUE_RE = re.compile(
-    rf'{_ANY_QUOTE}(?P<speech>[^\"\u201c\u201d]{{5,}}){_ANY_QUOTE}'
+    rf'{_ANY_QUOTE}(?P<speech>[^\"\u201c\u201d]{{2,}}){_ANY_QUOTE}'
 )
 
 # After a closing quote: "dialogue," Name verbed  OR  "dialogue," verbed Name
@@ -152,8 +154,11 @@ _BEFORE_ATTRIB = re.compile(
     r'\s+(?P<verb>\w+)\s*,\s*$'
 )
 
-# Common attribution verbs
+# Common attribution verbs. Fanfic writers reach for non-speech verbs
+# ("pressed", "nodded", "grinned") to tag dialogue more often than
+# traditional fiction, so this list is deliberately broad.
 _SPEECH_VERBS = {
+    # Canonical speech
     "said", "asked", "replied", "answered", "whispered", "murmured",
     "muttered", "shouted", "yelled", "screamed", "exclaimed", "cried",
     "called", "told", "added", "continued", "began", "suggested",
@@ -164,18 +169,53 @@ _SPEECH_VERBS = {
     "observed", "commented", "declared", "announced", "explained",
     "offered", "interrupted", "repeated", "admitted", "confessed",
     "acknowledged", "rasped", "breathed", "grunted", "stated",
+    # Commands / emphasis
     "ordered", "commanded", "barked", "scolded", "warned", "chided",
     "teased", "retorted", "countered", "responded", "intoned",
+    "pressed", "prodded", "pushed", "urged", "prompted",
+    # Manner
     "drawled", "mumbled", "complained", "whined", "grumbled",
     "gasped", "snorted", "scoffed", "huffed", "sneered", "spat",
     "pleaded", "begged", "prayed", "greeted", "crooned", "cooed",
     "lisped", "spluttered", "babbled", "squeaked", "squealed",
     "piped", "chirped", "quipped", "boasted", "bragged", "promised",
-    "vowed", "swore", "confided", "admitted", "asserted", "argued",
-    "cautioned", "prompted", "urged", "insisted", "reminded",
+    "vowed", "swore", "confided", "asserted", "argued",
+    "cautioned", "reminded",
     "assured", "reassured", "soothed", "coaxed", "consoled",
     "reasoned", "clarified", "elaborated", "finished", "concluded",
-    "agreed", "corrected", "apologized", "apologised",
+    "corrected", "apologized", "apologised",
+    # Fanfic-style verbs — non-verbal actions commonly paired with a
+    # quote to attribute it. We accept these to avoid losing speakers
+    # like "…" Lee pressed, "…" Harry nodded.
+    "nodded", "shook",  # "he shook his head"
+    "grinned", "smirked", "smiled", "beamed", "frowned", "grimaced",
+    "scowled", "pouted", "blinked", "shrugged", "gestured",
+    "nodded", "glared",
+    "called", "yelled", "crowed", "cackled", "roared",
+    "sang", "hummed",
+    "wondered", "mused", "speculated", "thought", "pondered",
+    "inquired", "queried", "quizzed", "questioned",
+    "repeated", "reiterated", "echoed", "parroted",
+    "conceded", "conceded", "concurred", "yielded",
+    "spoke", "voiced", "uttered", "exhaled", "inhaled",
+    "informed", "notified", "instructed", "directed",
+    "suggested", "proposed", "recommended",
+    "began", "started", "resumed", "ended", "stopped",
+    "interjected", "cut", "butted",  # "butted in"
+    "drawled", "purred", "rumbled",
+    "hollered", "whooped",
+    "trailed", "faltered", "finished",
+    "agreed", "disagreed", "confirmed", "denied",
+    "supplied", "volunteered", "ventured",
+    "commented", "opined", "noted",
+    "acknowledged", "conceded",
+    "huffed", "chuckled", "snickered", "tittered",
+    "translated", "recited", "dictated", "read",
+    "deadpanned", "drawled",
+    "accused", "challenged", "defended",
+    "soothed",
+    # "-ed" narrations that often take dialogue in fanfic
+    "breathed", "whispered", "hissed", "growled",
 }
 
 
@@ -191,7 +231,69 @@ class Segment:
 _PRONOUNS = {"he", "she", "they", "it"}
 # Proper-name regex: allows internal caps (McGonagall, MacKenzie, O'Brien)
 # and apostrophes. Length ≥ 3 so 2-letter abbreviations (Mr, Dr) are skipped.
+# Also matches possessive forms ("Harry's") — _strip_possessive below
+# normalizes them before use.
 _PROPER_NAME_RE = re.compile(r"\b([A-Z][a-zA-Z']{1,}[a-z])\b")
+
+
+def _is_possessive(name):
+    return name.endswith("'s") or name.endswith("\u2019s")
+
+
+def _strip_possessive(name):
+    if name.endswith("'s") or name.endswith("\u2019s"):
+        return name[:-2]
+    return name
+
+
+# Common capitalized English words that regularly appear at sentence
+# starts and get falsely detected as character names. Includes vocatives
+# inside dialogue and typical narrator interjections.
+_SENTENCE_STARTERS = {
+    # Articles / demonstratives / pronouns (capitalized sentence-start)
+    "The", "This", "That", "These", "Those", "But", "And", "Or",
+    "She", "His", "Her", "Him", "They", "Their", "Them", "You", "Your",
+    "Our", "Ours", "Its", "It", "We", "Us", "My", "Mine",
+    # Adverbs / conjunctions that often start a sentence
+    "Then", "When", "What", "How", "Not", "Now", "Yes", "No",
+    "Well", "So", "If", "While", "Since", "Once", "Twice",
+    "Perhaps", "Maybe", "Somehow", "Sometimes", "Often", "Always",
+    "Never", "Rarely", "Just", "Only", "Only", "Barely",
+    "After", "Before", "During", "Until", "Unless",
+    "Actually", "Apparently", "Obviously", "Clearly",
+    "Most", "Mostly", "Some", "Many", "Few", "All", "Each", "Every",
+    "Either", "Neither", "Both",
+    "Are", "Is", "Was", "Were", "Be", "Being", "Been",
+    "Do", "Does", "Did", "Has", "Have", "Had",
+    "Can", "Could", "Will", "Would", "Shall", "Should", "May", "Might",
+    "Good", "Bad", "Great", "Nice", "Fine", "Okay", "Right",
+    "Hey", "Hi", "Hello", "Oh", "Oi", "Eh", "Ah", "Aha",
+    # Common vocatives inside dialogue
+    "Boys", "Girls", "Children", "Kids", "Gentlemen",
+    "Ladies", "Everyone", "Anyone", "Someone", "Nobody",
+    "Friends", "Folks", "Lads", "Lasses", "Guys", "Fellas",
+    # Common narrator-side fragments / typos
+    "Yeah", "Yep", "Yup", "Nope", "Nah",
+    # Short action / verb-ish words often mistaken
+    "Run", "Go", "Come", "Stop", "Wait", "Stay", "Look",
+    "Dead", "Alive", "Lost", "Found",
+    "Head", "Hand", "Back", "Side", "Front",
+    "Hook", "Tooth", "Nail", "Book", "Page", "Line", "Chapter",
+    # Adjectives/nationalities often capitalised mid-sentence that are
+    # not characters by themselves in most fic.
+    "French", "English", "Spanish", "Italian", "German", "Russian",
+    "Chinese", "Japanese", "American", "British", "Irish", "Scottish",
+    "Welsh", "Indian", "African", "European", "Asian",
+    "Bulgarian", "Romanian", "Hungarian", "Polish", "Greek",
+    # Common HP location nouns that aren't characters
+    "Hogwarts", "Gryffindor", "Slytherin", "Ravenclaw", "Hufflepuff",
+    "Diagon", "Hogsmeade", "Azkaban",
+    # Month / day names
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+    "Saturday", "Sunday",
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+}
 
 # Honorifics/titles that should NOT be treated as standalone character
 # names when resolving a pronoun back to a speaker.
@@ -244,22 +346,19 @@ def parse_segments(text):
             window = text[max(0, match.start() - 200) : match.start()]
             # Find all (start_offset, name) tuples
             matches = [(m.start(), m.group(1)) for m in _PROPER_NAME_RE.finditer(window)]
-            skip = {"The", "This", "That", "But", "And", "She", "His",
-                    "Her", "They", "Then", "When", "What", "How", "Not",
-                    # Common vocatives inside dialogue that get
-                    # mistaken for narrator-side proper nouns:
-                    "Boys", "Girls", "Children", "Kids", "Gentlemen",
-                    "Ladies", "Everyone", "Anyone", "Someone", "Nobody",
-                    "Friends", "Folks", "Lads", "Lasses", "Guys",
-                    "Yeah", "Well", "Oh", "Hey", "Hi", "Hello"}
-            # Drop honorifics and common non-name words
+            # Drop honorifics, common non-name capitalized words, and
+            # vocatives that get matched inside dialogue.
             candidates = [
                 (pos, n) for pos, n in matches
-                if n not in skip and n not in _NAME_SKIP_TITLES
+                if n not in _SENTENCE_STARTERS
+                and n not in _NAME_SKIP_TITLES
+                and not _is_possessive(n)
             ]
             if not candidates:
                 return last_speaker
             pos, name = candidates[-1]
+            # Strip possessive 's so "Harry's" resolves to "Harry"
+            name = _strip_possessive(name)
             # If a title word immediately precedes this name, include it.
             preceding = window[max(0, pos - 20):pos].rstrip()
             for title in _NAME_SKIP_TITLES:
@@ -268,12 +367,35 @@ def parse_segments(text):
                     return f"{title} {name}"
             return name
 
+        def _clean_speaker(raw_name):
+            """Normalize a captured speaker name: strip possessive 's,
+            reject common sentence starters / bare titles, keep titled
+            names intact."""
+            if not raw_name:
+                return None
+            raw_name = _strip_possessive(raw_name.strip())
+            # Reject single-word sentence starters / noise
+            if raw_name in _SENTENCE_STARTERS:
+                return None
+            # Reject a bare honorific with no following name
+            if raw_name in _NAME_SKIP_TITLES:
+                return None
+            # If the first word of a multi-word name is a sentence
+            # starter ("Not Percy", "Now Harry"), drop the starter —
+            # the rest is the real name.
+            tokens = raw_name.split()
+            while tokens and tokens[0] in _SENTENCE_STARTERS:
+                tokens = tokens[1:]
+            if not tokens:
+                return None
+            return " ".join(tokens)
+
         am = _AFTER_NAME_VERB.match(after_text)
         if am and am.group("verb").lower() in _SPEECH_VERBS:
             name = am.group("name")
             verb = am.group("verb").lower()
             if name.lower() not in _PRONOUNS:
-                speaker = name
+                speaker = _clean_speaker(name)
             else:
                 speaker = _resolve_pronoun()
             emotion = EMOTION_MAP.get(verb)
@@ -285,7 +407,7 @@ def parse_segments(text):
                 name = am.group("name")
                 verb = am.group("verb").lower()
                 if name.lower() not in _PRONOUNS:
-                    speaker = name
+                    speaker = _clean_speaker(name)
                 else:
                     speaker = _resolve_pronoun()
                 emotion = EMOTION_MAP.get(verb)
@@ -295,8 +417,21 @@ def parse_segments(text):
             before_text = text[max(0, match.start() - 80) : match.start()]
             bm = _BEFORE_ATTRIB.search(before_text)
             if bm and bm.group("verb").lower() in _SPEECH_VERBS:
-                speaker = bm.group("name")
+                speaker = _clean_speaker(bm.group("name"))
                 emotion = EMOTION_MAP.get(bm.group("verb").lower())
+
+        # Consecutive-quote fallback: if this dialogue has no attribution
+        # and the text between it and the previous quote is just
+        # whitespace (or very short connective narration like " "), it
+        # is most likely the same speaker continuing.
+        if not speaker and last_speaker:
+            pre_text = text[pos : match.start()]
+            # "Just whitespace" OR "only a couple words of prose between"
+            # — be conservative: ≤15 non-whitespace chars.
+            stripped = pre_text.strip()
+            non_ws = len(stripped)
+            if non_ws <= 15:
+                speaker = last_speaker
 
         if speaker:
             last_speaker = speaker
@@ -684,6 +819,87 @@ def _guess_gender_from_name(name):
     return None  # ambiguous
 
 
+def consolidate_speakers(speaker_counts):
+    """Merge short and long name variants referring to the same
+    character within a single story.
+
+    Input:  dict / Counter of {speaker_name: count}
+    Output: (canonical_name_map, merged_counts)
+      - canonical_name_map: {original_name: canonical_name}
+      - merged_counts: {canonical_name: total_count} (after merging)
+
+    Rules:
+    - Strip possessive "'s" (already done upstream, but done again
+      defensively).
+    - For each single-word speaker (e.g. "Ron"), if there is EXACTLY
+      one multi-word speaker whose first OR last word matches it,
+      merge the short form into the long form (e.g. "Ron" +
+      "Ron Weasley" → "Ron Weasley"). The long form wins because it
+      disambiguates.
+    - Last-name merging is skipped when the surname is ambiguous
+      (Weasley, Potter, Black, etc. — families with multiple members).
+    """
+    # Surnames where multiple canonical characters share them — never
+    # merge on this basis alone.
+    AMBIGUOUS_SURNAMES = {
+        "weasley", "potter", "malfoy", "black", "longbottom",
+        "granger", "dursley", "stark", "targaryen", "lannister",
+        "baratheon", "tully", "tyrell", "greyjoy", "bolton",
+        "parkinson", "greengrass", "scamander",
+    }
+
+    canonical = {}
+    # Build candidate map: short-name → list of (long_name, count)
+    by_first = {}
+    by_last = {}
+    multi_word = []
+    for name, cnt in speaker_counts.items():
+        clean = _strip_possessive(name).strip()
+        tokens = clean.split()
+        if len(tokens) == 1:
+            continue
+        # Strip leading titles when indexing so "Mrs. Weasley" indexes
+        # as both "Mrs" (title) and "Weasley".
+        stripped_tokens, _ = _strip_titles(tokens)
+        if not stripped_tokens:
+            continue
+        first = stripped_tokens[0]
+        last = stripped_tokens[-1] if len(stripped_tokens) > 1 else None
+        multi_word.append((clean, cnt, first, last))
+        by_first.setdefault(first, []).append((clean, cnt))
+        if last and last != first:
+            by_last.setdefault(last, []).append((clean, cnt))
+
+    for name, cnt in speaker_counts.items():
+        clean = _strip_possessive(name).strip()
+        tokens = clean.split()
+        if len(tokens) > 1:
+            canonical[name] = clean
+            continue
+        # Single-word speaker. Try to merge into a multi-word variant.
+        token = tokens[0]
+        token_low = token.lower()
+        first_matches = by_first.get(token, [])
+        last_matches = by_last.get(token, [])
+        # If surname is ambiguous and token is that surname, don't merge
+        if token_low in AMBIGUOUS_SURNAMES and not first_matches:
+            canonical[name] = clean
+            continue
+        # Prefer first-name matches (more specific) — merge if exactly 1
+        if len(first_matches) == 1:
+            canonical[name] = first_matches[0][0]
+        elif len(last_matches) == 1 and token_low not in AMBIGUOUS_SURNAMES:
+            canonical[name] = last_matches[0][0]
+        else:
+            canonical[name] = clean
+
+    merged = Counter()
+    for name, cnt in speaker_counts.items():
+        merged[canonical[name]] += cnt
+
+    return canonical, merged
+
+
 def detect_character_genders(full_text, characters):
     """Detect gender using name heuristics first, pronouns as fallback."""
     genders = {}
@@ -1044,17 +1260,28 @@ def generate_audiobook(story, output_dir, progress_callback=None, narrator_voice
         all_segments.append(segs)
 
     # Count character mentions across all chapters
-    char_counts = Counter()
+    raw_char_counts = Counter()
     for segs in all_segments:
         for seg in segs:
             if seg.speaker:
-                char_counts[seg.speaker] += 1
+                raw_char_counts[seg.speaker] += 1
+
+    # Merge short/long name variants so Ron, Ron Weasley, Weasley all
+    # map to the same voice within this story.
+    canonical_map, char_counts = consolidate_speakers(raw_char_counts)
+    if canonical_map:
+        # Rewrite each segment's speaker to the canonical form.
+        for segs in all_segments:
+            for seg in segs:
+                if seg.speaker and seg.speaker in canonical_map:
+                    seg.speaker = canonical_map[seg.speaker]
 
     # Only assign voices to characters with 2+ dialogue instances
     characters = [name for name, count in char_counts.most_common() if count >= 2]
     genders = detect_character_genders(full_text, characters)
 
-    logger.info("Detected %d speaking characters", len(characters))
+    logger.info("Detected %d speaking characters (merged from %d raw)",
+                len(characters), len(raw_char_counts))
     for name in characters[:15]:
         gender = genders.get(name, "neutral")
         voice = mapper.assign(name, gender)
