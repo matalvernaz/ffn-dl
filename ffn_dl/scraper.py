@@ -1,4 +1,4 @@
-"""HTTP fetching, HTML parsing, and rate-limit handling for fanfiction.net."""
+"""Base scraper with HTTP fetching, caching, and rate-limit handling."""
 
 import json
 import logging
@@ -14,9 +14,6 @@ from .models import Chapter, Story
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://www.fanfiction.net"
-
-# Impersonation targets for curl_cffi — rotated on rate-limit retries
 BROWSERS = ["chrome", "chrome", "safari", "edge"]
 
 
@@ -33,14 +30,15 @@ class CloudflareBlockError(Exception):
 
 
 def _default_cache_dir():
-    """Return ~/.cache/ffn-dl, creating it if needed."""
     path = Path.home() / ".cache" / "ffn-dl"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-class FFNScraper:
-    """Scraper for fanfiction.net with rate-limit handling and CF bypass."""
+class BaseScraper:
+    """Shared HTTP, retry, and cache logic for all site scrapers."""
+
+    site_name = "unknown"
 
     def __init__(
         self,
@@ -68,18 +66,14 @@ class FFNScraper:
         logger.debug("Rotated to browser impersonation: %s", self._browser)
 
     def _check_for_blocks(self, html):
-        """Detect Cloudflare challenge pages or soft blocks."""
         lower = html[:2000].lower()
         if "just a moment" in lower and "cloudflare" in lower:
             raise CloudflareBlockError(
                 "Cloudflare challenge detected. "
                 "Try increasing delays or waiting before retrying."
             )
-        if "<title>Story Not Found</title>" in html:
-            raise StoryNotFoundError("Story does not exist or has been removed.")
 
     def _fetch(self, url):
-        """Fetch a URL with retries and exponential backoff on rate limits."""
         backoff = 30
         for attempt in range(self.max_retries):
             try:
@@ -87,16 +81,15 @@ class FFNScraper:
             except curl_requests.errors.ConnectionError as exc:
                 logger.warning(
                     "Connection error (attempt %d/%d): %s",
-                    attempt + 1,
-                    self.max_retries,
-                    exc,
+                    attempt + 1, self.max_retries, exc,
                 )
                 time.sleep(backoff + random.uniform(0, 5))
                 backoff = min(backoff * 2, 300)
                 continue
             except curl_requests.errors.Timeout:
                 logger.warning(
-                    "Request timed out (attempt %d/%d)", attempt + 1, self.max_retries
+                    "Request timed out (attempt %d/%d)",
+                    attempt + 1, self.max_retries,
                 )
                 time.sleep(10)
                 continue
@@ -110,10 +103,7 @@ class FFNScraper:
                 wait = backoff + jitter
                 logger.warning(
                     "Rate limited (HTTP %d), waiting %.0fs (attempt %d/%d)",
-                    resp.status_code,
-                    wait,
-                    attempt + 1,
-                    self.max_retries,
+                    resp.status_code, wait, attempt + 1, self.max_retries,
                 )
                 time.sleep(wait)
                 backoff = min(backoff * 2, 300)
@@ -121,30 +111,23 @@ class FFNScraper:
                 continue
 
             if resp.status_code == 404:
-                raise StoryNotFoundError(f"Story not found: {url}")
+                raise StoryNotFoundError(f"Not found: {url}")
 
             if resp.status_code == 403:
-                # Short wait, keep the same session (cookies survive).
-                # Only rotate browser as a last resort — new sessions lose
-                # Cloudflare cookies and make blocking worse.
                 wait = 5 + random.uniform(0, 5)
                 if attempt >= self.max_retries - 2:
                     self._rotate_browser()
                     wait = 30
                 logger.warning(
                     "Forbidden (HTTP 403), retrying in %.0fs (attempt %d/%d)",
-                    wait,
-                    attempt + 1,
-                    self.max_retries,
+                    wait, attempt + 1, self.max_retries,
                 )
                 time.sleep(wait)
                 continue
 
             logger.warning(
                 "Unexpected HTTP %d (attempt %d/%d)",
-                resp.status_code,
-                attempt + 1,
-                self.max_retries,
+                resp.status_code, attempt + 1, self.max_retries,
             )
             time.sleep(backoff)
             backoff = min(backoff * 2, 300)
@@ -152,16 +135,14 @@ class FFNScraper:
         raise RateLimitError(f"Failed after {self.max_retries} retries: {url}")
 
     def _delay(self):
-        """Random delay between requests to avoid triggering rate limits."""
-        delay = random.uniform(*self.delay_range)
-        time.sleep(delay)
+        time.sleep(random.uniform(*self.delay_range))
 
-    # ── Cache helpers ─────────────────────────────────────────────
+    # ── Cache ─────────────────────────────────────────────────────
 
     def _story_cache_dir(self, story_id):
         if not self.use_cache:
             return None
-        d = self.cache_dir / str(story_id)
+        d = self.cache_dir / f"{self.site_name}_{story_id}"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -198,21 +179,41 @@ class FFNScraper:
         return None
 
     def clean_cache(self, story_id):
-        """Remove cached data for a story after successful export."""
         if not self.use_cache:
             return
         import shutil
-
-        d = self.cache_dir / str(story_id)
+        d = self.cache_dir / f"{self.site_name}_{story_id}"
         if d.exists():
             shutil.rmtree(d)
-            logger.debug("Cleaned cache for story %d", story_id)
+            logger.debug("Cleaned cache for story %s", story_id)
 
-    # ── Parsing ───────────────────────────────────────────────────
+    # ── Abstract interface ────────────────────────────────────────
 
     @staticmethod
     def parse_story_id(url_or_id):
-        """Extract the numeric story ID from a URL or bare ID string."""
+        raise NotImplementedError
+
+    def download(self, url_or_id, progress_callback=None):
+        raise NotImplementedError
+
+
+# ── FFN ───────────────────────────────────────────────────────────
+
+FFN_BASE = "https://www.fanfiction.net"
+
+
+class FFNScraper(BaseScraper):
+    """Scraper for fanfiction.net."""
+
+    site_name = "ffn"
+
+    def _check_for_blocks(self, html):
+        super()._check_for_blocks(html)
+        if "<title>Story Not Found</title>" in html:
+            raise StoryNotFoundError("Story does not exist or has been removed.")
+
+    @staticmethod
+    def parse_story_id(url_or_id):
         text = str(url_or_id).strip()
         if text.isdigit():
             return int(text)
@@ -226,7 +227,6 @@ class FFNScraper:
 
     @staticmethod
     def _parse_metadata(soup):
-        """Extract title, author, summary, and chapter list from a story page."""
         profile = soup.find("div", id="profile_top")
         if not profile:
             raise ValueError(
@@ -242,7 +242,6 @@ class FFNScraper:
         summary_div = profile.find("div", class_="xcontrast_txt", style=True)
         summary = summary_div.get_text(strip=True) if summary_div else ""
 
-        # Chapter list from the dropdown (absent for one-shots)
         chap_select = soup.find("select", id="chap_select")
         if chap_select:
             options = chap_select.find_all("option")
@@ -257,13 +256,12 @@ class FFNScraper:
             num_chapters = 1
             chapter_titles = {1: title}
 
-        # Cover image
         cover_url = None
         cover_img = profile.find("img", class_="cimage")
         if cover_img:
             src = cover_img.get("data-original") or cover_img.get("src")
             if src:
-                cover_url = src if src.startswith("http") else BASE_URL + src
+                cover_url = src if src.startswith("http") else FFN_BASE + src
 
         extra = {}
         if cover_url:
@@ -274,9 +272,8 @@ class FFNScraper:
             meta_text = meta_span.get_text()
             extra["raw"] = meta_text.strip()
 
-            # Parse structured fields split by " - "
             segments = [s.strip() for s in meta_text.split(" - ")]
-            bare = []  # non-key:value segments after rating
+            bare = []
             for seg in segments:
                 if seg.startswith("Rated:"):
                     rated = seg.replace("Rated:", "").replace("Fiction", "").strip()
@@ -290,11 +287,10 @@ class FFNScraper:
                 elif re.match(r"^Status:", seg):
                     extra["status"] = seg.partition(":")[2].strip()
                 elif re.match(r"^id:", seg):
-                    pass  # already have story id
+                    pass
                 else:
                     bare.append(seg)
 
-            # Bare segments are: language, genre, then optionally characters
             if len(bare) >= 1:
                 extra["language"] = bare[0]
             if len(bare) >= 2:
@@ -302,7 +298,6 @@ class FFNScraper:
             if len(bare) >= 3:
                 extra["characters"] = bare[2]
 
-            # Epoch timestamps from data-xutime (more reliable than text dates)
             time_spans = meta_span.find_all("span", attrs={"data-xutime": True})
             if len(time_spans) >= 2:
                 extra["date_updated"] = int(time_spans[0]["data-xutime"])
@@ -315,33 +310,21 @@ class FFNScraper:
             "author": author,
             "summary": summary,
             "num_chapters": num_chapters,
-            # Convert int keys to str for JSON serialization
             "chapter_titles": {str(k): v for k, v in chapter_titles.items()},
             "extra": extra,
         }
 
     @staticmethod
     def _parse_chapter_html(soup):
-        """Extract the story text HTML from a chapter page."""
         storytext = soup.find("div", id="storytext")
         if not storytext:
             raise ValueError("Could not find story text on page.")
         return storytext.decode_contents()
 
-    # ── Main download ─────────────────────────────────────────────
-
     def download(self, url_or_id, progress_callback=None):
-        """Download a complete story, resuming from cache when possible.
-
-        progress_callback(current, total, chapter_title, cached) is called
-        after each chapter is loaded.  ``cached`` is True when loaded from
-        disk rather than fetched from the network.
-        """
         story_id = self.parse_story_id(url_or_id)
-        story_url = f"{BASE_URL}/s/{story_id}"
+        story_url = f"{FFN_BASE}/s/{story_id}"
 
-        # Try loading metadata from cache first; always re-fetch ch1 to get
-        # up-to-date chapter count (story might still be publishing).
         ch1_url = f"{story_url}/1"
         logger.info("Fetching story metadata...")
         page = self._fetch(ch1_url)
@@ -361,7 +344,6 @@ class FFNScraper:
             metadata=meta["extra"],
         )
 
-        # Chapter 1 — just parsed from the page we already have
         html = self._parse_chapter_html(soup)
         ch1_title = chapter_titles.get("1", "Chapter 1")
         ch1 = Chapter(number=1, title=ch1_title, html=html)
@@ -370,7 +352,6 @@ class FFNScraper:
         if progress_callback:
             progress_callback(1, num_chapters, ch1_title, False)
 
-        # Remaining chapters — use cache when available
         for chap_num in range(2, num_chapters + 1):
             ch_title = chapter_titles.get(str(chap_num), f"Chapter {chap_num}")
 

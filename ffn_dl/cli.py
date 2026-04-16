@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .exporters import DEFAULT_TEMPLATE, EXPORTERS
+from .ficwad import FicWadScraper
 from .scraper import (
     CloudflareBlockError,
     FFNScraper,
@@ -14,20 +15,32 @@ from .scraper import (
 )
 
 
+def _detect_site(url):
+    """Return the appropriate scraper class based on the URL."""
+    text = str(url).lower()
+    if "ficwad.com" in text:
+        return FicWadScraper
+    # Default to FFN (handles bare numeric IDs too)
+    return FFNScraper
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="ffn-dl",
-        description="Download fanfiction from fanfiction.net",
+        description="Download fanfiction from fanfiction.net and ficwad.com",
         epilog=(
+            "Supported sites: fanfiction.net, ficwad.com\n"
             "Name template placeholders: "
             "{title} {author} {id} {words} {status} {rating} {language} {chapters}"
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "url",
         help=(
             "Story URL or numeric ID "
-            "(e.g. https://www.fanfiction.net/s/12345 or 12345)"
+            "(e.g. https://www.fanfiction.net/s/12345, "
+            "https://ficwad.com/story/76962, or just 12345)"
         ),
     )
     parser.add_argument(
@@ -56,16 +69,16 @@ def main(argv=None):
     parser.add_argument(
         "--delay-min",
         type=float,
-        default=2.0,
+        default=None,
         metavar="SEC",
-        help="Minimum delay between chapter requests (default: 2)",
+        help="Minimum delay between chapter requests (default: 2 FFN, 1 FicWad)",
     )
     parser.add_argument(
         "--delay-max",
         type=float,
-        default=5.0,
+        default=None,
         metavar="SEC",
-        help="Maximum delay between chapter requests (default: 5)",
+        help="Maximum delay between chapter requests (default: 5 FFN, 3 FicWad)",
     )
     parser.add_argument(
         "--max-retries",
@@ -92,19 +105,29 @@ def main(argv=None):
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    scraper = FFNScraper(
-        delay_range=(args.delay_min, args.delay_max),
-        max_retries=args.max_retries,
-        use_cache=not args.no_cache,
-    )
+    scraper_cls = _detect_site(args.url)
+
+    kwargs = {
+        "max_retries": args.max_retries,
+        "use_cache": not args.no_cache,
+    }
+    if args.delay_min is not None and args.delay_max is not None:
+        kwargs["delay_range"] = (args.delay_min, args.delay_max)
+    elif args.delay_min is not None or args.delay_max is not None:
+        # Use site defaults for whichever wasn't set
+        d_min = args.delay_min if args.delay_min is not None else 1.0
+        d_max = args.delay_max if args.delay_max is not None else 5.0
+        kwargs["delay_range"] = (d_min, d_max)
+
+    scraper = scraper_cls(**kwargs)
 
     def progress(current, total, title, cached):
         tag = " (cached)" if cached else ""
         print(f"  [{current}/{total}] {title}{tag}")
 
     try:
-        story_id = FFNScraper.parse_story_id(args.url)
-        print(f"Downloading story {story_id} from fanfiction.net...")
+        story_id = scraper.parse_story_id(args.url)
+        print(f"Downloading story {story_id} from {scraper.site_name}...")
 
         story = scraper.download(args.url, progress_callback=progress)
 
@@ -121,7 +144,6 @@ def main(argv=None):
         path = exporter(story, str(output_dir), template=args.name)
         print(f"\nSaved to: {path}")
 
-        # Clean cache on success
         if not args.no_cache:
             scraper.clean_cache(story_id)
 
