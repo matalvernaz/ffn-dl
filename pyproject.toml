@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "ffn-dl"
+version = "1.0.0"
+description = "Cross-platform fanfiction.net downloader"
+requires-python = ">=3.9"
+dependencies = [
+    "cloudscraper>=1.2.71",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+]
+
+[project.optional-dependencies]
+epub = ["ebooklib>=0.18"]
+
+[project.scripts]
+ffn-dl = "ffn_dl.cli:main"
