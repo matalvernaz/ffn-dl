@@ -144,6 +144,29 @@ def export_html(
     return path
 
 
+def _fetch_cover_image(cover_url):
+    """Download a cover image, returning (content_bytes, media_type) or None."""
+    try:
+        from curl_cffi import requests as curl_requests
+
+        resp = curl_requests.get(cover_url, impersonate="chrome", timeout=15)
+        if resp.status_code == 200 and len(resp.content) > 500:
+            ct = resp.headers.get("content-type", "image/jpeg")
+            return resp.content, ct
+    except Exception:
+        pass
+    return None
+
+
+# ISO 639-1 mapping for common FFN languages
+_LANG_CODES = {
+    "english": "en", "spanish": "es", "french": "fr", "german": "de",
+    "italian": "it", "portuguese": "pt", "russian": "ru", "japanese": "ja",
+    "chinese": "zh", "korean": "ko", "dutch": "nl", "polish": "pl",
+    "indonesian": "id", "turkish": "tr", "arabic": "ar", "hindi": "hi",
+}
+
+
 def export_epub(
     story: Story, output_dir: str = ".", template: str = DEFAULT_TEMPLATE
 ) -> Path:
@@ -155,13 +178,67 @@ def export_epub(
             "Install it with: pip install 'ffn-dl[epub]'  (or pip install ebooklib)"
         )
 
+    meta = story.metadata
     book = epub.EpubBook()
     book.set_identifier(f"ffn-{story.id}")
     book.set_title(story.title)
-    book.set_language("en")
     book.add_author(story.author)
     book.add_metadata("DC", "description", story.summary)
     book.add_metadata("DC", "source", story.url)
+    book.add_metadata("DC", "publisher", "fanfiction.net")
+
+    # Language — map to ISO 639-1 code
+    lang = meta.get("language", "English")
+    book.set_language(_LANG_CODES.get(lang.lower(), "en"))
+
+    # Dates from epoch timestamps
+    from datetime import datetime, timezone
+
+    if "date_published" in meta:
+        dt = datetime.fromtimestamp(meta["date_published"], tz=timezone.utc)
+        book.add_metadata("DC", "date", dt.strftime("%Y-%m-%d"))
+    if "date_updated" in meta:
+        dt = datetime.fromtimestamp(meta["date_updated"], tz=timezone.utc)
+        book.add_metadata("DC", "modified", dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    # Subject tags — genres, characters, rating, status (shows up in Calibre)
+    tags = []
+    if "genre" in meta:
+        tags.extend(g.strip() for g in meta["genre"].split("/"))
+    if "characters" in meta:
+        tags.extend(c.strip() for c in meta["characters"].split(","))
+    if "rating" in meta:
+        tags.append(f"Rated {meta['rating']}")
+    if "status" in meta:
+        tags.append(meta["status"])
+    for tag in tags:
+        if tag:
+            book.add_metadata("DC", "subject", tag)
+
+    # Calibre series metadata (use story title as series if multi-chapter)
+    if len(story.chapters) > 1:
+        book.add_metadata(
+            None, "meta", "", {"name": "calibre:series", "content": story.title}
+        )
+        book.add_metadata(
+            None, "meta", "", {"name": "calibre:series_index", "content": "1"}
+        )
+
+    # Cover image
+    cover_url = meta.get("cover_url")
+    if cover_url:
+        result = _fetch_cover_image(cover_url)
+        if result:
+            img_bytes, media_type = result
+            ext = "jpg" if "jpeg" in media_type else media_type.split("/")[-1]
+            cover_item = epub.EpubItem(
+                uid="cover-image",
+                file_name=f"images/cover.{ext}",
+                media_type=media_type,
+                content=img_bytes,
+            )
+            book.add_item(cover_item)
+            book.set_cover(f"images/cover.{ext}", img_bytes)
 
     css = epub.EpubItem(
         uid="style",

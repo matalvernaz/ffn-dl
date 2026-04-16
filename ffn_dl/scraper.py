@@ -257,26 +257,58 @@ class FFNScraper:
             num_chapters = 1
             chapter_titles = {1: title}
 
+        # Cover image
+        cover_url = None
+        cover_img = profile.find("img", class_="cimage")
+        if cover_img:
+            src = cover_img.get("data-original") or cover_img.get("src")
+            if src:
+                cover_url = src if src.startswith("http") else BASE_URL + src
+
         extra = {}
+        if cover_url:
+            extra["cover_url"] = cover_url
+
         meta_span = profile.find("span", class_="xgray")
         if meta_span:
             meta_text = meta_span.get_text()
             extra["raw"] = meta_text.strip()
 
-            words_match = re.search(r"Words:\s*([\d,]+)", meta_text)
-            if words_match:
-                extra["words"] = words_match.group(1)
-            status_match = re.search(r"Status:\s*(\w+)", meta_text)
-            if status_match:
-                extra["status"] = status_match.group(1)
-            rated_match = re.search(r"Rated:\s*(?:Fiction\s+)?(\S+)", meta_text)
-            if rated_match:
-                extra["rating"] = rated_match.group(1)
-            lang_match = re.search(
-                r"(?:Rated:.*?-\s+)(\w+(?:\s+\w+)?)\s+-", meta_text
-            )
-            if lang_match:
-                extra["language"] = lang_match.group(1)
+            # Parse structured fields split by " - "
+            segments = [s.strip() for s in meta_text.split(" - ")]
+            bare = []  # non-key:value segments after rating
+            for seg in segments:
+                if seg.startswith("Rated:"):
+                    rated = seg.replace("Rated:", "").replace("Fiction", "").strip()
+                    extra["rating"] = rated
+                elif re.match(r"^(Words|Chapters|Reviews|Favs|Follows):", seg):
+                    key, _, val = seg.partition(":")
+                    extra[key.strip().lower()] = val.strip().rstrip()
+                elif re.match(r"^(Updated|Published):", seg):
+                    key, _, val = seg.partition(":")
+                    extra[key.strip().lower()] = val.strip()
+                elif re.match(r"^Status:", seg):
+                    extra["status"] = seg.partition(":")[2].strip()
+                elif re.match(r"^id:", seg):
+                    pass  # already have story id
+                else:
+                    bare.append(seg)
+
+            # Bare segments are: language, genre, then optionally characters
+            if len(bare) >= 1:
+                extra["language"] = bare[0]
+            if len(bare) >= 2:
+                extra["genre"] = bare[1]
+            if len(bare) >= 3:
+                extra["characters"] = bare[2]
+
+            # Epoch timestamps from data-xutime (more reliable than text dates)
+            time_spans = meta_span.find_all("span", attrs={"data-xutime": True})
+            if len(time_spans) >= 2:
+                extra["date_updated"] = int(time_spans[0]["data-xutime"])
+                extra["date_published"] = int(time_spans[1]["data-xutime"])
+            elif len(time_spans) == 1:
+                extra["date_published"] = int(time_spans[0]["data-xutime"])
 
         return {
             "title": title,
