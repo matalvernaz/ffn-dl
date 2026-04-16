@@ -18,28 +18,28 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install '.[all]'
+          pip install ".[all]"
           pip install pyinstaller
 
       - name: Build executable
+        shell: bash
         run: |
-          pyinstaller --onefile --name ffn-dl --console ^
-            --hidden-import ffn_dl.cli ^
-            --hidden-import ffn_dl.scraper ^
-            --hidden-import ffn_dl.ficwad ^
-            --hidden-import ffn_dl.exporters ^
-            --hidden-import ffn_dl.updater ^
-            --hidden-import ffn_dl.models ^
-            --hidden-import ffn_dl.tts ^
-            --hidden-import edge_tts ^
-            --hidden-import ebooklib ^
-            --hidden-import curl_cffi ^
-            --collect-all curl_cffi ^
+          pyinstaller --onefile --name ffn-dl --console \
+            --hidden-import ffn_dl.cli \
+            --hidden-import ffn_dl.scraper \
+            --hidden-import ffn_dl.ficwad \
+            --hidden-import ffn_dl.exporters \
+            --hidden-import ffn_dl.updater \
+            --hidden-import ffn_dl.models \
+            --hidden-import ffn_dl.tts \
+            --hidden-import edge_tts \
+            --hidden-import ebooklib \
+            --hidden-import curl_cffi \
+            --collect-all curl_cffi \
             ffn_dl/__main__.py
 
       - name: Test executable
-        run: |
-          dist\ffn-dl.exe --help
+        run: dist\ffn-dl.exe --help
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
