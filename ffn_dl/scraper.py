@@ -5,8 +5,8 @@ import random
 import re
 import time
 
-import requests
 from bs4 import BeautifulSoup
+from curl_cffi import requests as curl_requests
 
 from .models import Chapter, Story
 
@@ -14,18 +14,8 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.fanfiction.net"
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) "
-    "Gecko/20100101 Firefox/125.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-]
+# Impersonation targets for curl_cffi — rotated on rate-limit retries
+BROWSERS = ["chrome", "chrome", "safari", "edge"]
 
 
 class RateLimitError(Exception):
@@ -47,47 +37,21 @@ class FFNScraper:
         self.delay_range = delay_range
         self.max_retries = max_retries
         self.timeout = timeout
-        self.session = self._create_session()
+        self._browser = "chrome"
+        self.session = curl_requests.Session(impersonate=self._browser)
 
-    def _create_session(self):
-        try:
-            import cloudscraper
-
-            session = cloudscraper.create_scraper(
-                browser={"browser": "chrome", "platform": "windows", "desktop": True}
-            )
-            logger.debug("Using cloudscraper for Cloudflare bypass")
-        except ImportError:
-            logger.debug("cloudscraper not installed, using plain requests")
-            session = requests.Session()
-
-        session.headers.update(
-            {
-                "User-Agent": random.choice(USER_AGENTS),
-                "Accept": (
-                    "text/html,application/xhtml+xml,application/xml;"
-                    "q=0.9,image/webp,*/*;q=0.8"
-                ),
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate, br",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-            }
-        )
-        return session
+    def _rotate_browser(self):
+        self._browser = random.choice(BROWSERS)
+        self.session = curl_requests.Session(impersonate=self._browser)
+        logger.debug("Rotated to browser impersonation: %s", self._browser)
 
     def _check_for_blocks(self, html):
         """Detect Cloudflare challenge pages or soft blocks."""
         lower = html[:2000].lower()
         if "just a moment" in lower and "cloudflare" in lower:
             raise CloudflareBlockError(
-                "Cloudflare challenge detected. Try installing cloudscraper, "
-                "increasing delays, or waiting before retrying."
+                "Cloudflare challenge detected. "
+                "Try increasing delays or waiting before retrying."
             )
         if "<title>Story Not Found</title>" in html:
             raise StoryNotFoundError("Story does not exist or has been removed.")
@@ -98,7 +62,7 @@ class FFNScraper:
         for attempt in range(self.max_retries):
             try:
                 resp = self.session.get(url, timeout=self.timeout)
-            except requests.ConnectionError as exc:
+            except curl_requests.errors.ConnectionError as exc:
                 logger.warning(
                     "Connection error (attempt %d/%d): %s",
                     attempt + 1,
@@ -108,7 +72,7 @@ class FFNScraper:
                 time.sleep(backoff + random.uniform(0, 5))
                 backoff = min(backoff * 2, 300)
                 continue
-            except requests.Timeout:
+            except curl_requests.errors.Timeout:
                 logger.warning(
                     "Request timed out (attempt %d/%d)", attempt + 1, self.max_retries
                 )
@@ -131,11 +95,22 @@ class FFNScraper:
                 )
                 time.sleep(wait)
                 backoff = min(backoff * 2, 300)
-                self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
+                self._rotate_browser()
                 continue
 
             if resp.status_code == 404:
                 raise StoryNotFoundError(f"Story not found: {url}")
+
+            if resp.status_code == 403:
+                logger.warning(
+                    "Forbidden (HTTP 403), rotating browser (attempt %d/%d)",
+                    attempt + 1,
+                    self.max_retries,
+                )
+                self._rotate_browser()
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 300)
+                continue
 
             logger.warning(
                 "Unexpected HTTP %d (attempt %d/%d)",
