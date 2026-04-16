@@ -48,7 +48,9 @@ jobs:
             --hidden-import edge_tts \
             --hidden-import ebooklib \
             --hidden-import curl_cffi \
+            --hidden-import wx \
             --collect-all curl_cffi \
+            --collect-all wx \
             ffn_dl/__main__.py
 
       - name: Test executable

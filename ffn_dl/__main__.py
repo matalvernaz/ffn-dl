@@ -16,8 +16,14 @@ def main():
         from ffn_dl.cli import main as cli_main
         cli_main()
     else:
-        from ffn_dl.gui import main as gui_main
-        gui_main()
+        try:
+            from ffn_dl.gui import main as gui_main
+            gui_main()
+        except ImportError:
+            print("GUI requires wxPython: pip install 'ffn-dl[gui]'")
+            print("Running CLI help instead:\n")
+            from ffn_dl.cli import main as cli_main
+            cli_main(["--help"])
 
 
 main()

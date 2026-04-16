@@ -1,122 +1,127 @@
-"""Accessible tkinter GUI for ffn-dl."""
+"""Accessible wxPython GUI for ffn-dl.
+
+Uses native Win32 controls via wxPython so NVDA, JAWS, and other
+screen readers can read every widget natively.
+"""
 
 import threading
-import tkinter as tk
-from tkinter import filedialog, ttk
+import wx
 from pathlib import Path
 
 
-class App(tk.Tk):
+class MainFrame(wx.Frame):
     def __init__(self):
-        super().__init__()
-        self.title("ffn-dl - Fanfiction Downloader")
-        self.geometry("600x500")
-        self.minsize(500, 400)
-        self._build_ui()
+        super().__init__(
+            None,
+            title="ffn-dl - Fanfiction Downloader",
+            size=(620, 520),
+            style=wx.DEFAULT_FRAME_STYLE,
+        )
         self._downloading = False
+        self._build_ui()
+        self.Centre()
 
     def _build_ui(self):
-        pad = {"padx": 8, "pady": 4}
-        main = ttk.Frame(self, padding=10)
-        main.pack(fill=tk.BOTH, expand=True)
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        pad = 6
 
         # ── URL ──────────────────────────────────────────────
-        ttk.Label(main, text="Story URL or ID:").pack(anchor=tk.W, **pad)
-        self.url_var = tk.StringVar()
-        url_entry = ttk.Entry(main, textvariable=self.url_var, width=70)
-        url_entry.pack(fill=tk.X, **pad)
-        url_entry.focus_set()
+        lbl = wx.StaticText(panel, label="Story &URL or ID:")
+        sizer.Add(lbl, 0, wx.LEFT | wx.TOP, pad)
+        self.url_ctrl = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
+        self.url_ctrl.SetName("Story URL or ID")
+        self.url_ctrl.Bind(wx.EVT_TEXT_ENTER, self._on_download)
+        sizer.Add(self.url_ctrl, 0, wx.EXPAND | wx.ALL, pad)
 
         # ── Options row ──────────────────────────────────────
-        opts = ttk.Frame(main)
-        opts.pack(fill=tk.X, **pad)
+        opts = wx.BoxSizer(wx.HORIZONTAL)
 
-        ttk.Label(opts, text="Format:").pack(side=tk.LEFT)
-        self.format_var = tk.StringVar(value="epub")
-        fmt = ttk.Combobox(
-            opts,
-            textvariable=self.format_var,
-            values=["epub", "html", "txt", "audio"],
-            state="readonly",
-            width=8,
+        opts.Add(wx.StaticText(panel, label="&Format:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.format_ctrl = wx.Choice(
+            panel, choices=["epub", "html", "txt", "audio"]
         )
-        fmt.pack(side=tk.LEFT, padx=(4, 16))
+        self.format_ctrl.SetSelection(0)
+        self.format_ctrl.SetName("Format")
+        opts.Add(self.format_ctrl, 0, wx.RIGHT, 16)
 
-        ttk.Label(opts, text="Filename:").pack(side=tk.LEFT)
-        self.name_var = tk.StringVar(value="{title} - {author}")
-        ttk.Entry(opts, textvariable=self.name_var, width=25).pack(
-            side=tk.LEFT, padx=4
-        )
+        opts.Add(wx.StaticText(panel, label="File&name template:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.name_ctrl = wx.TextCtrl(panel, value="{title} - {author}", size=(200, -1))
+        self.name_ctrl.SetName("Filename template")
+        opts.Add(self.name_ctrl, 1)
+
+        sizer.Add(opts, 0, wx.EXPAND | wx.ALL, pad)
 
         # ── Output folder ────────────────────────────────────
-        out_frame = ttk.Frame(main)
-        out_frame.pack(fill=tk.X, **pad)
+        out_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        ttk.Label(out_frame, text="Save to:").pack(side=tk.LEFT)
-        self.output_var = tk.StringVar(value=str(Path.home() / "Downloads"))
-        ttk.Entry(out_frame, textvariable=self.output_var, width=50).pack(
-            side=tk.LEFT, padx=4, fill=tk.X, expand=True
-        )
-        ttk.Button(out_frame, text="Browse...", command=self._browse_output).pack(
-            side=tk.LEFT, padx=4
-        )
+        out_sizer.Add(wx.StaticText(panel, label="&Save to:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        default_dir = str(Path.home() / "Downloads")
+        self.output_ctrl = wx.TextCtrl(panel, value=default_dir)
+        self.output_ctrl.SetName("Save to folder")
+        out_sizer.Add(self.output_ctrl, 1, wx.RIGHT, 4)
+
+        browse_btn = wx.Button(panel, label="&Browse...")
+        browse_btn.Bind(wx.EVT_BUTTON, self._on_browse)
+        out_sizer.Add(browse_btn, 0)
+
+        sizer.Add(out_sizer, 0, wx.EXPAND | wx.ALL, pad)
 
         # ── Buttons ──────────────────────────────────────────
-        btn_frame = ttk.Frame(main)
-        btn_frame.pack(fill=tk.X, **pad)
+        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        self.dl_btn = ttk.Button(
-            btn_frame, text="Download", command=self._on_download
-        )
-        self.dl_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self.dl_btn = wx.Button(panel, label="&Download")
+        self.dl_btn.SetDefault()
+        self.dl_btn.Bind(wx.EVT_BUTTON, self._on_download)
+        btn_sizer.Add(self.dl_btn, 0, wx.RIGHT, 8)
 
-        self.update_btn = ttk.Button(
-            btn_frame, text="Update Existing File...", command=self._on_update
-        )
-        self.update_btn.pack(side=tk.LEFT)
+        self.update_btn = wx.Button(panel, label="U&pdate Existing File...")
+        self.update_btn.Bind(wx.EVT_BUTTON, self._on_update)
+        btn_sizer.Add(self.update_btn, 0)
+
+        sizer.Add(btn_sizer, 0, wx.ALL, pad)
 
         # ── Status log ───────────────────────────────────────
-        ttk.Label(main, text="Status:").pack(anchor=tk.W, **pad)
-        log_frame = ttk.Frame(main)
-        log_frame.pack(fill=tk.BOTH, expand=True, **pad)
-
-        self.log = tk.Text(log_frame, wrap=tk.WORD, height=12, state=tk.DISABLED)
-        self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        scrollbar = ttk.Scrollbar(log_frame, command=self.log.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log["yscrollcommand"] = scrollbar.set
-
-        # Enter key triggers download
-        self.bind("<Return>", lambda e: self._on_download())
-
-    def _browse_output(self):
-        path = filedialog.askdirectory(
-            title="Choose output folder",
-            initialdir=self.output_var.get(),
+        sizer.Add(wx.StaticText(panel, label="S&tatus:"), 0, wx.LEFT | wx.TOP, pad)
+        self.log_ctrl = wx.TextCtrl(
+            panel,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
         )
-        if path:
-            self.output_var.set(path)
+        self.log_ctrl.SetName("Status log")
+        sizer.Add(self.log_ctrl, 1, wx.EXPAND | wx.ALL, pad)
+
+        panel.SetSizer(sizer)
+
+        # Accelerator: Ctrl+D = Download, Ctrl+U = Update
+        accel = wx.AcceleratorTable([
+            (wx.ACCEL_CTRL, ord("D"), self.dl_btn.GetId()),
+            (wx.ACCEL_CTRL, ord("U"), self.update_btn.GetId()),
+        ])
+        self.SetAcceleratorTable(accel)
 
     def _log(self, msg):
-        """Append a message to the status log (thread-safe)."""
-        def _append():
-            self.log.configure(state=tk.NORMAL)
-            self.log.insert(tk.END, msg + "\n")
-            self.log.see(tk.END)
-            self.log.configure(state=tk.DISABLED)
-        self.after(0, _append)
+        """Append to the status log (thread-safe)."""
+        wx.CallAfter(self.log_ctrl.AppendText, msg + "\n")
 
     def _set_busy(self, busy):
         def _update():
-            state = "disabled" if busy else "normal"
-            self.dl_btn.configure(state=state)
-            self.update_btn.configure(state=state)
             self._downloading = busy
-        self.after(0, _update)
+            self.dl_btn.Enable(not busy)
+            self.update_btn.Enable(not busy)
+        wx.CallAfter(_update)
 
-    def _on_download(self):
-        url = self.url_var.get().strip()
+    def _on_browse(self, event):
+        dlg = wx.DirDialog(
+            self,
+            "Choose output folder",
+            defaultPath=self.output_ctrl.GetValue(),
+        )
+        if dlg.ShowModal() == wx.ID_OK:
+            self.output_ctrl.SetValue(dlg.GetPath())
+        dlg.Destroy()
+
+    def _on_download(self, event):
+        url = self.url_ctrl.GetValue().strip()
         if not url:
             self._log("Error: Please enter a story URL or ID.")
             return
@@ -128,20 +133,20 @@ class App(tk.Tk):
             target=self._run_download, args=(url,), daemon=True
         ).start()
 
-    def _on_update(self):
+    def _on_update(self, event):
         if self._downloading:
             return
-        path = filedialog.askopenfilename(
-            title="Select file to update",
-            filetypes=[
-                ("All supported", "*.epub *.html *.txt"),
-                ("EPUB", "*.epub"),
-                ("HTML", "*.html"),
-                ("Text", "*.txt"),
-            ],
+        dlg = wx.FileDialog(
+            self,
+            "Select file to update",
+            wildcard="Supported files (*.epub;*.html;*.txt)|*.epub;*.html;*.txt",
+            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
         )
-        if not path:
+        if dlg.ShowModal() != wx.ID_OK:
+            dlg.Destroy()
             return
+        path = dlg.GetPath()
+        dlg.Destroy()
 
         from .updater import extract_source_url, count_chapters
 
@@ -152,11 +157,10 @@ class App(tk.Tk):
             self._log(f"Error: {e}")
             return
 
-        # Infer format and output dir from the file
         suffix = Path(path).suffix.lower()
-        fmt_map = {".epub": "epub", ".html": "html", ".txt": "txt"}
-        self.format_var.set(fmt_map.get(suffix, "epub"))
-        self.output_var.set(str(Path(path).parent))
+        fmt_map = {".epub": 0, ".html": 1, ".txt": 2}
+        self.format_ctrl.SetSelection(fmt_map.get(suffix, 0))
+        self.output_ctrl.SetValue(str(Path(path).parent))
 
         self._set_busy(True)
         self._log(f"Updating: {url} (existing file has {existing} chapters)")
@@ -168,18 +172,16 @@ class App(tk.Tk):
         ).start()
 
     def _run_download(self, url, skip_chapters=0, is_update=False):
-        """Run the download in a background thread."""
         try:
             from .ficwad import FicWadScraper
             from .scraper import FFNScraper
 
-            # Pick scraper
             if "ficwad.com" in url.lower():
                 scraper = FicWadScraper()
             else:
                 scraper = FFNScraper()
 
-            story_id = scraper.parse_story_id(url)
+            scraper.parse_story_id(url)
 
             def progress(current, total, title, cached):
                 tag = " (cached)" if cached else ""
@@ -195,18 +197,16 @@ class App(tk.Tk):
                 return
 
             if is_update:
-                self._log(
-                    f"Found {len(story.chapters)} new chapters. Re-exporting..."
-                )
+                self._log(f"Found {len(story.chapters)} new chapters. Re-exporting...")
                 story = scraper.download(url, progress_callback=progress, skip_chapters=0)
 
             self._log(f"\n  Title:    {story.title}")
             self._log(f"  Author:   {story.author}")
             self._log(f"  Chapters: {len(story.chapters)}")
 
-            fmt = self.format_var.get()
-            output_dir = self.output_var.get()
-            template = self.name_var.get()
+            fmt = self.format_ctrl.GetString(self.format_ctrl.GetSelection())
+            output_dir = self.output_ctrl.GetValue()
+            template = self.name_ctrl.GetValue()
 
             if fmt == "audio":
                 from .tts import generate_audiobook
@@ -233,5 +233,7 @@ class App(tk.Tk):
 
 
 def main():
-    app = App()
-    app.mainloop()
+    app = wx.App()
+    frame = MainFrame()
+    frame.Show()
+    app.MainLoop()
