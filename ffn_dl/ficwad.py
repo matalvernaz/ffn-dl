@@ -142,7 +142,7 @@ class FicWadScraper(BaseScraper):
             raise ValueError("Could not find story text on page.")
         return storytext.decode_contents()
 
-    def download(self, url_or_id, progress_callback=None):
+    def download(self, url_or_id, progress_callback=None, skip_chapters=0):
         story_id = self.parse_story_id(url_or_id)
         story_url = f"{FICWAD_BASE}/story/{story_id}"
 
@@ -200,7 +200,13 @@ class FicWadScraper(BaseScraper):
             metadata=meta["extra"],
         )
 
+        if skip_chapters >= num_chapters:
+            return story  # nothing new
+
         for i, ch_info in enumerate(chapter_list, 1):
+            if i <= skip_chapters:
+                continue
+
             ch_id = ch_info["id"]
             ch_title = ch_info["title"]
 
@@ -211,7 +217,7 @@ class FicWadScraper(BaseScraper):
                     progress_callback(i, num_chapters, cached.title, True)
                 continue
 
-            if i > 1:
+            if story.chapters:
                 self._delay()
             ch_url = f"{FICWAD_BASE}/story/{ch_id}"
             logger.debug("Fetching chapter %d/%d (id=%d)", i, num_chapters, ch_id)

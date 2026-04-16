@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from .scraper import (
     RateLimitError,
     StoryNotFoundError,
 )
+from .updater import count_chapters, extract_source_url
 
 
 def _detect_site(url):
@@ -20,7 +22,6 @@ def _detect_site(url):
     text = str(url).lower()
     if "ficwad.com" in text:
         return FicWadScraper
-    # Default to FFN (handles bare numeric IDs too)
     return FFNScraper
 
 
@@ -37,6 +38,7 @@ def main(argv=None):
     )
     parser.add_argument(
         "url",
+        nargs="?",
         help=(
             "Story URL or numeric ID "
             "(e.g. https://www.fanfiction.net/s/12345, "
@@ -44,17 +46,23 @@ def main(argv=None):
         ),
     )
     parser.add_argument(
+        "-u",
+        "--update",
+        metavar="FILE",
+        help="Update an existing file — reads source URL, downloads new chapters",
+    )
+    parser.add_argument(
         "-f",
         "--format",
         choices=sorted(EXPORTERS),
-        default="epub",
-        help="Output format (default: epub)",
+        default=None,
+        help="Output format (default: epub, or inferred from --update file)",
     )
     parser.add_argument(
         "-o",
         "--output",
-        default=".",
-        help="Output directory (default: current directory)",
+        default=None,
+        help="Output directory (default: current directory, or --update file's dir)",
     )
     parser.add_argument(
         "-n",
@@ -92,10 +100,36 @@ def main(argv=None):
         help="Disable chapter caching (re-download everything)",
     )
     parser.add_argument(
+        "--clean-cache",
+        action="store_true",
+        help="Remove cached chapters after successful export",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
 
     args = parser.parse_args(argv)
+
+    # Resolve --update mode
+    existing_chapters = 0
+    if args.update:
+        update_path = Path(args.update)
+        url = extract_source_url(update_path)
+        existing_chapters = count_chapters(update_path)
+        fmt_map = {".epub": "epub", ".html": "html", ".txt": "txt"}
+        if args.format is None:
+            args.format = fmt_map.get(update_path.suffix.lower(), "epub")
+        if args.output is None:
+            args.output = str(update_path.parent)
+    elif args.url:
+        url = args.url
+    else:
+        parser.error("either a URL or --update FILE is required")
+
+    if args.format is None:
+        args.format = "epub"
+    if args.output is None:
+        args.output = "."
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -105,7 +139,7 @@ def main(argv=None):
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    scraper_cls = _detect_site(args.url)
+    scraper_cls = _detect_site(url)
 
     kwargs = {
         "max_retries": args.max_retries,
@@ -114,7 +148,6 @@ def main(argv=None):
     if args.delay_min is not None and args.delay_max is not None:
         kwargs["delay_range"] = (args.delay_min, args.delay_max)
     elif args.delay_min is not None or args.delay_max is not None:
-        # Use site defaults for whichever wasn't set
         d_min = args.delay_min if args.delay_min is not None else 1.0
         d_max = args.delay_max if args.delay_max is not None else 5.0
         kwargs["delay_range"] = (d_min, d_max)
@@ -126,28 +159,54 @@ def main(argv=None):
         print(f"  [{current}/{total}] {title}{tag}")
 
     try:
-        story_id = scraper.parse_story_id(args.url)
-        print(f"Downloading story {story_id} from {scraper.site_name}...")
+        story_id = scraper.parse_story_id(url)
+        if args.update:
+            print(
+                f"Checking story {story_id} on {scraper.site_name} "
+                f"(existing file has {existing_chapters} chapters)..."
+            )
+        else:
+            print(f"Downloading story {story_id} from {scraper.site_name}...")
 
-        story = scraper.download(args.url, progress_callback=progress)
+        story = scraper.download(
+            url,
+            progress_callback=progress,
+            skip_chapters=existing_chapters,
+        )
 
+        new_count = len(story.chapters)
         words = story.metadata.get("words", "?")
         status = story.metadata.get("status", "Unknown")
+
+        if args.update and new_count == 0:
+            print(f"\n  Up to date — no new chapters.")
+            sys.exit(0)
+
         print()
         print(f"  Title:    {story.title}")
         print(f"  Author:   {story.author}")
-        print(f"  Chapters: {len(story.chapters)}")
+        if args.update:
+            total = existing_chapters + new_count
+            print(f"  Chapters: {total} ({new_count} new)")
+        else:
+            print(f"  Chapters: {new_count}")
         print(f"  Words:    {words}")
         print(f"  Status:   {status}")
+
+        if args.update:
+            # For update, we need the full story to re-export.
+            # Re-download everything (cache makes this fast).
+            print("\n  Re-exporting full story...")
+            story = scraper.download(url, skip_chapters=0)
 
         exporter = EXPORTERS[args.format]
         path = exporter(story, str(output_dir), template=args.name)
         print(f"\nSaved to: {path}")
 
-        if not args.no_cache:
+        if args.clean_cache:
             scraper.clean_cache(story_id)
 
-    except ValueError as exc:
+    except (ValueError, FileNotFoundError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     except StoryNotFoundError as exc:
@@ -167,5 +226,5 @@ def main(argv=None):
         print(f"Missing dependency: {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
-        print("\nDownload cancelled. Re-run the same command to resume.")
+        print("\nCancelled. Re-run the same command to resume.")
         sys.exit(130)
