@@ -225,27 +225,87 @@ def parse_segments(text):
 # ── Gender detection ──────────────────────────────────────────────
 
 
-def detect_character_genders(full_text, characters):
-    """Guess gender for each character based on same-sentence pronouns
-    and common first-name heuristics."""
-    # Split into sentences for tighter pronoun matching
-    sentences = re.split(r"[.!?]+", full_text)
+# Name-based gender detection: suffixes and common overrides.
+# Pronoun analysis is unreliable in POV narratives where one gender
+# dominates the prose, so we lean on names as the primary signal.
+_FEMALE_SUFFIXES = (
+    "ella", "anna", "ette", "ine", "elle", "issa", "ina",
+    "lia", "ria", "dia", "sia", "nie", "ley", "lie",
+)
+_FEMALE_NAMES = {
+    "hermione", "ginny", "luna", "fleur", "lily", "rose", "taylor",
+    "alice", "claire", "eve", "grace", "iris", "ivy", "jane", "joy",
+    "kate", "mae", "may", "faith", "hope", "dawn", "willow", "buffy",
+    "joan", "ann", "beth", "ruth", "jean", "nell", "fern", "rachel",
+    "lillian", "myrtle", "mrytle", "madison", "morgan", "arya", "sansa",
+    "cersei", "daenerys", "misty", "susan", "sarah", "mary", "nancy",
+    "helen", "karen", "wendy", "carol", "janet", "robin", "amber",
+    "crystal", "heather", "brooke", "paige", "quinn", "skitter",
+    "piper", "phoebe", "cordelia", "tara", "anya", "glory", "drusilla",
+}
+_MALE_NAMES = {
+    "harry", "ron", "draco", "james", "albus", "sirius", "remus",
+    "jack", "john", "max", "sam", "ben", "tom", "dan", "bob", "jim",
+    "brian", "kevin", "mark", "paul", "peter", "sean", "adam", "carl",
+    "dean", "eric", "greg", "hugh", "ian", "karl", "leon", "neil",
+    "owen", "alan", "chad", "luke", "finn", "ross", "kurt", "seth",
+    "michael", "micheal", "danny", "dumbledore", "snape", "neville",
+    "fred", "george", "arthur", "bill", "charlie", "percy", "hagrid",
+    "voldemort", "robert", "william", "richard", "edward", "henry",
+    "charles", "david", "joseph", "george", "frank", "ray", "cole",
+    "angel", "spike", "xander", "giles", "wesley", "gunn", "connor",
+}
 
+
+def _guess_gender_from_name(name):
+    """Heuristic gender from first name patterns."""
+    first = name.split()[0].lower()
+
+    if first in _FEMALE_NAMES:
+        return "female"
+    if first in _MALE_NAMES:
+        return "male"
+
+    # Suffix heuristics
+    if first.endswith(_FEMALE_SUFFIXES) or first.endswith("a"):
+        return "female"
+
+    # Names ending in hard consonants tend male
+    if first.endswith(("ck", "rd", "ld", "rt", "rn", "us", "or", "er", "on")):
+        return "male"
+
+    return None  # ambiguous
+
+
+def detect_character_genders(full_text, characters):
+    """Detect gender using name heuristics first, pronouns as fallback."""
     genders = {}
+    lower = full_text.lower()
+    either_re = re.compile(r"\b(?:he|him|his|himself|she|her|hers|herself)\b")
+
     for name in characters:
+        # Try name-based detection first (most reliable)
+        name_gender = _guess_gender_from_name(name)
+        if name_gender:
+            genders[name] = name_gender
+            continue
+
+        # Fallback: first pronoun after each name mention
         male_score = 0
         female_score = 0
+        for m in re.finditer(re.escape(name), full_text):
+            after = lower[m.end() : m.end() + 60]
+            pm = either_re.search(after)
+            if pm:
+                word = pm.group()
+                if word in ("he", "him", "his", "himself"):
+                    male_score += 1
+                else:
+                    female_score += 1
 
-        # Only count pronouns in sentences that mention this character
-        for sent in sentences:
-            if name in sent:
-                s = sent.lower()
-                male_score += len(re.findall(r"\b(?:he|him|his|himself)\b", s))
-                female_score += len(re.findall(r"\b(?:she|her|hers|herself)\b", s))
-
-        if male_score > female_score * 1.3:
+        if male_score > female_score:
             genders[name] = "male"
-        elif female_score > male_score * 1.3:
+        elif female_score > male_score:
             genders[name] = "female"
         else:
             genders[name] = "neutral"
