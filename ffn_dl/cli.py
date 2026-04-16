@@ -156,6 +156,150 @@ def _read_batch_file(path):
     return urls
 
 
+_FFN_URL_RE = re.compile(r"https?://(?:www\.)?fanfiction\.net/s/\d+", re.I)
+_FICWAD_URL_RE = re.compile(r"https?://(?:www\.)?ficwad\.com/story/\d+", re.I)
+
+
+def _handle_search(args):
+    """Interactive search mode: search FFN, display results, download on pick."""
+    from .search import search_ffn
+
+    print(f"Searching fanfiction.net for: {args.search}\n")
+    try:
+        results = search_ffn(args.search)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not results:
+        print("No results found.")
+        sys.exit(0)
+
+    for i, r in enumerate(results, 1):
+        status_tag = " [Complete]" if r["status"] == "Complete" else ""
+        print(f"  {i:>2}. {r['title']}")
+        print(f"      by {r['author']} | {r['fandom']} | "
+              f"{r['words']} words | {r['chapters']} ch | "
+              f"Rated {r['rating']}{status_tag}")
+        if r["summary"]:
+            # Truncate long summaries
+            s = r["summary"]
+            if len(s) > 120:
+                s = s[:117] + "..."
+            print(f"      {s}")
+        print()
+
+    while True:
+        try:
+            choice = input(f"Enter a number (1-{len(results)}) to download, or 'q' to quit: ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(0)
+
+        choice = choice.strip().lower()
+        if choice == "q":
+            sys.exit(0)
+
+        try:
+            idx = int(choice)
+        except ValueError:
+            print("Invalid input. Enter a number or 'q'.")
+            continue
+
+        if not 1 <= idx <= len(results):
+            print(f"Pick a number between 1 and {len(results)}.")
+            continue
+
+        picked = results[idx - 1]
+        print(f"\nDownloading: {picked['title']}")
+        print(f"  {picked['url']}\n")
+
+        if args.format is None:
+            args.format = "epub"
+        if args.output is None:
+            args.output = "."
+
+        output_dir = Path(args.output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ok = _download_one(picked["url"], args, output_dir)
+        sys.exit(0 if ok else 1)
+
+
+def _handle_watch(args):
+    """Clipboard watch mode: poll clipboard for FFN/FicWad URLs."""
+    try:
+        import pyperclip
+    except ImportError:
+        print(
+            "Error: pyperclip is required for --watch mode.\n"
+            "Install it with:  pip install ffn-dl[clipboard]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    import time
+
+    if args.format is None:
+        args.format = "epub"
+    if args.output is None:
+        args.output = "."
+
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    downloaded = set()
+    last_clip = ""
+
+    print("Watching clipboard... paste a fanfiction.net or ficwad.com URL to download")
+    print("Press Ctrl+C to stop.\n")
+
+    try:
+        # Grab current clipboard so we don't immediately trigger on old content
+        try:
+            last_clip = pyperclip.paste() or ""
+        except Exception:
+            last_clip = ""
+
+        while True:
+            time.sleep(2)
+            try:
+                clip = pyperclip.paste() or ""
+            except Exception:
+                continue
+
+            if clip == last_clip:
+                continue
+            last_clip = clip
+
+            # Check if clipboard contains an FFN or FicWad URL
+            url = None
+            ffn_match = _FFN_URL_RE.search(clip)
+            ficwad_match = _FICWAD_URL_RE.search(clip)
+
+            if ffn_match:
+                url = ffn_match.group(0)
+            elif ficwad_match:
+                url = ficwad_match.group(0)
+
+            if not url:
+                continue
+
+            if url in downloaded:
+                continue
+
+            downloaded.add(url)
+            print(f"Detected URL: {url}")
+            ok = _download_one(url, args, output_dir)
+            if ok:
+                print(f"\nDone. Still watching... ({len(downloaded)} downloaded so far)\n")
+            else:
+                print(f"\nFailed. Still watching...\n")
+
+    except KeyboardInterrupt:
+        print(f"\nStopped. Downloaded {len(downloaded)} stories this session.")
+        sys.exit(0)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="ffn-dl",
@@ -256,6 +400,21 @@ def main(argv=None):
         help="Remove cached chapters after successful export",
     )
     parser.add_argument(
+        "-s",
+        "--search",
+        metavar="QUERY",
+        help="Search fanfiction.net for stories matching QUERY",
+    )
+    parser.add_argument(
+        "-w",
+        "--watch",
+        action="store_true",
+        help=(
+            "Watch clipboard for fanfiction URLs and download automatically "
+            "(requires pyperclip: pip install ffn-dl[clipboard])"
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
     args = parser.parse_args(argv)
@@ -264,6 +423,16 @@ def main(argv=None):
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(message)s",
     )
+
+    # --- Search mode ---
+    if args.search:
+        _handle_search(args)
+        return
+
+    # --- Clipboard watch mode ---
+    if args.watch:
+        _handle_watch(args)
+        return
 
     # --- Resolve --update mode (single-file, no batch) ---
     if args.update:

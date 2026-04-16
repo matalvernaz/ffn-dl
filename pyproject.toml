@@ -17,7 +17,8 @@ dependencies = [
 epub = ["ebooklib>=0.18"]
 audio = ["edge-tts>=7.0"]
 gui = ["wxPython>=4.2"]
-all = ["ebooklib>=0.18", "edge-tts>=7.0", "wxPython>=4.2"]
+clipboard = ["pyperclip>=1.8"]
+all = ["ebooklib>=0.18", "edge-tts>=7.0", "wxPython>=4.2", "pyperclip>=1.8"]
 
 [project.scripts]
 ffn-dl = "ffn_dl.cli:main"
