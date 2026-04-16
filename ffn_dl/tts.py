@@ -509,15 +509,30 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
     subprocess.run(cmd, capture_output=True, check=True)
 
     # Clean up
-    merged.unlink(missing_ok=True)
-    list_file.unlink(missing_ok=True)
-    chapters_meta.unlink(missing_ok=True)
-    tmp_dir.rmdir()
+    import shutil as _shutil
+    _shutil.rmtree(tmp_dir, ignore_errors=True)
 
     return output_path
 
 
 # ── Main entry point ──────────────────────────────────────────────
+
+
+def _check_ffmpeg():
+    """Verify ffmpeg is available, raise a helpful error if not."""
+    import subprocess
+    try:
+        subprocess.run(
+            ["ffmpeg", "-version"], capture_output=True, check=True
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffmpeg is required for audiobook generation but was not found.\n"
+            "Install it from https://ffmpeg.org/download.html\n"
+            "On Windows: winget install ffmpeg\n"
+            "On macOS: brew install ffmpeg\n"
+            "On Linux: sudo apt install ffmpeg"
+        )
 
 
 def generate_audiobook(story, output_dir, progress_callback=None):
@@ -526,6 +541,7 @@ def generate_audiobook(story, output_dir, progress_callback=None):
     progress_callback(current_chapter, total_chapters, title) is called
     after each chapter is synthesized.
     """
+    _check_ffmpeg()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
