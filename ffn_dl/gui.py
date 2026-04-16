@@ -4,9 +4,15 @@ Uses native Win32 controls via wxPython so NVDA, JAWS, and other
 screen readers can read every widget natively.
 """
 
+import re
 import threading
 import wx
 from pathlib import Path
+
+
+_FFN_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:fanfiction\.net/s/\d+|ficwad\.com/story/\d+)"
+)
 
 
 class MainFrame(wx.Frame):
@@ -14,10 +20,13 @@ class MainFrame(wx.Frame):
         super().__init__(
             None,
             title="ffn-dl - Fanfiction Downloader",
-            size=(620, 520),
+            size=(620, 560),
             style=wx.DEFAULT_FRAME_STYLE,
         )
         self._downloading = False
+        self._watching = False
+        self._watch_seen = set()
+        self._last_clip = ""
         self._build_ui()
         self.Centre()
 
@@ -27,8 +36,7 @@ class MainFrame(wx.Frame):
         pad = 6
 
         # ── URL ──────────────────────────────────────────────
-        lbl = wx.StaticText(panel, label="Story &URL or ID:")
-        sizer.Add(lbl, 0, wx.LEFT | wx.TOP, pad)
+        sizer.Add(wx.StaticText(panel, label="Story &URL or ID:"), 0, wx.LEFT | wx.TOP, pad)
         self.url_ctrl = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
         self.url_ctrl.SetName("Story URL or ID")
         self.url_ctrl.Bind(wx.EVT_TEXT_ENTER, self._on_download)
@@ -77,7 +85,12 @@ class MainFrame(wx.Frame):
 
         self.update_btn = wx.Button(panel, label="U&pdate Existing File...")
         self.update_btn.Bind(wx.EVT_BUTTON, self._on_update)
-        btn_sizer.Add(self.update_btn, 0)
+        btn_sizer.Add(self.update_btn, 0, wx.RIGHT, 8)
+
+        self.watch_btn = wx.ToggleButton(panel, label="&Watch Clipboard")
+        self.watch_btn.SetName("Watch Clipboard toggle")
+        self.watch_btn.Bind(wx.EVT_TOGGLEBUTTON, self._on_watch_toggle)
+        btn_sizer.Add(self.watch_btn, 0)
 
         sizer.Add(btn_sizer, 0, wx.ALL, pad)
 
@@ -92,15 +105,21 @@ class MainFrame(wx.Frame):
 
         panel.SetSizer(sizer)
 
-        # Accelerator: Ctrl+D = Download, Ctrl+U = Update
+        # Accelerators
         accel = wx.AcceleratorTable([
             (wx.ACCEL_CTRL, ord("D"), self.dl_btn.GetId()),
             (wx.ACCEL_CTRL, ord("U"), self.update_btn.GetId()),
+            (wx.ACCEL_CTRL, ord("W"), self.watch_btn.GetId()),
         ])
         self.SetAcceleratorTable(accel)
 
+        # Timer for clipboard polling (2 second interval)
+        self._clip_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_clip_timer, self._clip_timer)
+
+    # ── Helpers ───────────────────────────────────────────────
+
     def _log(self, msg):
-        """Append to the status log (thread-safe)."""
         wx.CallAfter(self.log_ctrl.AppendText, msg + "\n")
 
     def _set_busy(self, busy):
@@ -110,15 +129,18 @@ class MainFrame(wx.Frame):
             self.update_btn.Enable(not busy)
         wx.CallAfter(_update)
 
+    # ── Browse ───────────────────────────────────────────────
+
     def _on_browse(self, event):
         dlg = wx.DirDialog(
-            self,
-            "Choose output folder",
+            self, "Choose output folder",
             defaultPath=self.output_ctrl.GetValue(),
         )
         if dlg.ShowModal() == wx.ID_OK:
             self.output_ctrl.SetValue(dlg.GetPath())
         dlg.Destroy()
+
+    # ── Download ─────────────────────────────────────────────
 
     def _on_download(self, event):
         url = self.url_ctrl.GetValue().strip()
@@ -133,12 +155,13 @@ class MainFrame(wx.Frame):
             target=self._run_download, args=(url,), daemon=True
         ).start()
 
+    # ── Update ───────────────────────────────────────────────
+
     def _on_update(self, event):
         if self._downloading:
             return
         dlg = wx.FileDialog(
-            self,
-            "Select file to update",
+            self, "Select file to update",
             wildcard="Supported files (*.epub;*.html;*.txt)|*.epub;*.html;*.txt",
             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
         )
@@ -165,11 +188,66 @@ class MainFrame(wx.Frame):
         self._set_busy(True)
         self._log(f"Updating: {url} (existing file has {existing} chapters)")
         threading.Thread(
-            target=self._run_download,
-            args=(url,),
+            target=self._run_download, args=(url,),
             kwargs={"skip_chapters": existing, "is_update": True},
             daemon=True,
         ).start()
+
+    # ── Clipboard watch ──────────────────────────────────────
+
+    def _on_watch_toggle(self, event):
+        if self.watch_btn.GetValue():
+            self._watching = True
+            self._watch_seen.clear()
+            # Snapshot current clipboard so we don't immediately trigger
+            self._last_clip = self._get_clipboard()
+            self._clip_timer.Start(2000)
+            self._log("Watching clipboard. Copy a fanfiction URL to auto-download.")
+            self.watch_btn.SetLabel("Stop &Watching")
+        else:
+            self._watching = False
+            self._clip_timer.Stop()
+            self._log("Clipboard watch stopped.")
+            self.watch_btn.SetLabel("&Watch Clipboard")
+
+    def _get_clipboard(self):
+        text = ""
+        if wx.TheClipboard.Open():
+            if wx.TheClipboard.IsSupported(wx.DataFormat(wx.DF_TEXT)):
+                data = wx.TextDataObject()
+                wx.TheClipboard.GetData(data)
+                text = data.GetText().strip()
+            wx.TheClipboard.Close()
+        return text
+
+    def _on_clip_timer(self, event):
+        if not self._watching:
+            return
+        clip = self._get_clipboard()
+        if clip == self._last_clip:
+            return
+        self._last_clip = clip
+
+        match = _FFN_URL_RE.search(clip)
+        if not match:
+            return
+        url = match.group(0)
+        if url in self._watch_seen:
+            return
+        self._watch_seen.add(url)
+
+        if self._downloading:
+            self._log(f"Queued (busy): {url}")
+            return
+
+        self._log(f"Clipboard detected: {url}")
+        self.url_ctrl.SetValue(url)
+        self._set_busy(True)
+        threading.Thread(
+            target=self._run_download, args=(url,), daemon=True
+        ).start()
+
+    # ── Download worker ──────────────────────────────────────
 
     def _run_download(self, url, skip_chapters=0, is_update=False):
         try:
@@ -220,7 +298,6 @@ class MainFrame(wx.Frame):
                 )
             else:
                 from .exporters import EXPORTERS
-
                 exporter = EXPORTERS[fmt]
                 path = exporter(story, output_dir, template=template)
 
