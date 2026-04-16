@@ -379,8 +379,9 @@ class VoiceMapper:
 
 async def _generate_segment_audio(segment, voice, output_path):
     """Generate audio for a single segment using edge-tts."""
-    text = segment.text
-    if not text or len(text.strip()) < 2:
+    text = segment.text.strip()
+    # Skip fragments too short to be meaningful speech
+    if not text or len(text) < 3 or text.strip(".,;:!?-–—' \"") == "":
         return False
 
     kwargs = {"voice": voice}
@@ -395,26 +396,90 @@ async def _generate_segment_audio(segment, voice, output_path):
     return True
 
 
+def _merge_small_segments(segments, min_len=30):
+    """Merge short segments to reduce API calls and avoid errors.
+
+    Pass 1: merge adjacent narrator segments.
+    Pass 2: absorb very short narrator fragments into the nearest
+    narrator segment (even if non-adjacent).
+    Pass 3: drop anything that's just punctuation.
+    """
+    if not segments:
+        return []
+
+    # Pass 1: merge adjacent narration
+    merged = []
+    for seg in segments:
+        if not seg.text:
+            continue
+        if (
+            merged
+            and seg.speaker is None
+            and merged[-1].speaker is None
+        ):
+            merged[-1].text += " " + seg.text
+        else:
+            merged.append(Segment(seg.text, seg.speaker, seg.emotion))
+
+    # Pass 2: absorb tiny narrator fragments (< min_len) into neighbors
+    cleaned = []
+    for i, seg in enumerate(merged):
+        if seg.speaker is None and len(seg.text) < min_len:
+            # Try to append to the previous narrator segment
+            for prev in reversed(cleaned):
+                if prev.speaker is None:
+                    prev.text += " " + seg.text
+                    break
+            else:
+                # No previous narrator — keep it, it'll merge forward later
+                cleaned.append(seg)
+        else:
+            cleaned.append(seg)
+
+    # Pass 3: drop empty / punctuation-only segments
+    return [s for s in cleaned if s.text.strip(".,;:!?-–—' \"")]
+
+
+# Max concurrent edge-tts API calls per chapter
+_TTS_CONCURRENCY = 5
+
+
+async def _generate_with_semaphore(sem, seg, voice, path, idx, ch_num):
+    """Generate one segment with a concurrency limiter."""
+    async with sem:
+        try:
+            ok = await _generate_segment_audio(seg, voice, path)
+            if ok and path.exists() and path.stat().st_size > 0:
+                return path
+        except Exception as exc:
+            logger.warning(
+                "TTS failed for segment %d (ch %d): %s", idx, ch_num, exc
+            )
+    return None
+
+
 async def generate_chapter_audio(segments, voice_mapper, output_path, chapter_num=0):
     """Generate audio for a full chapter's worth of segments."""
-    tmp_dir = Path(tempfile.mkdtemp(prefix="ffn-tts-"))
-    segment_files = []
+    segments = _merge_small_segments(segments)
 
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ffn-tts-"))
+    sem = asyncio.Semaphore(_TTS_CONCURRENCY)
+
+    # Launch all segment TTS calls concurrently (bounded by semaphore)
+    tasks = []
     for i, seg in enumerate(segments):
         if not seg.text:
             continue
-
         voice = voice_mapper.get(seg.speaker) if seg.speaker else NARRATOR_VOICE
         seg_path = tmp_dir / f"seg_{i:06d}.mp3"
+        tasks.append((i, seg_path, _generate_with_semaphore(
+            sem, seg, voice, seg_path, i, chapter_num
+        )))
 
-        try:
-            await _generate_segment_audio(seg, voice, seg_path)
-            if seg_path.exists() and seg_path.stat().st_size > 0:
-                segment_files.append(seg_path)
-        except Exception as exc:
-            logger.warning(
-                "TTS failed for segment %d (ch %d): %s", i, chapter_num, exc
-            )
+    results = await asyncio.gather(*(t[2] for t in tasks))
+
+    # Collect successful files in order
+    segment_files = [r for r in results if r is not None]
 
     if not segment_files:
         return False
