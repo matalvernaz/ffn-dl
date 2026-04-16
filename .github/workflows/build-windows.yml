@@ -44,6 +44,7 @@ jobs:
             --hidden-import ffn_dl.updater \
             --hidden-import ffn_dl.models \
             --hidden-import ffn_dl.tts \
+            --hidden-import ffn_dl.gui \
             --hidden-import edge_tts \
             --hidden-import ebooklib \
             --hidden-import curl_cffi \
