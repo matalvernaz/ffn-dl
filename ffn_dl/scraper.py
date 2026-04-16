@@ -334,6 +334,42 @@ class FFNScraper(BaseScraper):
             raise ValueError("Could not find story text on page.")
         return storytext.decode_contents()
 
+    @staticmethod
+    def is_author_url(url):
+        """Return True if the URL is an FFN author page."""
+        return bool(re.search(r"fanfiction\.net/u/\d+", str(url)))
+
+    def scrape_author_stories(self, url):
+        """Fetch an FFN author page and return (author_name, [story_urls]).
+
+        The author page lists all stories as links matching /s/{id}/...
+        """
+        html = self._fetch(url)
+        soup = BeautifulSoup(html, "lxml")
+
+        # Author name from the page title or the span#content_wrapper_inner
+        author_name = "Unknown Author"
+        # FFN author pages have the author name in a span inside the content area
+        title_tag = soup.find("title")
+        if title_tag:
+            # Title format: "AuthorName | FanFiction"
+            title_text = title_tag.get_text(strip=True)
+            if "|" in title_text:
+                author_name = title_text.split("|")[0].strip()
+
+        # Find all story links — they match /s/{id}
+        seen_ids = set()
+        story_urls = []
+        for a_tag in soup.find_all("a", href=re.compile(r"^/s/\d+")):
+            match = re.search(r"/s/(\d+)", a_tag["href"])
+            if match:
+                story_id = match.group(1)
+                if story_id not in seen_ids:
+                    seen_ids.add(story_id)
+                    story_urls.append(f"{FFN_BASE}/s/{story_id}")
+
+        return author_name, story_urls
+
     def download(self, url_or_id, progress_callback=None, skip_chapters=0):
         """Download a story. If skip_chapters > 0, only fetch metadata
         and chapters beyond that count (for update mode)."""

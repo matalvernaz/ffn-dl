@@ -142,6 +142,55 @@ class FicWadScraper(BaseScraper):
             raise ValueError("Could not find story text on page.")
         return storytext.decode_contents()
 
+    @staticmethod
+    def is_author_url(url):
+        """Return True if the URL is a FicWad author page."""
+        return bool(re.search(r"ficwad\.com/a/", str(url)))
+
+    def scrape_author_stories(self, url):
+        """Fetch a FicWad author page and return (author_name, [story_urls]).
+
+        The author page lists all stories as links matching /story/{id}.
+        """
+        html = self._fetch(url)
+        soup = BeautifulSoup(html, "lxml")
+
+        # Author name: FicWad author pages typically have it in <h2> or <title>
+        author_name = "Unknown Author"
+        title_tag = soup.find("title")
+        if title_tag:
+            title_text = title_tag.get_text(strip=True)
+            # Title format varies; try to extract the name portion
+            # Common: "Stories by AuthorName - FicWad"
+            if " - " in title_text:
+                part = title_text.split(" - ")[0].strip()
+                part = re.sub(r"^Stories\s+by\s+", "", part, flags=re.IGNORECASE)
+                if part:
+                    author_name = part
+            elif title_text:
+                author_name = title_text
+
+        # Also try the <h2> which often has the author name
+        h2 = soup.find("h2")
+        if h2:
+            h2_text = h2.get_text(strip=True)
+            cleaned = re.sub(r"^Stories\s+by\s+", "", h2_text, flags=re.IGNORECASE)
+            if cleaned:
+                author_name = cleaned
+
+        # Find all story links — they match /story/{id}
+        seen_ids = set()
+        story_urls = []
+        for a_tag in soup.find_all("a", href=re.compile(r"/story/\d+")):
+            match = re.search(r"/story/(\d+)", a_tag["href"])
+            if match:
+                story_id = match.group(1)
+                if story_id not in seen_ids:
+                    seen_ids.add(story_id)
+                    story_urls.append(f"{FICWAD_BASE}/story/{story_id}")
+
+        return author_name, story_urls
+
     def download(self, url_or_id, progress_callback=None, skip_chapters=0):
         story_id = self.parse_story_id(url_or_id)
         story_url = f"{FICWAD_BASE}/story/{story_id}"

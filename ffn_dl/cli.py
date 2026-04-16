@@ -25,6 +25,17 @@ def _detect_site(url):
     return FFNScraper
 
 
+def _is_author_url(url):
+    """Return True if the URL points to an author page on any supported site."""
+    return FFNScraper.is_author_url(url) or FicWadScraper.is_author_url(url)
+
+
+def _scrape_author_stories(url, args):
+    """Scrape an author page and return (author_name, [story_urls])."""
+    scraper = _build_scraper(url, args)
+    return scraper.scrape_author_stories(url)
+
+
 def _build_scraper(url, args):
     """Build a scraper instance for the given URL using CLI args."""
     scraper_cls = _detect_site(url)
@@ -180,6 +191,16 @@ def main(argv=None):
         metavar="FILE",
         help="Update an existing file — reads source URL, downloads new chapters",
     )
+    parser.add_argument(
+        "-a",
+        "--author",
+        metavar="URL",
+        help=(
+            "Download all stories from an author page "
+            "(e.g. https://www.fanfiction.net/u/123/Name, "
+            "https://ficwad.com/a/Name)"
+        ),
+    )
     all_formats = sorted(EXPORTERS) + ["audio"]
     parser.add_argument(
         "-f",
@@ -274,18 +295,64 @@ def main(argv=None):
             sys.exit(130)
         sys.exit(0 if ok else 1)
 
-    # --- Collect URLs from positional args and --batch file ---
-    urls = list(args.url) if args.url else []
+    # --- Resolve --author mode ---
+    if args.author:
+        if args.batch:
+            parser.error("--author and --batch cannot be used together")
+        if args.format is None:
+            args.format = "epub"
+        if args.output is None:
+            args.output = "."
+        output_dir = Path(args.output)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.batch:
         try:
-            urls.extend(_read_batch_file(args.batch))
-        except FileNotFoundError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
+            author_name, story_urls = _scrape_author_stories(args.author, args)
+        except (RateLimitError, CloudflareBlockError, StoryNotFoundError) as exc:
+            print(f"Error fetching author page: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    if not urls:
-        parser.error("either a URL, --batch FILE, or --update FILE is required")
+        if not story_urls:
+            print("No stories found on the author page.", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Author: {author_name}")
+        print(f"Found {len(story_urls)} stories.")
+        urls = story_urls
+        # Fall through to batch processing below
+
+    else:
+        # --- Collect URLs from positional args and --batch file ---
+        urls = list(args.url) if args.url else []
+
+        if args.batch:
+            try:
+                urls.extend(_read_batch_file(args.batch))
+            except FileNotFoundError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+
+        # Expand any author URLs found in positional args
+        expanded = []
+        for url in urls:
+            if _is_author_url(url):
+                try:
+                    author_name, story_urls = _scrape_author_stories(url, args)
+                except (RateLimitError, CloudflareBlockError, StoryNotFoundError) as exc:
+                    print(f"Error fetching author page {url}: {exc}", file=sys.stderr)
+                    sys.exit(1)
+                if not story_urls:
+                    print(f"No stories found on author page: {url}", file=sys.stderr)
+                    sys.exit(1)
+                print(f"Author: {author_name}")
+                print(f"Found {len(story_urls)} stories.")
+                expanded.extend(story_urls)
+            else:
+                expanded.append(url)
+        urls = expanded
+
+        if not urls:
+            parser.error("either a URL, --batch FILE, --update FILE, or --author URL is required")
 
     if args.format is None:
         args.format = "epub"
