@@ -5,7 +5,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .exporters import EXPORTERS
+from .exporters import DEFAULT_TEMPLATE, EXPORTERS
 from .scraper import (
     CloudflareBlockError,
     FFNScraper,
@@ -18,6 +18,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="ffn-dl",
         description="Download fanfiction from fanfiction.net",
+        epilog=(
+            "Name template placeholders: "
+            "{title} {author} {id} {words} {status} {rating} {language} {chapters}"
+        ),
     )
     parser.add_argument(
         "url",
@@ -40,6 +44,16 @@ def main(argv=None):
         help="Output directory (default: current directory)",
     )
     parser.add_argument(
+        "-n",
+        "--name",
+        default=DEFAULT_TEMPLATE,
+        metavar="TEMPLATE",
+        help=(
+            "Filename template (default: '%(default)s'). "
+            "See --help footer for available placeholders."
+        ),
+    )
+    parser.add_argument(
         "--delay-min",
         type=float,
         default=2.0,
@@ -60,6 +74,11 @@ def main(argv=None):
         help="Maximum retries per request on rate-limit or error (default: 5)",
     )
     parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable chapter caching (re-download everything)",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
 
@@ -76,14 +95,16 @@ def main(argv=None):
     scraper = FFNScraper(
         delay_range=(args.delay_min, args.delay_max),
         max_retries=args.max_retries,
+        use_cache=not args.no_cache,
     )
+
+    def progress(current, total, title, cached):
+        tag = " (cached)" if cached else ""
+        print(f"  [{current}/{total}] {title}{tag}")
 
     try:
         story_id = FFNScraper.parse_story_id(args.url)
         print(f"Downloading story {story_id} from fanfiction.net...")
-
-        def progress(current, total):
-            print(f"  [{current}/{total}] downloaded")
 
         story = scraper.download(args.url, progress_callback=progress)
 
@@ -97,8 +118,12 @@ def main(argv=None):
         print(f"  Status:   {status}")
 
         exporter = EXPORTERS[args.format]
-        path = exporter(story, str(output_dir))
+        path = exporter(story, str(output_dir), template=args.name)
         print(f"\nSaved to: {path}")
+
+        # Clean cache on success
+        if not args.no_cache:
+            scraper.clean_cache(story_id)
 
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -120,5 +145,5 @@ def main(argv=None):
         print(f"Missing dependency: {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
-        print("\nDownload cancelled.")
+        print("\nDownload cancelled. Re-run the same command to resume.")
         sys.exit(130)

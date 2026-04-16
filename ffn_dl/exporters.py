@@ -4,7 +4,11 @@ import re
 from html import escape
 from pathlib import Path
 
+from bs4 import BeautifulSoup, NavigableString, Tag
+
 from .models import Story
+
+DEFAULT_TEMPLATE = "{title} - {author}"
 
 
 def _safe_filename(name):
@@ -12,75 +16,137 @@ def _safe_filename(name):
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(". ")
 
 
-def export_txt(story: Story, output_dir: str = ".") -> Path:
-    filename = f"{_safe_filename(story.title)} - {_safe_filename(story.author)}.txt"
+def format_filename(story: Story, template: str = DEFAULT_TEMPLATE) -> str:
+    """Build a filename (no extension) from a template and story metadata.
+
+    Supported placeholders:
+        {title}  {author}  {id}  {words}  {status}  {rating}
+        {language}  {chapters}
+    """
+    fields = {
+        "title": story.title,
+        "author": story.author,
+        "id": str(story.id),
+        "words": story.metadata.get("words", "unknown"),
+        "status": story.metadata.get("status", "unknown"),
+        "rating": story.metadata.get("rating", "unknown"),
+        "language": story.metadata.get("language", "unknown"),
+        "chapters": str(len(story.chapters)),
+    }
+    try:
+        raw = template.format_map(fields)
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown placeholder {exc} in --name template.\n"
+            f"Available: {', '.join(f'{{{k}}}' for k in fields)}"
+        ) from None
+    return _safe_filename(raw)
+
+
+# ── HTML → plain-text converter ───────────────────────────────────
+
+
+def html_to_text(html: str) -> str:
+    """Convert chapter HTML to readable plain text.
+
+    Preserves paragraph breaks, scene breaks (<hr>), and line breaks (<br>).
+    Inline tags (<em>, <strong>, etc.) stay inline instead of being split
+    onto separate lines.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Replace <br> with newline markers before extracting text
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+
+    parts = []
+    for child in soup.children:
+        if isinstance(child, NavigableString):
+            text = str(child).strip()
+            if text:
+                parts.append(text)
+        elif isinstance(child, Tag):
+            if child.name == "hr":
+                parts.append("* * *")
+            else:
+                # get_text() correctly inlines <em>, <strong>, <span>, etc.
+                text = child.get_text().strip()
+                if text:
+                    parts.append(text)
+
+    return "\n\n".join(parts)
+
+
+# ── Exporters ─────────────────────────────────────────────────────
+
+
+def export_txt(
+    story: Story, output_dir: str = ".", template: str = DEFAULT_TEMPLATE
+) -> Path:
+    filename = format_filename(story, template) + ".txt"
     path = Path(output_dir) / filename
 
-    lines = []
-    lines.append(story.title)
-    lines.append(f"by {story.author}")
-    lines.append("")
-    if story.summary:
-        lines.append(f"Summary: {story.summary}")
-    lines.append(f"Source: {story.url}")
-    lines.append("")
-    lines.append("=" * 60)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"{story.title}\n")
+        f.write(f"by {story.author}\n\n")
+        if story.summary:
+            f.write(f"Summary: {story.summary}\n")
+        f.write(f"Source: {story.url}\n")
+        f.write("=" * 60 + "\n")
 
-    for ch in story.chapters:
-        lines.append("")
-        lines.append(f"--- {ch.title} ---")
-        lines.append("")
-        lines.append(ch.text)
+        for ch in story.chapters:
+            f.write(f"\n\n--- {ch.title} ---\n\n")
+            f.write(html_to_text(ch.html))
 
-    path.write_text("\n".join(lines), encoding="utf-8")
     return path
 
 
-def export_html(story: Story, output_dir: str = ".") -> Path:
-    filename = f"{_safe_filename(story.title)} - {_safe_filename(story.author)}.html"
+def export_html(
+    story: Story, output_dir: str = ".", template: str = DEFAULT_TEMPLATE
+) -> Path:
+    filename = format_filename(story, template) + ".html"
     path = Path(output_dir) / filename
 
     title_esc = escape(story.title)
     author_esc = escape(story.author)
     summary_esc = escape(story.summary)
 
-    parts = [
-        "<!DOCTYPE html>",
-        '<html lang="en">',
-        "<head>",
-        '<meta charset="utf-8">',
-        f"<title>{title_esc} by {author_esc}</title>",
-        "<style>",
-        "body{max-width:800px;margin:2em auto;padding:0 1em;"
-        "font-family:Georgia,serif;line-height:1.6}",
-        "h1{text-align:center}",
-        ".author{text-align:center;color:#555}",
-        ".summary{font-style:italic;border-left:3px solid #ccc;"
-        "padding-left:1em;margin:1em 0}",
-        ".chapter{margin:2em 0}",
-        ".chapter h2{border-bottom:1px solid #ddd;padding-bottom:.3em}",
-        "</style>",
-        "</head>",
-        "<body>",
-        f"<h1>{title_esc}</h1>",
-        f'<p class="author">by {author_esc}</p>',
-    ]
-    if story.summary:
-        parts.append(f'<p class="summary">{summary_esc}</p>')
-    parts.append("<hr>")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(
+            f"<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
+            f'<meta charset="utf-8">\n'
+            f"<title>{title_esc} by {author_esc}</title>\n"
+            f"<style>\n"
+            f"body{{max-width:800px;margin:2em auto;padding:0 1em;"
+            f"font-family:Georgia,serif;line-height:1.6}}\n"
+            f"h1{{text-align:center}}\n"
+            f".author{{text-align:center;color:#555}}\n"
+            f".summary{{font-style:italic;border-left:3px solid #ccc;"
+            f"padding-left:1em;margin:1em 0}}\n"
+            f".chapter{{margin:2em 0}}\n"
+            f".chapter h2{{border-bottom:1px solid #ddd;padding-bottom:.3em}}\n"
+            f"</style>\n</head>\n<body>\n"
+            f"<h1>{title_esc}</h1>\n"
+            f'<p class="author">by {author_esc}</p>\n'
+        )
+        if story.summary:
+            f.write(f'<p class="summary">{summary_esc}</p>\n')
+        f.write("<hr>\n")
 
-    for ch in story.chapters:
-        title = escape(ch.title)
-        parts.append(f'<div class="chapter"><h2>{title}</h2>')
-        parts.append(ch.html)
-        parts.append("</div><hr>")
+        for ch in story.chapters:
+            ch_title = escape(ch.title)
+            f.write(f'<div class="chapter"><h2>{ch_title}</h2>\n')
+            f.write(ch.html)
+            f.write("\n</div><hr>\n")
 
-    parts.append("</body></html>")
-    path.write_text("\n".join(parts), encoding="utf-8")
+        f.write("</body>\n</html>\n")
+
     return path
 
 
-def export_epub(story: Story, output_dir: str = ".") -> Path:
+def export_epub(
+    story: Story, output_dir: str = ".", template: str = DEFAULT_TEMPLATE
+) -> Path:
     try:
         from ebooklib import epub
     except ImportError:
@@ -123,7 +189,7 @@ def export_epub(story: Story, output_dir: str = ".") -> Path:
     book.add_item(epub.EpubNav())
     book.spine = ["nav"] + epub_chapters
 
-    filename = f"{_safe_filename(story.title)} - {_safe_filename(story.author)}.epub"
+    filename = format_filename(story, template) + ".epub"
     path = Path(output_dir) / filename
     epub.write_epub(str(path), book)
     return path

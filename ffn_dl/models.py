@@ -8,7 +8,6 @@ class Chapter:
     number: int
     title: str
     html: str
-    text: str
 
 
 @dataclass

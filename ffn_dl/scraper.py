@@ -1,9 +1,11 @@
 """HTTP fetching, HTML parsing, and rate-limit handling for fanfiction.net."""
 
+import json
 import logging
 import random
 import re
 import time
+from pathlib import Path
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
@@ -30,13 +32,33 @@ class CloudflareBlockError(Exception):
     """Raised when Cloudflare blocks the request."""
 
 
+def _default_cache_dir():
+    """Return ~/.cache/ffn-dl, creating it if needed."""
+    path = Path.home() / ".cache" / "ffn-dl"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 class FFNScraper:
     """Scraper for fanfiction.net with rate-limit handling and CF bypass."""
 
-    def __init__(self, delay_range=(2.0, 5.0), max_retries=5, timeout=30):
+    def __init__(
+        self,
+        delay_range=(2.0, 5.0),
+        max_retries=5,
+        timeout=30,
+        cache_dir=None,
+        use_cache=True,
+    ):
         self.delay_range = delay_range
         self.max_retries = max_retries
         self.timeout = timeout
+        self.use_cache = use_cache
+        self.cache_dir = (
+            (Path(cache_dir) if cache_dir else _default_cache_dir())
+            if use_cache
+            else None
+        )
         self._browser = "chrome"
         self.session = curl_requests.Session(impersonate=self._browser)
 
@@ -102,14 +124,20 @@ class FFNScraper:
                 raise StoryNotFoundError(f"Story not found: {url}")
 
             if resp.status_code == 403:
+                # Short wait, keep the same session (cookies survive).
+                # Only rotate browser as a last resort — new sessions lose
+                # Cloudflare cookies and make blocking worse.
+                wait = 5 + random.uniform(0, 5)
+                if attempt >= self.max_retries - 2:
+                    self._rotate_browser()
+                    wait = 30
                 logger.warning(
-                    "Forbidden (HTTP 403), rotating browser (attempt %d/%d)",
+                    "Forbidden (HTTP 403), retrying in %.0fs (attempt %d/%d)",
+                    wait,
                     attempt + 1,
                     self.max_retries,
                 )
-                self._rotate_browser()
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 300)
+                time.sleep(wait)
                 continue
 
             logger.warning(
@@ -127,6 +155,60 @@ class FFNScraper:
         """Random delay between requests to avoid triggering rate limits."""
         delay = random.uniform(*self.delay_range)
         time.sleep(delay)
+
+    # ── Cache helpers ─────────────────────────────────────────────
+
+    def _story_cache_dir(self, story_id):
+        if not self.use_cache:
+            return None
+        d = self.cache_dir / str(story_id)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _save_meta_cache(self, story_id, meta):
+        if not self.use_cache:
+            return
+        path = self._story_cache_dir(story_id) / "meta.json"
+        path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+    def _load_meta_cache(self, story_id):
+        if not self.use_cache:
+            return None
+        path = self._story_cache_dir(story_id) / "meta.json"
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        return None
+
+    def _save_chapter_cache(self, story_id, chapter):
+        if not self.use_cache:
+            return
+        path = self._story_cache_dir(story_id) / f"ch_{chapter.number:04d}.html"
+        path.write_text(
+            json.dumps({"title": chapter.title, "html": chapter.html}),
+            encoding="utf-8",
+        )
+
+    def _load_chapter_cache(self, story_id, chap_num):
+        if not self.use_cache:
+            return None
+        path = self._story_cache_dir(story_id) / f"ch_{chap_num:04d}.html"
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return Chapter(number=chap_num, title=data["title"], html=data["html"])
+        return None
+
+    def clean_cache(self, story_id):
+        """Remove cached data for a story after successful export."""
+        if not self.use_cache:
+            return
+        import shutil
+
+        d = self.cache_dir / str(story_id)
+        if d.exists():
+            shutil.rmtree(d)
+            logger.debug("Cleaned cache for story %d", story_id)
+
+    # ── Parsing ───────────────────────────────────────────────────
 
     @staticmethod
     def parse_story_id(url_or_id):
@@ -169,14 +251,12 @@ class FFNScraper:
             for opt in options:
                 num = int(opt["value"])
                 label = opt.get_text(strip=True)
-                # Strip leading "N. " that FFN prepends
                 cleaned = re.sub(r"^\d+\.\s*", "", label)
                 chapter_titles[num] = cleaned if cleaned else f"Chapter {num}"
         else:
             num_chapters = 1
             chapter_titles = {1: title}
 
-        # Grab the raw metadata span for extra info
         extra = {}
         meta_span = profile.find("span", class_="xgray")
         if meta_span:
@@ -203,31 +283,33 @@ class FFNScraper:
             "author": author,
             "summary": summary,
             "num_chapters": num_chapters,
-            "chapter_titles": chapter_titles,
+            # Convert int keys to str for JSON serialization
+            "chapter_titles": {str(k): v for k, v in chapter_titles.items()},
             "extra": extra,
         }
 
     @staticmethod
-    def _parse_chapter_text(soup):
-        """Extract the story text from a chapter page as HTML and plain text."""
+    def _parse_chapter_html(soup):
+        """Extract the story text HTML from a chapter page."""
         storytext = soup.find("div", id="storytext")
         if not storytext:
             raise ValueError("Could not find story text on page.")
+        return storytext.decode_contents()
 
-        html = storytext.decode_contents()
-        text = storytext.get_text("\n", strip=True)
-        return html, text
+    # ── Main download ─────────────────────────────────────────────
 
     def download(self, url_or_id, progress_callback=None):
-        """Download a complete story. Returns a Story object.
+        """Download a complete story, resuming from cache when possible.
 
-        progress_callback(current_chapter, total_chapters) is called after
-        each chapter is fetched.
+        progress_callback(current, total, chapter_title, cached) is called
+        after each chapter is loaded.  ``cached`` is True when loaded from
+        disk rather than fetched from the network.
         """
         story_id = self.parse_story_id(url_or_id)
         story_url = f"{BASE_URL}/s/{story_id}"
 
-        # Fetch chapter 1 for metadata
+        # Try loading metadata from cache first; always re-fetch ch1 to get
+        # up-to-date chapter count (story might still be publishing).
         ch1_url = f"{story_url}/1"
         logger.info("Fetching story metadata...")
         page = self._fetch(ch1_url)
@@ -236,6 +318,7 @@ class FFNScraper:
         meta = self._parse_metadata(soup)
         num_chapters = meta["num_chapters"]
         chapter_titles = meta["chapter_titles"]
+        self._save_meta_cache(story_id, meta)
 
         story = Story(
             id=story_id,
@@ -246,37 +329,37 @@ class FFNScraper:
             metadata=meta["extra"],
         )
 
-        # Parse chapter 1 (already fetched)
-        html, text = self._parse_chapter_text(soup)
-        story.chapters.append(
-            Chapter(
-                number=1,
-                title=chapter_titles.get(1, "Chapter 1"),
-                html=html,
-                text=text,
-            )
-        )
+        # Chapter 1 — just parsed from the page we already have
+        html = self._parse_chapter_html(soup)
+        ch1_title = chapter_titles.get("1", "Chapter 1")
+        ch1 = Chapter(number=1, title=ch1_title, html=html)
+        self._save_chapter_cache(story_id, ch1)
+        story.chapters.append(ch1)
         if progress_callback:
-            progress_callback(1, num_chapters)
+            progress_callback(1, num_chapters, ch1_title, False)
 
-        # Fetch remaining chapters
+        # Remaining chapters — use cache when available
         for chap_num in range(2, num_chapters + 1):
+            ch_title = chapter_titles.get(str(chap_num), f"Chapter {chap_num}")
+
+            cached = self._load_chapter_cache(story_id, chap_num)
+            if cached is not None:
+                story.chapters.append(cached)
+                if progress_callback:
+                    progress_callback(chap_num, num_chapters, cached.title, True)
+                continue
+
             self._delay()
             url = f"{story_url}/{chap_num}"
             logger.debug("Fetching chapter %d/%d", chap_num, num_chapters)
             page = self._fetch(url)
             soup = BeautifulSoup(page, "lxml")
-            html, text = self._parse_chapter_text(soup)
+            html = self._parse_chapter_html(soup)
 
-            story.chapters.append(
-                Chapter(
-                    number=chap_num,
-                    title=chapter_titles.get(chap_num, f"Chapter {chap_num}"),
-                    html=html,
-                    text=text,
-                )
-            )
+            ch = Chapter(number=chap_num, title=ch_title, html=html)
+            self._save_chapter_cache(story_id, ch)
+            story.chapters.append(ch)
             if progress_callback:
-                progress_callback(chap_num, num_chapters)
+                progress_callback(chap_num, num_chapters, ch_title, False)
 
         return story
