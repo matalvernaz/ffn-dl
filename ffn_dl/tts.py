@@ -54,15 +54,16 @@ FEMALE_VOICES = [
 NEUTRAL_VOICES = MALE_VOICES + FEMALE_VOICES
 
 # Dialogue attribution verbs → SSML style (for voices that support it)
+# Dialogue attribution verbs → prosody adjustments (rate, volume, pitch)
 EMOTION_MAP = {
-    "whispered": "whispering",
-    "murmured": "whispering",
-    "muttered": "whispering",
-    "hissed": "whispering",
-    "shouted": "shouting",
-    "yelled": "shouting",
-    "screamed": "shouting",
-    "bellowed": "shouting",
+    "whispered": "whisper",
+    "murmured": "whisper",
+    "muttered": "whisper",
+    "hissed": "whisper",
+    "shouted": "shout",
+    "yelled": "shout",
+    "screamed": "shout",
+    "bellowed": "shout",
     "exclaimed": "excited",
     "laughed": "cheerful",
     "chuckled": "cheerful",
@@ -78,11 +79,14 @@ EMOTION_MAP = {
     "demanded": "angry",
 }
 
-# Voices that support mstts:express-as styles
-STYLE_VOICES = {
-    "en-US-AriaNeural",
-    "en-US-JennyNeural",
-    "en-IN-NeerjaExpressiveNeural",
+# Emotion → edge-tts prosody parameters
+EMOTION_PROSODY = {
+    "whisper":  {"rate": "-15%", "volume": "-30%", "pitch": "-5Hz"},
+    "shout":    {"rate": "+10%", "volume": "+20%", "pitch": "+10Hz"},
+    "excited":  {"rate": "+15%", "volume": "+10%", "pitch": "+5Hz"},
+    "cheerful": {"rate": "+10%", "volume": "+5%",  "pitch": "+8Hz"},
+    "sad":      {"rate": "-20%", "volume": "-10%", "pitch": "-10Hz"},
+    "angry":    {"rate": "+10%", "volume": "+15%", "pitch": "-5Hz"},
 }
 
 
@@ -222,20 +226,26 @@ def parse_segments(text):
 
 
 def detect_character_genders(full_text, characters):
-    """Guess gender for each character based on surrounding pronouns."""
+    """Guess gender for each character based on same-sentence pronouns
+    and common first-name heuristics."""
+    # Split into sentences for tighter pronoun matching
+    sentences = re.split(r"[.!?]+", full_text)
+
     genders = {}
     for name in characters:
-        # Find all occurrences of the character name and check nearby pronouns
         male_score = 0
         female_score = 0
-        for m in re.finditer(re.escape(name), full_text):
-            window = full_text[max(0, m.start() - 100) : m.end() + 100].lower()
-            male_score += len(re.findall(r"\b(?:he|him|his|himself)\b", window))
-            female_score += len(re.findall(r"\b(?:she|her|hers|herself)\b", window))
 
-        if male_score > female_score * 1.5:
+        # Only count pronouns in sentences that mention this character
+        for sent in sentences:
+            if name in sent:
+                s = sent.lower()
+                male_score += len(re.findall(r"\b(?:he|him|his|himself)\b", s))
+                female_score += len(re.findall(r"\b(?:she|her|hers|herself)\b", s))
+
+        if male_score > female_score * 1.3:
             genders[name] = "male"
-        elif female_score > male_score * 1.5:
+        elif female_score > male_score * 1.3:
             genders[name] = "female"
         else:
             genders[name] = "neutral"
@@ -297,23 +307,17 @@ class VoiceMapper:
 async def _generate_segment_audio(segment, voice, output_path):
     """Generate audio for a single segment using edge-tts."""
     text = segment.text
-    if not text:
+    if not text or len(text.strip()) < 2:
         return False
 
-    # Build SSML if we have an emotion and the voice supports styles
-    if segment.emotion and voice in STYLE_VOICES:
-        ssml = (
-            '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
-            'xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="en-US">'
-            f'<voice name="{voice}">'
-            f'<mstts:express-as style="{segment.emotion}">'
-            f"{text}"
-            f"</mstts:express-as></voice></speak>"
-        )
-        comm = edge_tts.Communicate(ssml, voice)
-    else:
-        comm = edge_tts.Communicate(text, voice)
+    kwargs = {"voice": voice}
 
+    # Apply prosody adjustments for emotional delivery
+    if segment.emotion:
+        prosody = EMOTION_PROSODY.get(segment.emotion, {})
+        kwargs.update(prosody)
+
+    comm = edge_tts.Communicate(text, **kwargs)
     await comm.save(str(output_path))
     return True
 
@@ -358,11 +362,9 @@ async def generate_chapter_audio(segments, voice_mapper, output_path, chapter_nu
         capture_output=True,
     )
 
-    # Clean up temp files
-    for sf in segment_files:
-        sf.unlink(missing_ok=True)
-    list_file.unlink(missing_ok=True)
-    tmp_dir.rmdir()
+    # Clean up temp dir
+    import shutil
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if result.returncode != 0:
         logger.warning("ffmpeg concat failed for ch %d: %s", chapter_num, result.stderr[:200])
