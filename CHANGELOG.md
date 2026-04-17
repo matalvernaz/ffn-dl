@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.8.4 — 2026-04-17
+
+### Diagnostics
+
+- **Version shown in window title**. Previously the running version
+  was only visible from the "Update available" dialog — if you wanted
+  to know whether an auto-update had actually taken, you had no way
+  to tell at a glance. Title bar now reads "ffn-dl 1.8.4 - Fanfiction
+  Downloader".
+- **Search errors now pop up as a message box**, not just a line in
+  the status log at the bottom of the window. The log is easy to miss
+  when the expected outcome is "results appear in the list above" —
+  and with NVDA the scrolled-off log line won't be announced at all.
+  Error popups force attention and read out the full message.
+
 ## 1.8.3 — 2026-04-17
 
 ### Fix

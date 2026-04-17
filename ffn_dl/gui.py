@@ -139,9 +139,10 @@ def _literotica_search_spec():
 
 class MainFrame(wx.Frame):
     def __init__(self):
+        from . import __version__
         super().__init__(
             None,
-            title="ffn-dl - Fanfiction Downloader",
+            title=f"ffn-dl {__version__} - Fanfiction Downloader",
             size=(820, 720),
             style=wx.DEFAULT_FRAME_STYLE,
         )
@@ -1038,7 +1039,21 @@ class MainFrame(wx.Frame):
                 limit=25, start_page=page, **filters,
             )
         except Exception as e:
+            # Surface the error both in the log AND as a message box so
+            # the user doesn't miss it — the status log scrolls and is
+            # easy to overlook when the expected outcome is "results
+            # appear in the list".
+            import traceback
+            tb = traceback.format_exc()
             self._log(f"Search error: {e}")
+            self._log(tb.rstrip())
+            wx.CallAfter(
+                wx.MessageBox,
+                f"Search failed:\n\n{e}",
+                "Search Error",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
             self._set_busy(False)
             return
         wx.CallAfter(
