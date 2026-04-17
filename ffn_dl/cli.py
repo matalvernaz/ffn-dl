@@ -290,6 +290,8 @@ def _handle_search(args):
 
 def _handle_update_all(args):
     """Scan a folder for previously-downloaded exports and update each."""
+    from concurrent.futures import ThreadPoolExecutor
+
     folder = Path(args.update_all)
     if not folder.is_dir():
         print(f"Error: {folder} is not a directory.", file=sys.stderr)
@@ -306,6 +308,7 @@ def _handle_update_all(args):
         print(f"No .epub, .html, or .txt files {where} {folder}.")
         sys.exit(0)
 
+    workers = max(1, int(args.probe_workers or 5))
     mode_bits = []
     if args.recursive:
         mode_bits.append("recursive")
@@ -313,7 +316,8 @@ def _handle_update_all(args):
         mode_bits.append("dry-run")
     if args.skip_complete:
         mode_bits.append("skipping completed")
-    mode = f" ({', '.join(mode_bits)})" if mode_bits else ""
+    mode_bits.append(f"{workers} probe worker{'s' if workers != 1 else ''}")
+    mode = f" ({', '.join(mode_bits)})"
     print(f"Scanning {len(files)} files in {folder}{mode}...\n")
 
     updated = []
@@ -324,27 +328,30 @@ def _handle_update_all(args):
 
     fmt_map = {".epub": "epub", ".html": "html", ".txt": "txt"}
 
-    for i, path in enumerate(files, 1):
-        rel = path.relative_to(folder) if args.recursive else path.name
-        print(f"[{i}/{len(files)}] {rel}")
+    # Phase 1 (serial, fast): read local state. Anything that can be
+    # resolved without a network call — missing source URL, unreadable
+    # file, skip-complete — is decided here and never queues a probe.
+    probe_queue = []
+    for path in files:
+        rel = str(path.relative_to(folder)) if args.recursive else path.name
 
         try:
             url = extract_source_url(path)
         except (ValueError, FileNotFoundError) as exc:
-            print(f"  Skipping (no source URL): {exc}")
-            skipped.append(str(rel))
+            print(f"  [skip] {rel}: no source URL ({exc})")
+            skipped.append(rel)
             continue
 
         try:
             local = count_chapters(path)
         except Exception as exc:
-            print(f"  Skipping (couldn't read): {exc}")
-            skipped.append(str(rel))
+            print(f"  [skip] {rel}: couldn't read ({exc})")
+            skipped.append(rel)
             continue
 
         if local == 0:
-            print("  Skipping (local chapter count is 0, probably not an ffn-dl export).")
-            skipped.append(str(rel))
+            print(f"  [skip] {rel}: local chapter count is 0 (probably not an ffn-dl export)")
+            skipped.append(rel)
             continue
 
         if args.skip_complete:
@@ -353,51 +360,81 @@ def _handle_update_all(args):
             except Exception:
                 status = ""
             if status.lower() == "complete":
-                print(f"  Skipping (marked Complete in file, {local} chapters).")
-                skipped.append(str(rel))
+                print(f"  [skip] {rel}: marked Complete ({local} chapters)")
+                skipped.append(rel)
                 continue
 
-        scraper = _build_scraper(url, args)
-        try:
-            remote = scraper.get_chapter_count(url)
-        except (RateLimitError, CloudflareBlockError, StoryNotFoundError,
-                AO3LockedError, ValueError) as exc:
-            print(f"  Could not check remote count: {exc}")
-            failed.append(str(rel))
-            continue
-        except Exception as exc:
-            print(f"  Error checking remote: {exc}")
-            failed.append(str(rel))
+        probe_queue.append({"path": path, "rel": rel, "url": url, "local": local})
+
+    # Phase 2 (concurrent): remote chapter-count probes.
+    if probe_queue:
+        print(f"\nProbing {len(probe_queue)} stories for new chapters...")
+
+        def probe_one(entry):
+            scraper = _build_scraper(entry["url"], args)
+            return scraper.get_chapter_count(entry["url"])
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(probe_one, entry) for entry in probe_queue]
+            for entry, fut in zip(probe_queue, futures):
+                try:
+                    entry["remote"] = fut.result()
+                except (RateLimitError, CloudflareBlockError,
+                        StoryNotFoundError, AO3LockedError, ValueError) as exc:
+                    entry["error"] = exc
+                except Exception as exc:
+                    entry["error"] = exc
+        print()
+
+    # Phase 3 (serial): apply the decisions. Any actual downloads run
+    # one-at-a-time so we don't stack parallel chapter fetches on a
+    # single site — that's what the scrapers' per-request pacing guards.
+    total = len(probe_queue)
+    cancelled = False
+    for i, entry in enumerate(probe_queue, 1):
+        rel = entry["rel"]
+        print(f"[{i}/{total}] {rel}")
+
+        if "error" in entry:
+            print(f"  Probe failed: {entry['error']}")
+            failed.append(rel)
             continue
 
+        local = entry["local"]
+        remote = entry["remote"]
         if remote <= local:
             label = "up to date" if remote == local else f"remote has fewer chapters ({remote} < {local}) — leaving alone"
             print(f"  {local} local / {remote} remote — {label}")
-            up_to_date.append(str(rel))
+            up_to_date.append(rel)
             continue
 
         new_count = remote - local
         print(f"  {local} local / {remote} remote — {new_count} new chapter(s)")
 
         if args.dry_run:
-            would_update.append((str(rel), local, remote))
+            would_update.append((rel, local, remote))
             continue
 
+        path = entry["path"]
         args.format = fmt_map.get(path.suffix.lower(), "epub")
         args.output = str(path.parent)
         output_dir = Path(args.output)
         try:
             ok = _download_one(
-                url, args, output_dir,
+                entry["url"], args, output_dir,
                 update_path=path, existing_chapters=local,
             )
         except KeyboardInterrupt:
             print("\nCancelled.")
+            cancelled = True
             break
         if ok:
-            updated.append(str(rel))
+            updated.append(rel)
         else:
-            failed.append(str(rel))
+            failed.append(rel)
+
+    if cancelled:
+        pass  # summary still printed below
 
     print(f"\n{'='*60}")
     if args.dry_run:
@@ -561,6 +598,16 @@ def main(argv=None):
         help=(
             "With --update-all: skip stories whose local file is already "
             "marked Complete (saves the remote probe)"
+        ),
+    )
+    parser.add_argument(
+        "--probe-workers",
+        type=int,
+        default=5,
+        metavar="N",
+        help=(
+            "Concurrent chapter-count probes during --update-all "
+            "(default: 5; set to 1 to serialise)"
         ),
     )
     parser.add_argument(
