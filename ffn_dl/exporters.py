@@ -196,6 +196,12 @@ def export_html(
             f".meta-table td{{padding:.25em 0;vertical-align:top}}\n"
             f".chapter{{margin:2em 0}}\n"
             f".chapter h2{{border-bottom:1px solid #ddd;padding-bottom:.3em}}\n"
+            f".chapter p{{margin:0 0 0.25em 0;text-indent:1.5em}}\n"
+            f".chapter h2+p,.chapter hr+p,.chapter .scenebreak+p{{text-indent:0}}\n"
+            f"blockquote{{margin:1em 2em;font-style:italic}}\n"
+            f"blockquote p{{text-indent:0}}\n"
+            f".scenebreak{{text-align:center;margin:1.5em 0;letter-spacing:.5em}}\n"
+            f".center,[align=center]{{text-align:center}}\n"
             f"a{{color:#36c}}\n"
             f"</style>\n</head>\n<body>\n"
             f"<h1>{title_esc}</h1>\n"
@@ -376,11 +382,30 @@ def export_epub(
         uid="style",
         file_name="style/default.css",
         media_type="text/css",
-        content=b"body{font-family:Georgia,serif;line-height:1.6}"
-        b"table{border-collapse:collapse;margin:1em 0}"
-        b"th{text-align:right;padding:.25em 1em .25em 0;vertical-align:top;color:#555}"
-        b"td{padding:.25em 0;vertical-align:top}"
-        b"a{color:#36c}",
+        content=(
+            # Readable defaults for most ebook readers
+            b"body{font-family:Georgia,serif;line-height:1.6}"
+            # Book-style paragraphs: small top-margin, first-line indent
+            # Readers that ship their own CSS will override this.
+            b"p{margin:0 0 0.25em 0;text-indent:1.5em}"
+            # First paragraph after a heading or section break has no indent
+            b"h1+p,h2+p,h3+p,h4+p,hr+p,.scenebreak+p,.first+p,p.first{text-indent:0}"
+            # Block quotes (used for summaries) keep their own indent
+            b"blockquote{margin:1em 2em;font-style:italic}"
+            b"blockquote p{text-indent:0}"
+            # Metadata tables
+            b"table{border-collapse:collapse;margin:1em 0}"
+            b"th{text-align:right;padding:.25em 1em .25em 0;vertical-align:top;color:#555}"
+            b"td{padding:.25em 0;vertical-align:top}"
+            b"a{color:#36c}"
+            # Scene breaks
+            b".scenebreak{text-align:center;margin:1.5em 0;letter-spacing:.5em}"
+            # Centred bits authors style with text-align or align=center
+            b".center,[align=center]{text-align:center}"
+            # Preserve author emphasis
+            b"em,i{font-style:italic}"
+            b"strong,b{font-weight:bold}"
+        ),
     )
     book.add_item(css)
 
