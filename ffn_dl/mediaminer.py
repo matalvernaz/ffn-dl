@@ -30,7 +30,6 @@ class MediaMinerScraper(BaseScraper):
     site_name = "mediaminer"
 
     def __init__(self, **kwargs):
-        kwargs.setdefault("delay_range", (1.5, 3.5))
         super().__init__(**kwargs)
 
     @staticmethod

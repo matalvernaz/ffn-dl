@@ -19,8 +19,8 @@ class FicWadScraper(BaseScraper):
     site_name = "ficwad"
 
     def __init__(self, **kwargs):
-        # FicWad has no Cloudflare — shorter delays are fine
-        kwargs.setdefault("delay_range", (1.0, 3.0))
+        # FicWad has no Cloudflare; AIMD starts at 0 and only backs off
+        # if we actually get a 429/503.
         super().__init__(**kwargs)
 
     @staticmethod

@@ -44,7 +44,6 @@ class LiteroticaScraper(BaseScraper):
     site_name = "literotica"
 
     def __init__(self, **kwargs):
-        kwargs.setdefault("delay_range", (1.0, 3.0))
         super().__init__(**kwargs)
 
     @staticmethod

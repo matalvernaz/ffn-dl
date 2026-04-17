@@ -30,9 +30,9 @@ class AO3Scraper(BaseScraper):
     site_name = "ao3"
 
     def __init__(self, **kwargs):
-        # AO3 is gentler than FFN; shorter delays are fine and we only
-        # make one HTTP request per work anyway.
-        kwargs.setdefault("delay_range", (1.0, 3.0))
+        # AO3 fetches the whole work in a single request, so the inter-
+        # chapter delay barely matters. AIMD defaults (floor 0) let us
+        # back off only if AO3 ever actually pushes back.
         super().__init__(**kwargs)
 
     @staticmethod

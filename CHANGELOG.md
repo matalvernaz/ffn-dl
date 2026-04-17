@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.5.0 — 2026-04-17
+
+### Downloads
+
+- **Adaptive (AIMD) inter-chapter delay**: the scraper no longer sleeps a
+  fixed 1–3s (or 2–5s for FFN) between every chapter. Sites that aren't
+  rate-limiting get full-speed downloads — the delay starts at 0 and only
+  grows (doubling, capped at 60s) if a fetch comes back 429/503. After
+  the site stops pushing back it decays ~10% per successful fetch toward
+  the site's floor. FFN keeps a 2s floor since it's known to bulk-captcha;
+  AO3, Royal Road, FicWad, Literotica, and MediaMiner start at 0.
+  `--delay-min` / `--delay-max` still override AIMD with a fixed range
+  for anyone who wants the old behavior.
+
 ## 1.4.0 — 2026-04-17
 
 ### Fixes

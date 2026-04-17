@@ -25,7 +25,6 @@ class RoyalRoadScraper(BaseScraper):
     site_name = "royalroad"
 
     def __init__(self, **kwargs):
-        kwargs.setdefault("delay_range", (1.0, 3.0))
         super().__init__(**kwargs)
 
     @staticmethod

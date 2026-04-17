@@ -42,7 +42,10 @@ class BaseScraper:
 
     def __init__(
         self,
-        delay_range=(2.0, 5.0),
+        delay_range=None,
+        delay_floor=0.0,
+        delay_start=0.0,
+        delay_ceiling=60.0,
         max_retries=5,
         timeout=30,
         cache_dir=None,
@@ -51,7 +54,19 @@ class BaseScraper:
         chunk_delay_range=(60.0, 75.0),
         use_wayback=False,
     ):
+        # Two rate-limit modes:
+        #   * delay_range set → static random.uniform(*delay_range) between
+        #     fetches. The CLI's --delay-min/--delay-max lands here.
+        #   * delay_range None → AIMD: start at delay_start, decay 10% per
+        #     successful fetch toward delay_floor, double on 429/503 up to
+        #     delay_ceiling. Sites that don't rate-limit end up at floor=0.
         self.delay_range = delay_range
+        self.delay_floor = max(0.0, float(delay_floor))
+        self.delay_ceiling = max(self.delay_floor, float(delay_ceiling))
+        self._current_delay = min(
+            self.delay_ceiling,
+            max(self.delay_floor, float(delay_start)),
+        )
         self.max_retries = max_retries
         self.timeout = timeout
         self.use_cache = use_cache
@@ -108,6 +123,7 @@ class BaseScraper:
 
     def _fetch(self, url):
         backoff = 30
+        hit_rate_limit = False
         for attempt in range(self.max_retries):
             try:
                 resp = self.session.get(url, timeout=self.timeout)
@@ -129,9 +145,12 @@ class BaseScraper:
 
             if resp.status_code == 200:
                 self._check_for_blocks(resp.text)
+                if hit_rate_limit:
+                    self._bump_delay_up()
                 return resp.text
 
             if resp.status_code in (429, 503):
+                hit_rate_limit = True
                 jitter = random.uniform(0, backoff * 0.1)
                 wait = backoff + jitter
                 logger.warning(
@@ -186,7 +205,28 @@ class BaseScraper:
             )
             time.sleep(wait)
             return
-        time.sleep(random.uniform(*self.delay_range))
+        if self.delay_range is not None:
+            time.sleep(random.uniform(*self.delay_range))
+            return
+        # AIMD: sleep the current delay (with a little jitter so we don't
+        # lock-step with server buckets), then decay 10% toward the floor.
+        if self._current_delay > 0:
+            jitter = random.uniform(0, self._current_delay * 0.2)
+            time.sleep(self._current_delay + jitter)
+        self._current_delay = max(
+            self.delay_floor, self._current_delay * 0.9,
+        )
+
+    def _bump_delay_up(self):
+        """AIMD multiplicative increase after a rate-limit hit."""
+        prev = self._current_delay
+        new_delay = max(prev * 2, 2.0)
+        self._current_delay = min(self.delay_ceiling, new_delay)
+        if self._current_delay != prev:
+            logger.info(
+                "Rate-limit recovery: raising per-fetch delay %.1fs → %.1fs",
+                prev, self._current_delay,
+            )
 
     # ── Cache ─────────────────────────────────────────────────────
 
@@ -336,6 +376,10 @@ class FFNScraper(BaseScraper):
         # long-running heuristic of ~20 chapters followed by a ~60s pause
         # avoids tripping captchas on multi-hundred-chapter fics.
         kwargs.setdefault("chunk_size", 20)
+        # FFN has Cloudflare + bulk-captcha; start at a known-safe 2s
+        # floor rather than eating a 429 to learn what we already know.
+        kwargs.setdefault("delay_floor", 2.0)
+        kwargs.setdefault("delay_start", 2.0)
         super().__init__(**kwargs)
 
     def _check_for_blocks(self, html):

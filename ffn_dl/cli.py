@@ -890,14 +890,18 @@ def main(argv=None):
         type=float,
         default=None,
         metavar="SEC",
-        help="Minimum delay between chapter requests (default: 2 FFN, 1 FicWad)",
+        help=(
+            "Override the adaptive (AIMD) inter-chapter delay with a fixed "
+            "random range. By default the scraper starts fast and only "
+            "slows down if the site returns 429/503 (FFN floors at 2s)."
+        ),
     )
     parser.add_argument(
         "--delay-max",
         type=float,
         default=None,
         metavar="SEC",
-        help="Maximum delay between chapter requests (default: 5 FFN, 3 FicWad)",
+        help="Upper end of the fixed delay range when --delay-min is set.",
     )
     parser.add_argument(
         "--max-retries",
