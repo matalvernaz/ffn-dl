@@ -2,7 +2,7 @@
 
 import logging
 import re
-from urllib.parse import quote_plus
+from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup, NavigableString
 from curl_cffi import requests as curl_requests
@@ -10,13 +10,143 @@ from curl_cffi import requests as curl_requests
 logger = logging.getLogger(__name__)
 
 FFN_BASE = "https://www.fanfiction.net"
-SEARCH_URL = FFN_BASE + "/search/?ready=1&keywords={query}&type=story"
+SEARCH_PATH = "/search/"
 MAX_RESULTS = 25
 
 
-def _fetch_search_page(query):
-    """Fetch the FFN search results page for the given query string."""
-    url = SEARCH_URL.format(query=quote_plus(query))
+# ── Filter option tables ──────────────────────────────────────────
+# Keys are the human-readable labels shown in CLI --choices / GUI combos.
+# Values are the numeric IDs FFN's search form submits.
+# `None` means "no filter" — omit the param entirely.
+
+FFN_RATING = {
+    "all": None,
+    "K": 1,
+    "K+": 2,
+    "T": 3,
+    "M": 4,
+    "K-T": 103,
+}
+
+FFN_STATUS = {
+    "all": None,
+    "in-progress": 1,
+    "complete": 2,
+}
+
+FFN_GENRE = {
+    "any": None,
+    "general": 1,
+    "romance": 2,
+    "humor": 3,
+    "drama": 4,
+    "poetry": 5,
+    "adventure": 6,
+    "mystery": 7,
+    "horror": 8,
+    "parody": 9,
+    "angst": 10,
+    "supernatural": 11,
+    "suspense": 12,
+    "sci-fi": 13,
+    "fantasy": 14,
+    "tragedy": 16,
+    "crime": 18,
+    "family": 19,
+    "hurt/comfort": 20,
+    "friendship": 21,
+}
+
+FFN_WORDS = {
+    "any": None,
+    "<1k": 1,
+    "<5k": 2,
+    "5k+": 3,
+    "10k+": 4,
+    "30k+": 5,
+    "50k+": 6,
+    "150k+": 7,
+    "300k+": 8,
+}
+
+FFN_LANGUAGE = {
+    "any": None,
+    "english": 1,
+    "spanish": 2,
+    "french": 3,
+    "german": 4,
+    "chinese": 5,
+    "dutch": 7,
+    "portuguese": 8,
+    "russian": 10,
+    "italian": 11,
+    "polish": 13,
+    "hungarian": 14,
+    "swedish": 17,
+    "norwegian": 18,
+    "danish": 19,
+    "finnish": 20,
+    "turkish": 30,
+    "czech": 31,
+    "indonesian": 32,
+    "vietnamese": 37,
+}
+
+FFN_CROSSOVER = {
+    "any": None,
+    "only": 1,
+    "exclude": 2,
+}
+
+FFN_MATCH = {
+    "any": None,
+    "title": "title",
+    "summary": "summary",
+}
+
+
+def _resolve_filter(value, choices, name):
+    """Map a user value (label or raw ID) to a FFN param value.
+
+    Label matching is case-insensitive so callers can pass natural-case
+    labels like "K+" or "English" without having to remember the table
+    casing.
+    """
+    if value is None or value == "":
+        return None
+    s = str(value).strip()
+    if s.isdigit():
+        return int(s)
+    lower = s.lower()
+    for key, resolved in choices.items():
+        if key.lower() == lower:
+            return resolved
+    valid = ", ".join(k for k in choices if k not in ("any", "all"))
+    raise ValueError(f"Unknown {name}: {value!r}. Valid: {valid}")
+
+
+def _build_search_url(query, filters):
+    params = {"keywords": query, "ready": 1, "type": "story"}
+
+    mapping = [
+        ("censorid", "rating", FFN_RATING),
+        ("languageid", "language", FFN_LANGUAGE),
+        ("statusid", "status", FFN_STATUS),
+        ("genreid", "genre", FFN_GENRE),
+        ("words", "min_words", FFN_WORDS),
+        ("formatid", "crossover", FFN_CROSSOVER),
+        ("match", "match", FFN_MATCH),
+    ]
+    for param, key, table in mapping:
+        value = filters.get(key)
+        resolved = _resolve_filter(value, table, key)
+        if resolved is not None:
+            params[param] = resolved
+
+    return FFN_BASE + SEARCH_PATH + "?" + urlencode(params)
+
+
+def _fetch_search_page(url):
     session = curl_requests.Session(impersonate="chrome")
     resp = session.get(url, timeout=30)
     if resp.status_code != 200:
@@ -116,11 +246,22 @@ def _parse_results(html):
     return results
 
 
-def search_ffn(query):
+def search_ffn(query, **filters):
     """Search fanfiction.net and return a list of result dicts.
 
-    Each dict has keys: title, author, url, summary, words, chapters,
-    rating, fandom, status.
+    Keyword filters (all optional — pass a label from the corresponding
+    FFN_* table, or the raw numeric ID):
+        rating: all / K / K+ / T / M / K-T
+        language: english / spanish / french / ... (see FFN_LANGUAGE)
+        status: all / in-progress / complete
+        genre: romance / humor / adventure / angst / ... (see FFN_GENRE)
+        min_words: <1k / <5k / 5k+ / 10k+ / 30k+ / 50k+ / 150k+ / 300k+
+        crossover: any / only / exclude
+        match: any / title / summary  (where the keywords must appear)
+
+    Each result dict has keys: title, author, url, summary, words,
+    chapters, rating, fandom, status.
     """
-    html = _fetch_search_page(query)
+    url = _build_search_url(query, filters)
+    html = _fetch_search_page(url)
     return _parse_results(html)

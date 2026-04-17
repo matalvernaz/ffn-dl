@@ -166,10 +166,24 @@ def _handle_search(args):
     """Interactive search mode: search FFN, display results, download on pick."""
     from .search import search_ffn
 
-    print(f"Searching fanfiction.net for: {args.search}\n")
+    filters = {
+        "rating": args.rating,
+        "language": args.language,
+        "status": args.status,
+        "genre": args.genre,
+        "min_words": args.min_words,
+        "crossover": args.crossover,
+        "match": args.match,
+    }
+    filters = {k: v for k, v in filters.items() if v}
+
+    print(f"Searching fanfiction.net for: {args.search}")
+    if filters:
+        print("Filters: " + ", ".join(f"{k}={v}" for k, v in filters.items()))
+    print()
     try:
-        results = search_ffn(args.search)
-    except RuntimeError as exc:
+        results = search_ffn(args.search, **filters)
+    except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -417,6 +431,51 @@ def main(argv=None):
         "--search",
         metavar="QUERY",
         help="Search fanfiction.net for stories matching QUERY",
+    )
+    # Search filters (only apply when --search is used)
+    from .search import (
+        FFN_CROSSOVER, FFN_GENRE, FFN_LANGUAGE, FFN_MATCH,
+        FFN_RATING, FFN_STATUS, FFN_WORDS,
+    )
+    parser.add_argument(
+        "--rating",
+        choices=list(FFN_RATING),
+        metavar="R",
+        help=f"Filter by rating ({', '.join(FFN_RATING)})",
+    )
+    parser.add_argument(
+        "--language",
+        metavar="LANG",
+        help=f"Filter by language (e.g. {', '.join(list(FFN_LANGUAGE)[:6])}, ...)",
+    )
+    parser.add_argument(
+        "--status",
+        choices=list(FFN_STATUS),
+        metavar="S",
+        help=f"Filter by completion status ({', '.join(FFN_STATUS)})",
+    )
+    parser.add_argument(
+        "--genre",
+        metavar="G",
+        help=f"Filter by genre (e.g. {', '.join(list(FFN_GENRE)[:6])}, ...)",
+    )
+    parser.add_argument(
+        "--min-words",
+        choices=list(FFN_WORDS),
+        metavar="N",
+        help=f"Filter by word count ({', '.join(FFN_WORDS)})",
+    )
+    parser.add_argument(
+        "--crossover",
+        choices=list(FFN_CROSSOVER),
+        metavar="X",
+        help=f"Crossover filter ({', '.join(FFN_CROSSOVER)})",
+    )
+    parser.add_argument(
+        "--match",
+        choices=list(FFN_MATCH),
+        metavar="M",
+        help=f"Match keywords against ({', '.join(FFN_MATCH)})",
     )
     parser.add_argument(
         "-w",

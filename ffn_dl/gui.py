@@ -141,6 +141,11 @@ class MainFrame(wx.Frame):
         notebook.AddPage(panel, "Download")
 
     def _build_search_tab(self, notebook):
+        from .search import (
+            FFN_CROSSOVER, FFN_GENRE, FFN_LANGUAGE, FFN_MATCH,
+            FFN_RATING, FFN_STATUS, FFN_WORDS,
+        )
+
         panel = wx.Panel(notebook)
         sizer = wx.BoxSizer(wx.VERTICAL)
         pad = 6
@@ -158,6 +163,33 @@ class MainFrame(wx.Frame):
         q_row.Add(self.search_btn, 0)
 
         sizer.Add(q_row, 0, wx.EXPAND | wx.ALL, pad)
+
+        # Filter rows: 4 combos per row
+        self.search_filters = {}
+
+        def add_filter(grid, label, key, choices):
+            grid.Add(
+                wx.StaticText(panel, label=label),
+                0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+            )
+            ctrl = wx.Choice(panel, choices=list(choices))
+            ctrl.SetSelection(0)
+            ctrl.SetName(label.replace("&", "").rstrip(":"))
+            grid.Add(ctrl, 0, wx.RIGHT, 12)
+            self.search_filters[key] = ctrl
+
+        fgrid = wx.FlexGridSizer(rows=0, cols=8, hgap=4, vgap=4)
+        add_filter(fgrid, "&Rating:", "rating", FFN_RATING)
+        add_filter(fgrid, "&Language:", "language", FFN_LANGUAGE)
+        add_filter(fgrid, "S&tatus:", "status", FFN_STATUS)
+        add_filter(fgrid, "&Genre:", "genre", FFN_GENRE)
+        sizer.Add(fgrid, 0, wx.EXPAND | wx.ALL, pad)
+
+        fgrid2 = wx.FlexGridSizer(rows=0, cols=8, hgap=4, vgap=4)
+        add_filter(fgrid2, "&Words:", "min_words", FFN_WORDS)
+        add_filter(fgrid2, "&Crossover:", "crossover", FFN_CROSSOVER)
+        add_filter(fgrid2, "&Match in:", "match", FFN_MATCH)
+        sizer.Add(fgrid2, 0, wx.EXPAND | wx.ALL, pad)
 
         # Results list
         sizer.Add(wx.StaticText(panel, label="&Results:"), 0, wx.LEFT | wx.TOP, pad)
@@ -273,6 +305,16 @@ class MainFrame(wx.Frame):
 
     # ── Search ───────────────────────────────────────────────
 
+    def _collect_search_filters(self):
+        filters = {}
+        for key, ctrl in self.search_filters.items():
+            idx = ctrl.GetSelection()
+            if idx <= 0:
+                # Index 0 is always "any"/"all" — no filter
+                continue
+            filters[key] = ctrl.GetString(idx)
+        return filters
+
     def _on_search(self, event):
         query = self.search_ctrl.GetValue().strip()
         if not query:
@@ -280,19 +322,24 @@ class MainFrame(wx.Frame):
             return
         if self._downloading:
             return
+        filters = self._collect_search_filters()
         self._set_busy(True)
         self.results_ctrl.DeleteAllItems()
         self.summary_ctrl.SetValue("")
         self._search_results = []
-        self._log(f"Searching fanfiction.net for: {query}")
+        filter_str = (
+            " [" + ", ".join(f"{k}={v}" for k, v in filters.items()) + "]"
+            if filters else ""
+        )
+        self._log(f"Searching fanfiction.net for: {query}{filter_str}")
         threading.Thread(
-            target=self._run_search, args=(query,), daemon=True,
+            target=self._run_search, args=(query, filters), daemon=True,
         ).start()
 
-    def _run_search(self, query):
+    def _run_search(self, query, filters):
         try:
             from .search import search_ffn
-            results = search_ffn(query)
+            results = search_ffn(query, **filters)
         except Exception as e:
             self._log(f"Search error: {e}")
             self._set_busy(False)
