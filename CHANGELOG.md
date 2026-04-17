@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.6.0 — 2026-04-17
+
+### Search
+
+- **Literotica series grouping**: results whose titles and URL slugs
+  match the `Ch. NN` / `Pt. NN` pattern now collapse into a single
+  series row per base title. Downloading the row resolves the anchor
+  part's canonical `/series/se/<id>` so chapters that didn't appear
+  in the search are still pulled, then merges everything into one
+  file. Falls back to the visible parts if no series link is found
+  on the page.
+- **AO3 series collapse fix**: a lone work that happened to be part of
+  a series was being promoted into a "Series" row with one part, hiding
+  the work's real title behind the series title. Collapse now requires
+  at least two parts of the same series to appear in the results.
+
 ## 1.5.0 — 2026-04-17
 
 ### Downloads

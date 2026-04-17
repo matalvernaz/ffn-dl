@@ -111,7 +111,11 @@ class TestAO3ResultParsing:
 
 
 class TestCollapseSeries:
-    def test_single_series_work_collapses_to_series_row(self):
+    def test_lone_series_work_stays_as_work(self):
+        # A work that's in a series but is the only part appearing in
+        # the results should stay as a regular work row — promoting it
+        # to a "series" label hides the work's own title behind the
+        # series title with no other parts to show alongside it.
         results = [
             {
                 "title": "Part One",
@@ -130,11 +134,8 @@ class TestCollapseSeries:
         ]
         collapsed = collapse_ao3_series(results)
         assert len(collapsed) == 1
-        row = collapsed[0]
-        assert row["is_series"] is True
-        assert row["title"] == "Saga"
-        assert row["url"] == "s/99"
-        assert row["series_parts"] == [results[0]]
+        assert collapsed[0].get("is_series") is not True
+        assert collapsed[0]["title"] == "Part One"
 
     def test_multi_membership_work_stays_as_work(self):
         results = [
@@ -159,3 +160,67 @@ class TestCollapseSeries:
         assert len(collapsed) == 2
         series_row = next(r for r in collapsed if r.get("is_series"))
         assert len(series_row["series_parts"]) == 2
+
+
+class TestCollapseLiteroticaSeries:
+    def test_two_parts_same_slug_collapse(self):
+        from ffn_dl.search import collapse_literotica_series
+        results = [
+            {
+                "title": "Sample Story Ch. 06",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/sample-story-ch-06",
+                "rating": "4.7", "fandom": "Fetish", "summary": "",
+            },
+            {
+                "title": "Standalone Story",
+                "author": "someone",
+                "url": "https://www.literotica.com/s/standalone-story",
+                "rating": "4", "fandom": "Mature", "summary": "",
+            },
+            {
+                "title": "Sample Story Ch. 07",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/sample-story-ch-07",
+                "rating": "4.6", "fandom": "Fetish", "summary": "",
+            },
+        ]
+        collapsed = collapse_literotica_series(results)
+        # Two parts collapse, standalone is preserved separately
+        assert len(collapsed) == 2
+        series_row = next(r for r in collapsed if r.get("is_series"))
+        assert series_row["title"] == "Sample Story"
+        assert series_row["parts_only"] is True
+        assert len(series_row["series_parts"]) == 2
+        assert series_row["series_id"] == "lit:sample-story"
+
+    def test_lone_chapter_stays_as_work(self):
+        from ffn_dl.search import collapse_literotica_series
+        results = [
+            {
+                "title": "Lone Part Ch. 03",
+                "author": "X",
+                "url": "https://www.literotica.com/s/lone-part-ch-03",
+            },
+        ]
+        collapsed = collapse_literotica_series(results)
+        assert len(collapsed) == 1
+        assert collapsed[0].get("is_series") is not True
+
+    def test_different_authors_do_not_collapse(self):
+        from ffn_dl.search import collapse_literotica_series
+        results = [
+            {
+                "title": "Shared Slug Ch. 01",
+                "author": "A",
+                "url": "https://www.literotica.com/s/shared-slug-ch-01",
+            },
+            {
+                "title": "Shared Slug Ch. 02",
+                "author": "B",
+                "url": "https://www.literotica.com/s/shared-slug-ch-02",
+            },
+        ]
+        collapsed = collapse_literotica_series(results)
+        assert len(collapsed) == 2
+        assert all(not r.get("is_series") for r in collapsed)

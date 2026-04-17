@@ -73,6 +73,18 @@ class LiteroticaScraper(BaseScraper):
     def is_series_url(url):
         return bool(_SERIES_RE.search(str(url)))
 
+    def resolve_series_url(self, story_url):
+        """Given any chapter URL (/s/<slug>-ch-NN), fetch the page and
+        return the canonical /series/se/<id> URL if the story belongs
+        to a series, else None.
+        """
+        slug = self.parse_story_id(story_url)
+        html = self._fetch_page(slug, 1)
+        m = re.search(r"/series/se/(\d+)", html)
+        if not m:
+            return None
+        return f"{LIT_BASE}/series/se/{m.group(1)}"
+
     @staticmethod
     def _content_div(soup):
         """The story body is in a div whose CSS-module class starts

@@ -923,10 +923,12 @@ class MainFrame(wx.Frame):
         self._set_busy(False)
 
     def _populate_results(self, site_key, new_results, next_page, append):
-        from .search import collapse_ao3_series
+        from .search import collapse_ao3_series, collapse_literotica_series
         tab = self._tabs[site_key]
         if site_key == "ao3":
             new_results = collapse_ao3_series(new_results)
+        elif site_key == "literotica":
+            new_results = collapse_literotica_series(new_results)
 
         if append:
             # Merge incoming series rows into existing ones when possible
@@ -1031,10 +1033,27 @@ class MainFrame(wx.Frame):
         self._set_busy(True)
         if picked.get("is_series"):
             self._log(f"Starting series download: {url}")
-            threading.Thread(
-                target=self._run_series_merge_download,
-                args=(url,), daemon=True,
-            ).start()
+            if picked.get("parts_only"):
+                part_urls = [
+                    p.get("url")
+                    for p in (picked.get("series_parts") or [])
+                    if p.get("url")
+                ]
+                series_name = picked.get("title") or "Series"
+                threading.Thread(
+                    target=self._run_series_merge_download,
+                    args=(url,),
+                    kwargs={
+                        "series_name": series_name,
+                        "part_urls": part_urls,
+                    },
+                    daemon=True,
+                ).start()
+            else:
+                threading.Thread(
+                    target=self._run_series_merge_download,
+                    args=(url,), daemon=True,
+                ).start()
         else:
             self._log(f"Starting download: {url}")
             threading.Thread(
@@ -1068,24 +1087,51 @@ class MainFrame(wx.Frame):
                 ).start()
         dlg.Destroy()
 
-    def _run_series_merge_download(self, series_url):
+    def _run_series_merge_download(self, series_url, *, series_name=None, part_urls=None):
         try:
             from .ao3 import AO3Scraper
             from .cli import _merge_stories
             from .literotica import LiteroticaScraper
 
-            if AO3Scraper.is_series_url(series_url):
-                scraper = AO3Scraper()
-            elif LiteroticaScraper.is_series_url(series_url):
-                scraper = LiteroticaScraper()
+            name = series_name
+            work_urls = None
+            if part_urls:
+                # Literotica-style collapsed row. First try resolving the
+                # canonical /series/se/<id> from the anchor part so we can
+                # pick up chapters that never matched the search. Fall
+                # back to the known part URLs if there's no series link.
+                anchor = part_urls[0]
+                try:
+                    lit = LiteroticaScraper()
+                    resolved = lit.resolve_series_url(anchor)
+                except Exception as exc:
+                    resolved = None
+                    self._log(f"  (Couldn't resolve series URL: {exc})")
+                if resolved:
+                    self._log(f"Resolved full series: {resolved}")
+                    try:
+                        name, work_urls = lit.scrape_series_works(resolved)
+                        series_url = resolved
+                    except Exception as exc:
+                        self._log(f"  (Series scrape failed: {exc}); using known parts.")
+                        work_urls = None
+                if not work_urls:
+                    work_urls = part_urls
+                    name = series_name or series_url
             else:
-                scraper = self._scraper_for(series_url)
+                if AO3Scraper.is_series_url(series_url):
+                    scraper = AO3Scraper()
+                elif LiteroticaScraper.is_series_url(series_url):
+                    scraper = LiteroticaScraper()
+                else:
+                    scraper = self._scraper_for(series_url)
 
-            self._log(f"Fetching series: {series_url}")
-            series_name, work_urls = scraper.scrape_series_works(series_url)
+                self._log(f"Fetching series: {series_url}")
+                name, work_urls = scraper.scrape_series_works(series_url)
             if not work_urls:
                 self._log("No works found in this series.")
                 return
+            series_name = name
 
             self._log(f"Series: {series_name}")
             self._log(f"Downloading and merging {len(work_urls)} works...")

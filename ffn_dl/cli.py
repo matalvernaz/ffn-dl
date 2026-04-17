@@ -191,6 +191,78 @@ def _handle_merge_series(series_urls, args, output_dir):
     return all_ok
 
 
+def _handle_merge_parts(series_name, series_url, work_urls, args, output_dir):
+    """Download an explicit list of work URLs and merge them into one file.
+    Used for Literotica-style "series" detected from search-result titles.
+    Tries to resolve the anchor part's canonical /series/se/<id> first so
+    chapters that didn't appear in the search are still included; falls
+    back to the passed-in work URLs if no series link can be found.
+    """
+    if not work_urls:
+        print(f"No parts to merge for {series_name}.", file=sys.stderr)
+        return False
+
+    # Resolve the anchor part to its canonical series (Literotica only).
+    try:
+        anchor_scraper = _build_scraper(work_urls[0], args)
+        if isinstance(anchor_scraper, LiteroticaScraper):
+            resolved = anchor_scraper.resolve_series_url(work_urls[0])
+            if resolved:
+                print(f"Resolved full series: {resolved}")
+                try:
+                    s_name, s_urls = anchor_scraper.scrape_series_works(resolved)
+                    if s_urls:
+                        series_url = resolved
+                        series_name = s_name or series_name
+                        work_urls = s_urls
+                except Exception as exc:
+                    print(
+                        f"  (Series scrape failed: {exc}); using known parts.",
+                        file=sys.stderr,
+                    )
+    except Exception as exc:
+        print(f"  (Couldn't resolve series URL: {exc})", file=sys.stderr)
+
+    print(f"\nSeries: {series_name}")
+    print(f"Downloading and merging {len(work_urls)} parts...\n")
+    stories = []
+    for i, work_url in enumerate(work_urls, 1):
+        print(f"  [{i}/{len(work_urls)}] {work_url}")
+        def progress(current, total, title, cached):
+            tag = " (cached)" if cached else ""
+            print(f"      [{current}/{total}] {title}{tag}")
+        work_scraper = _build_scraper(work_url, args)
+        try:
+            stories.append(
+                work_scraper.download(work_url, progress_callback=progress)
+            )
+        except Exception as exc:
+            print(f"    Error: {exc}", file=sys.stderr)
+
+    if not stories:
+        print(f"Nothing downloaded for {series_name}.", file=sys.stderr)
+        return False
+
+    merged = _merge_stories(series_name, series_url, stories)
+    print(f"\n  Merged {len(stories)} parts / {len(merged.chapters)} sections")
+    if args.format == "audio":
+        from .tts import generate_audiobook
+        def audio_progress(current, total, title):
+            print(f"  Synthesizing [{current}/{total}] {title}")
+        path = generate_audiobook(
+            merged, str(output_dir), progress_callback=audio_progress
+        )
+    else:
+        exporter = EXPORTERS[args.format]
+        path = exporter(
+            merged, str(output_dir), template=args.name,
+            hr_as_stars=args.hr_as_stars,
+            strip_notes=args.strip_notes,
+        )
+    print(f"  Saved: {path}")
+    return True
+
+
 def _build_scraper(url, args):
     """Build a scraper instance for the given URL using CLI args."""
     scraper_cls = _detect_site(url)
@@ -357,7 +429,7 @@ _LIT_URL_RE = re.compile(
 def _handle_search(args):
     """Interactive search mode: search the chosen site, display results, download on pick."""
     from .search import (
-        collapse_ao3_series, fetch_until_limit,
+        collapse_ao3_series, collapse_literotica_series, fetch_until_limit,
         search_ao3, search_ffn, search_literotica, search_royalroad,
     )
 
@@ -427,6 +499,8 @@ def _handle_search(args):
 
     if args.site == "ao3":
         results = collapse_ao3_series(results)
+    elif args.site == "literotica":
+        results = collapse_literotica_series(results)
 
     def _print_results(rs, start_idx=1):
         for i, r in enumerate(rs, start=start_idx):
@@ -492,6 +566,8 @@ def _handle_search(args):
                 continue
             if args.site == "ao3":
                 more_raw = collapse_ao3_series(more_raw)
+            elif args.site == "literotica":
+                more_raw = collapse_literotica_series(more_raw)
             start_at = len(results) + 1
             results.extend(more_raw)
             _print_results(more_raw, start_idx=start_at)
@@ -511,7 +587,20 @@ def _handle_search(args):
 
         if picked.get("is_series"):
             args.merge_series = True
-            ok = _handle_merge_series([picked["url"]], args, output_dir)
+            if picked.get("parts_only"):
+                part_urls = [
+                    p["url"] for p in (picked.get("series_parts") or [])
+                    if p.get("url")
+                ]
+                ok = _handle_merge_parts(
+                    picked.get("title") or "Series",
+                    picked.get("url") or "",
+                    part_urls,
+                    args,
+                    output_dir,
+                )
+            else:
+                ok = _handle_merge_series([picked["url"]], args, output_dir)
         else:
             ok = _download_one(picked["url"], args, output_dir)
         sys.exit(0 if ok else 1)

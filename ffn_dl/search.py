@@ -741,19 +741,27 @@ def fetch_until_limit(search_fn, query, *, limit, start_page=1, **kwargs):
 
 
 def collapse_ao3_series(results):
-    """Replace AO3 work results that belong to a series with a single
-    series row, preserving non-series works in place. The series row
-    carries the list of known parts under the "series_parts" key so
-    callers can expand it back out if the user wants to see the pieces.
+    """Fold multiple AO3 works that share a series into a single series
+    row, but only when 2+ parts of the same series appear in the results.
+    Solo matches stay as regular work rows — promoting them to a "series"
+    label hides the work's real title behind the series title.
 
-    Works that belong to more than one series still appear as a work
-    row — collapsing them would hide the multi-membership.
+    Works that belong to more than one series still appear as work rows;
+    collapsing them would hide the multi-membership.
     """
+    series_counts = {}
+    for r in results:
+        series = r.get("series") or []
+        if len(series) != 1:
+            continue
+        sid = series[0]["id"]
+        series_counts[sid] = series_counts.get(sid, 0) + 1
+
     collapsed = []
     seen_series = {}
     for r in results:
         series = r.get("series") or []
-        if len(series) != 1:
+        if len(series) != 1 or series_counts.get(series[0]["id"], 0) < 2:
             collapsed.append(r)
             continue
         s = series[0]
@@ -766,7 +774,7 @@ def collapse_ao3_series(results):
             "url": s["url"],
             "summary": r.get("summary", ""),
             "words": "?",
-            "chapters": "?",
+            "chapters": str(series_counts[s["id"]]),
             "rating": r.get("rating", "?"),
             "fandom": r.get("fandom", ""),
             "status": "Series",
@@ -776,6 +784,92 @@ def collapse_ao3_series(results):
         }
         seen_series[s["id"]] = row
         collapsed.append(row)
+    return collapsed
+
+
+# Literotica titles suffix chapters/parts inline: "Foo Ch. 07", "Bar Pt. 02".
+# The URL slug mirrors it: /s/foo-ch-07, /s/bar-pt-02. Authors occasionally
+# append a variant tag after the number ("Ch. 07 - Alt Ending"); we strip
+# that so variants group with their canonical siblings.
+_LIT_CHAPTER_URL_RE = re.compile(
+    r"/s/(.+?)-(?:ch|chapter|pt|part)-(\d+)(?:-[^/]*)?/?$",
+    re.IGNORECASE,
+)
+_LIT_CHAPTER_TITLE_RE = re.compile(
+    r"^(.*?)[\s:]+(?:Ch|Chapter|Pt|Part)\.?\s*(\d+)(?:\s*[-:].*)?$",
+    re.IGNORECASE,
+)
+
+
+def _literotica_series_key(result):
+    """Return (base_slug, part_number, base_title) if the result looks like
+    a numbered chapter of a larger Literotica work, else None."""
+    url = result.get("url") or ""
+    m = _LIT_CHAPTER_URL_RE.search(url)
+    if not m:
+        return None
+    base_slug = m.group(1).lower()
+    try:
+        part = int(m.group(2))
+    except ValueError:
+        return None
+    title = result.get("title") or ""
+    tm = _LIT_CHAPTER_TITLE_RE.match(title)
+    base_title = tm.group(1).strip() if tm else title
+    return base_slug, part, base_title
+
+
+def collapse_literotica_series(results):
+    """Group Literotica results that are numbered chapters of the same
+    work (same URL slug stem, same author) into one series row. Only
+    collapses when 2+ parts are present — otherwise a lone "Ch. 06"
+    would be hidden behind a series label with no siblings to show.
+    """
+    groups = {}  # (author, base_slug) → [(index, result, part, base_title)]
+    for i, r in enumerate(results):
+        key = _literotica_series_key(r)
+        if key is None:
+            continue
+        base_slug, part, base_title = key
+        group_key = (r.get("author") or "", base_slug)
+        groups.setdefault(group_key, []).append((i, r, part, base_title))
+
+    to_collapse = {}  # anchor index → series row
+    hide = set()
+    for group_key, members in groups.items():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda m: m[2])
+        anchor_i, anchor_r, _, base_title = members[0]
+        parts = [m[1] for m in members]
+        for i, *_ in members:
+            hide.add(i)
+        to_collapse[anchor_i] = {
+            "title": base_title,
+            "author": anchor_r.get("author", ""),
+            "url": anchor_r.get("url", ""),
+            "summary": anchor_r.get("summary", ""),
+            "words": "?",
+            "chapters": str(len(parts)),
+            "rating": anchor_r.get("rating", "?"),
+            "fandom": anchor_r.get("fandom", ""),
+            "status": "Series",
+            "is_series": True,
+            "series_id": f"lit:{group_key[1]}",
+            "series_parts": parts,
+            # Signal to the download dispatch: iterate series_parts URLs
+            # directly rather than trying to resolve a /series/se/<id>.
+            "parts_only": True,
+        }
+
+    collapsed = []
+    for i, r in enumerate(results):
+        if i in to_collapse:
+            collapsed.append(to_collapse[i])
+        elif i in hide:
+            continue
+        else:
+            collapsed.append(r)
     return collapsed
 
 
