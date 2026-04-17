@@ -81,12 +81,16 @@ class MainFrame(wx.Frame):
             size=(820, 720),
             style=wx.DEFAULT_FRAME_STYLE,
         )
+        from .prefs import Prefs
+        self.prefs = Prefs()
         self._downloading = False
         self._watching = False
         self._watch_seen = set()
         self._last_clip = ""
         self._tabs = {}  # site_key → {query_ctrl, results_ctrl, summary_ctrl, search_dl_btn, search_btn, filter_ctrls, text_ctrls, checkbox_ctrls, search_fn, results}
         self._build_ui()
+        self._load_prefs()
+        self.Bind(wx.EVT_CLOSE, self._on_close)
         self.Centre()
 
     def _build_ui(self):
@@ -320,6 +324,45 @@ class MainFrame(wx.Frame):
         if dlg.ShowModal() == wx.ID_OK:
             self.output_ctrl.SetValue(dlg.GetPath())
         dlg.Destroy()
+
+    # ── Prefs ────────────────────────────────────────────────
+
+    def _load_prefs(self):
+        from . import prefs as _p
+
+        tmpl = self.prefs.get(_p.KEY_NAME_TEMPLATE)
+        if tmpl:
+            self.name_ctrl.SetValue(tmpl)
+
+        fmt = self.prefs.get(_p.KEY_FORMAT)
+        if fmt:
+            formats = [
+                self.format_ctrl.GetString(i)
+                for i in range(self.format_ctrl.GetCount())
+            ]
+            if fmt in formats:
+                self.format_ctrl.SetSelection(formats.index(fmt))
+
+        out = self.prefs.get(_p.KEY_OUTPUT_DIR)
+        if out:
+            self.output_ctrl.SetValue(out)
+
+    def _save_prefs(self):
+        from . import prefs as _p
+
+        self.prefs.set(_p.KEY_NAME_TEMPLATE, self.name_ctrl.GetValue())
+        self.prefs.set(
+            _p.KEY_FORMAT,
+            self.format_ctrl.GetString(self.format_ctrl.GetSelection()),
+        )
+        self.prefs.set(_p.KEY_OUTPUT_DIR, self.output_ctrl.GetValue())
+
+    def _on_close(self, event):
+        try:
+            self._save_prefs()
+        except Exception:
+            pass
+        event.Skip()
 
     # ── Download ─────────────────────────────────────────────
 
