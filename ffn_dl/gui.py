@@ -18,6 +18,7 @@ _FFN_URL_RE = re.compile(
     r"fanfiction\.net/s/\d+"
     r"|ficwad\.com/story/\d+"
     r"|(?:archiveofourown\.org|ao3\.org)/works/\d+"
+    r"|royalroad\.com/fiction/\d+"
     r")"
 )
 
@@ -815,6 +816,7 @@ class MainFrame(wx.Frame):
     def _scraper_for(self, url):
         from .ao3 import AO3Scraper
         from .ficwad import FicWadScraper
+        from .royalroad import RoyalRoadScraper
         from .scraper import FFNScraper
 
         text = url.lower()
@@ -822,6 +824,8 @@ class MainFrame(wx.Frame):
             return FicWadScraper()
         if "archiveofourown.org" in text or "ao3.org" in text:
             return AO3Scraper()
+        if "royalroad.com" in text:
+            return RoyalRoadScraper()
         return FFNScraper()
 
     def _export_story(self, story):

@@ -258,6 +258,8 @@ def _site_info(url: str) -> tuple[str, str]:
         return "ao3", "archiveofourown.org"
     if "ficwad.com" in text:
         return "ficwad", "ficwad.com"
+    if "royalroad.com" in text:
+        return "royalroad", "royalroad.com"
     return "ffn", "fanfiction.net"
 
 

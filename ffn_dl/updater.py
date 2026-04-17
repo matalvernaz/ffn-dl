@@ -122,6 +122,7 @@ def extract_source_url(filepath):
         r"fanfiction\.net/s/\d+"
         r"|ficwad\.com/story/\d+"
         r"|(?:archiveofourown\.org|ao3\.org)/works/\d+"
+        r"|royalroad\.com/fiction/\d+"
         r")",
         text,
     )

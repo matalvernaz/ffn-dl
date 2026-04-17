@@ -9,6 +9,7 @@ from pathlib import Path
 from .ao3 import AO3LockedError, AO3Scraper
 from .exporters import DEFAULT_TEMPLATE, EXPORTERS
 from .ficwad import FicWadScraper
+from .royalroad import RoyalRoadScraper
 from .scraper import (
     CloudflareBlockError,
     FFNScraper,
@@ -25,6 +26,8 @@ def _detect_site(url):
         return FicWadScraper
     if "archiveofourown.org" in text or "ao3.org" in text:
         return AO3Scraper
+    if "royalroad.com" in text:
+        return RoyalRoadScraper
     return FFNScraper
 
 
@@ -34,6 +37,7 @@ def _is_author_url(url):
         FFNScraper.is_author_url(url)
         or FicWadScraper.is_author_url(url)
         or AO3Scraper.is_author_url(url)
+        or RoyalRoadScraper.is_author_url(url)
     )
 
 
@@ -326,6 +330,9 @@ _FFN_URL_RE = re.compile(r"https?://(?:www\.)?fanfiction\.net/s/\d+", re.I)
 _FICWAD_URL_RE = re.compile(r"https?://(?:www\.)?ficwad\.com/story/\d+", re.I)
 _AO3_URL_RE = re.compile(
     r"https?://(?:www\.)?(?:archiveofourown\.org|ao3\.org)/works/\d+", re.I
+)
+_RR_URL_RE = re.compile(
+    r"https?://(?:www\.)?royalroad\.com/fiction/\d+", re.I
 )
 
 
@@ -647,7 +654,7 @@ def _handle_watch(args):
 
             # Check if clipboard contains a supported URL
             url = None
-            for pattern in (_FFN_URL_RE, _FICWAD_URL_RE, _AO3_URL_RE):
+            for pattern in (_FFN_URL_RE, _FICWAD_URL_RE, _AO3_URL_RE, _RR_URL_RE):
                 match = pattern.search(clip)
                 if match:
                     url = match.group(0)
@@ -677,7 +684,8 @@ def main(argv=None):
         prog="ffn-dl",
         description="Download fanfiction from fanfiction.net and ficwad.com",
         epilog=(
-            "Supported sites: fanfiction.net, ficwad.com, archiveofourown.org\n"
+            "Supported sites: fanfiction.net, ficwad.com, "
+            "archiveofourown.org, royalroad.com\n"
             "Name template placeholders: "
             "{title} {author} {id} {words} {status} {rating} {language} {chapters}"
         ),
