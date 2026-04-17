@@ -249,15 +249,41 @@ class MainFrame(wx.Frame):
 
     # ── Download worker ──────────────────────────────────────
 
+    def _scraper_for(self, url):
+        from .ficwad import FicWadScraper
+        from .scraper import FFNScraper
+
+        if "ficwad.com" in url.lower():
+            return FicWadScraper()
+        return FFNScraper()
+
+    def _export_story(self, story):
+        fmt = self.format_ctrl.GetString(self.format_ctrl.GetSelection())
+        output_dir = self.output_ctrl.GetValue()
+        template = self.name_ctrl.GetValue()
+
+        if fmt == "audio":
+            from .tts import generate_audiobook
+
+            def audio_progress(current, total, title):
+                self._log(f"  Synthesizing [{current}/{total}] {title}")
+
+            self._log("\nGenerating audiobook...")
+            return generate_audiobook(
+                story, output_dir, progress_callback=audio_progress
+            )
+
+        from .exporters import EXPORTERS
+        exporter = EXPORTERS[fmt]
+        return exporter(story, output_dir, template=template)
+
     def _run_download(self, url, skip_chapters=0, is_update=False):
         try:
-            from .ficwad import FicWadScraper
-            from .scraper import FFNScraper
+            scraper = self._scraper_for(url)
 
-            if "ficwad.com" in url.lower():
-                scraper = FicWadScraper()
-            else:
-                scraper = FFNScraper()
+            if not is_update and scraper.is_author_url(url):
+                self._run_author_download(url, scraper)
+                return
 
             scraper.parse_story_id(url)
 
@@ -282,31 +308,46 @@ class MainFrame(wx.Frame):
             self._log(f"  Author:   {story.author}")
             self._log(f"  Chapters: {len(story.chapters)}")
 
-            fmt = self.format_ctrl.GetString(self.format_ctrl.GetSelection())
-            output_dir = self.output_ctrl.GetValue()
-            template = self.name_ctrl.GetValue()
-
-            if fmt == "audio":
-                from .tts import generate_audiobook
-
-                def audio_progress(current, total, title):
-                    self._log(f"  Synthesizing [{current}/{total}] {title}")
-
-                self._log("\nGenerating audiobook...")
-                path = generate_audiobook(
-                    story, output_dir, progress_callback=audio_progress
-                )
-            else:
-                from .exporters import EXPORTERS
-                exporter = EXPORTERS[fmt]
-                path = exporter(story, output_dir, template=template)
-
+            path = self._export_story(story)
             self._log(f"\nDone! Saved to: {path}")
 
         except Exception as e:
             self._log(f"\nError: {e}")
         finally:
             self._set_busy(False)
+
+    def _run_author_download(self, url, scraper):
+        self._log(f"Fetching author page: {url}")
+        author_name, story_urls = scraper.scrape_author_stories(url)
+        if not story_urls:
+            self._log("No stories found on the author page.")
+            return
+        self._log(f"Author: {author_name}")
+        self._log(f"Found {len(story_urls)} stories. Downloading all...")
+
+        def progress(current, total, title, cached):
+            tag = " (cached)" if cached else ""
+            self._log(f"    [{current}/{total}] {title}{tag}")
+
+        succeeded = 0
+        failed = []
+        for i, story_url in enumerate(story_urls, 1):
+            self._log(f"\n[{i}/{len(story_urls)}] {story_url}")
+            try:
+                story = scraper.download(story_url, progress_callback=progress)
+                path = self._export_story(story)
+                self._log(f"  Saved: {path}")
+                succeeded += 1
+            except Exception as e:
+                self._log(f"  Error: {e}")
+                failed.append(story_url)
+
+        self._log(
+            f"\nAuthor batch complete: {succeeded} succeeded, "
+            f"{len(failed)} failed out of {len(story_urls)}."
+        )
+        for u in failed:
+            self._log(f"  Failed: {u}")
 
 
 def main():

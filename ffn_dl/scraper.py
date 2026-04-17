@@ -336,8 +336,14 @@ class FFNScraper(BaseScraper):
 
     @staticmethod
     def is_author_url(url):
-        """Return True if the URL is an FFN author page."""
-        return bool(re.search(r"fanfiction\.net/u/\d+", str(url)))
+        """Return True if the URL is an FFN author page.
+
+        Accepts both the canonical form (/u/<id>[/<name>]) and the
+        short vanity form (/~<name>), which FFN redirects to /u/<id>/<name>.
+        """
+        return bool(
+            re.search(r"fanfiction\.net/(?:u/\d+|~[\w.-]+)", str(url))
+        )
 
     def scrape_author_stories(self, url):
         """Fetch an FFN author page and return (author_name, [story_urls]).
