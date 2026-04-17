@@ -352,10 +352,31 @@ def _ffn_row_to_work(row, story_id, section):
     if not rating:
         rating = _FFN_RATING_ID_TO_LABEL.get(row.get("data-ratingid", ""), "")
 
+    # Summary lives in z-padtop with the meta div (z-padtop2) nested
+    # inside it. Walk the top-level children and skip the meta div so
+    # we get just the blurb text.
+    summary = ""
+    summary_div = row.find("div", class_="z-padtop")
+    if summary_div:
+        parts = []
+        for child in summary_div.children:
+            if getattr(child, "get", None) and "z-padtop2" in (
+                child.get("class") or []
+            ):
+                continue
+            if hasattr(child, "get_text"):
+                text = child.get_text(" ", strip=True)
+            else:
+                text = str(child).strip()
+            if text:
+                parts.append(text)
+        summary = " ".join(parts).strip()
+
     return {
         "title": title,
         "url": f"{FFN_BASE}/s/{story_id}",
         "author": author,
+        "summary": summary,
         "words": row.get("data-wordcount", "") or "",
         "chapters": row.get("data-chapters", "") or "1",
         "rating": rating,

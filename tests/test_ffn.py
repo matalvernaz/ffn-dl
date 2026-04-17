@@ -141,6 +141,29 @@ class TestAuthorWorks:
         assert fav["status"] == "In-Progress"
         assert fav["author"] == "Another Writer"
 
+    def test_summary_extracted_from_row(self):
+        html = """
+        <html><body>
+          <title>Writer | FanFiction</title>
+          <div id="st_inside">
+            <div class="z-list mystories"
+                 data-storyid="1" data-title="First"
+                 data-wordcount="100" data-chapters="1" data-statusid="1"
+                 data-category="X">
+              <a class="stitle" href="/s/1/1">First</a>
+              <div class="z-indent z-padtop">
+                A thrilling blurb about the story.
+                <div class="z-padtop2">X - Rated: T</div>
+              </div>
+            </div>
+          </div>
+        </body></html>
+        """
+        scraper = FFNScraper(use_cache=False)
+        with mock.patch.object(scraper, "_fetch", return_value=html):
+            _, works = scraper.scrape_author_works("https://www.fanfiction.net/u/1")
+        assert works[0]["summary"] == "A thrilling blurb about the story."
+
 
 class TestSearchParsing:
     def test_results_extract_expected_shape(self, ffn_search_html):

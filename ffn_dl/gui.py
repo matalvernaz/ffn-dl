@@ -1752,7 +1752,28 @@ class StoryPickerDialog(wx.Dialog):
 
         self.list_ctrl = wx.CheckListBox(panel, choices=[])
         self.list_ctrl.SetName("Stories to download")
+        # wx.CheckListBox's MSAA check-state reporting is unreliable with
+        # NVDA on Windows — prepend "[x] " / "[ ] " to every label so the
+        # state is read out as part of the item text. EVT_CHECKLISTBOX
+        # refreshes the prefix on toggle; EVT_LISTBOX updates the summary
+        # pane as the user arrows through.
+        self.list_ctrl.Bind(wx.EVT_CHECKLISTBOX, self._on_item_toggled)
+        self.list_ctrl.Bind(wx.EVT_LISTBOX, self._on_item_focus_changed)
         sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+
+        # Summary pane: mirrors the selected row's summary so keyboard
+        # users don't have to abandon the dialog to see what a story is.
+        sizer.Add(
+            wx.StaticText(panel, label="S&ummary:"),
+            0, wx.LEFT | wx.RIGHT, 8,
+        )
+        self.summary_ctrl = wx.TextCtrl(
+            panel,
+            style=wx.TE_MULTILINE | wx.TE_READONLY,
+            size=(-1, 80),
+        )
+        self.summary_ctrl.SetName("Story summary")
+        sizer.Add(self.summary_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
         hint = wx.StaticText(
             panel,
@@ -1761,7 +1782,7 @@ class StoryPickerDialog(wx.Dialog):
                 "and press Download to fetch every ticked story."
             ),
         )
-        sizer.Add(hint, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        sizer.Add(hint, 0, wx.ALL, 8)
 
         btn_row = wx.BoxSizer(wx.HORIZONTAL)
         btn_row.AddStretchSpacer(1)
@@ -1784,8 +1805,11 @@ class StoryPickerDialog(wx.Dialog):
         m = re.match(r"\d+", s)
         return int(m.group(0)) if m else 0
 
-    def _label(self, w):
-        parts = [w.get("title", "") or "(untitled)"]
+    def _label(self, w, checked=False):
+        # Leading "[x] " / "[ ] " so NVDA reads the state as part of the
+        # item; the native MSAA state is unreliable in CheckListBox.
+        prefix = "[x] " if checked else "[ ] "
+        parts = [prefix, w.get("title", "") or "(untitled)"]
         meta = []
         if w.get("author"):
             meta.append(f"by {w['author']}")
@@ -1822,20 +1846,56 @@ class StoryPickerDialog(wx.Dialog):
 
     def _refresh(self):
         idxs = self._visible_indices()
-        labels = [self._label(self._works[i]) for i in idxs]
         # Preserve ticks across re-sort/filter by URL
         ticked_urls = {
             self._works[self._visible_map[j]]["url"]
             for j in self.list_ctrl.GetCheckedItems()
         } if getattr(self, "_visible_map", None) else set()
+        labels = [
+            self._label(
+                self._works[i],
+                checked=self._works[i].get("url") in ticked_urls,
+            )
+            for i in idxs
+        ]
         self.list_ctrl.Set(labels)
         self._visible_map = idxs
-        restored = []
-        for j, i in enumerate(idxs):
-            if self._works[i].get("url") in ticked_urls:
-                restored.append(j)
+        restored = [
+            j for j, i in enumerate(idxs)
+            if self._works[i].get("url") in ticked_urls
+        ]
         if restored:
             self.list_ctrl.SetCheckedItems(restored)
+        # Refresh the summary pane for whatever row is currently focused.
+        self._update_summary()
+
+    def _update_label_at(self, row):
+        if not (0 <= row < len(self._visible_map)):
+            return
+        w = self._works[self._visible_map[row]]
+        checked = self.list_ctrl.IsChecked(row)
+        self.list_ctrl.SetString(row, self._label(w, checked=checked))
+
+    def _update_summary(self):
+        if not hasattr(self, "summary_ctrl"):
+            return
+        row = self.list_ctrl.GetSelection()
+        if row == wx.NOT_FOUND or not (0 <= row < len(self._visible_map)):
+            self.summary_ctrl.SetValue("")
+            return
+        w = self._works[self._visible_map[row]]
+        summary = w.get("summary") or ""
+        if not summary:
+            summary = "(no summary)"
+        self.summary_ctrl.SetValue(summary)
+
+    def _on_item_toggled(self, event):
+        self._update_label_at(event.GetSelection())
+        event.Skip()
+
+    def _on_item_focus_changed(self, event):
+        self._update_summary()
+        event.Skip()
 
     def _on_sort_change(self, event):
         idx = self.sort_ctrl.GetSelection()
@@ -1885,6 +1945,9 @@ class StoryPickerDialog(wx.Dialog):
             self.list_ctrl.SetCheckedItems(indices)
         else:
             self.list_ctrl.SetCheckedItems([])
+        # Rewrite every label so the "[x] / [ ]" prefix reflects the new state.
+        for row in indices:
+            self._update_label_at(row)
 
     def _on_ok(self, event):
         ticked = self.list_ctrl.GetCheckedItems()

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.6.4 — 2026-04-17
+
+### Accessibility
+
+- **Author / bookmark picker now announces checked state to NVDA**:
+  `wx.CheckListBox`'s native MSAA check-state reporting was unreliable
+  on Windows, so screen-reader users couldn't tell which stories they
+  had ticked. Every row now carries a literal `[x] ` or `[ ] ` prefix
+  that rewrites on toggle and on *Select All* / *Select None*.
+- **Summary pane in the picker**: a read-only multi-line field below
+  the list shows the currently focused story's summary and updates as
+  you arrow through. Keyboard-only users no longer have to abandon
+  the dialog to see what a story is about.
+- **FFN author rows now carry a summary**: `scrape_author_works` used
+  to return the title / meta / stats but drop the blurb. The summary
+  was missing from every FFN author picker session until now.
+
 ## 1.6.3 — 2026-04-17
 
 ### Royal Road
