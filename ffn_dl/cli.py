@@ -497,10 +497,14 @@ def _handle_search(args):
         print("No results found.")
         sys.exit(0)
 
+    # Keep the raw uncollapsed list so load-more can re-collapse the full
+    # set — series parts that cross page boundaries need to see each
+    # other to group correctly.
+    raw_results = list(results)
     if args.site == "ao3":
-        results = collapse_ao3_series(results)
+        results = collapse_ao3_series(raw_results)
     elif args.site == "literotica":
-        results = collapse_literotica_series(results)
+        results = collapse_literotica_series(raw_results)
 
     def _print_results(rs, start_idx=1):
         for i, r in enumerate(rs, start=start_idx):
@@ -564,13 +568,16 @@ def _handle_search(args):
             if not more_raw:
                 print("(No more results.)")
                 continue
+            raw_results.extend(more_raw)
             if args.site == "ao3":
-                more_raw = collapse_ao3_series(more_raw)
+                results = collapse_ao3_series(raw_results)
             elif args.site == "literotica":
-                more_raw = collapse_literotica_series(more_raw)
-            start_at = len(results) + 1
-            results.extend(more_raw)
-            _print_results(more_raw, start_idx=start_at)
+                results = collapse_literotica_series(raw_results)
+            else:
+                results = list(raw_results)
+            # Reprint the full list so numbering matches the merged view.
+            print()
+            _print_results(results)
             continue
 
         picked = results[picked_n - 1]

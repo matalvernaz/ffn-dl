@@ -816,20 +816,33 @@ _LIT_CHAPTER_TITLE_RE = re.compile(
 
 def _literotica_series_key(result):
     """Return (base_slug, part_number, base_title) if the result looks like
-    a numbered chapter of a larger Literotica work, else None."""
+    a numbered chapter of a larger Literotica work, else None.
+
+    URL patterns with an explicit `ch`/`pt`/`part`/`p<N>` marker are
+    trusted on the URL alone. The bare `-N` URL suffix is ambiguous
+    (it also matches year-tagged annual stories like
+    `/s/new-years-eve-2024`) so it's only accepted when the *title*
+    also carries a numeric chapter marker.
+    """
     url = result.get("url") or ""
-    for pattern in (
-        _LIT_CHAPTER_URL_RE, _LIT_COMPACT_P_URL_RE, _LIT_BARE_NUM_URL_RE,
-    ):
+    title = result.get("title") or ""
+    title_has_marker = bool(_LIT_CHAPTER_TITLE_RE.match(title))
+    strict_patterns = (
+        (_LIT_CHAPTER_URL_RE, True),
+        (_LIT_COMPACT_P_URL_RE, True),
+        (_LIT_BARE_NUM_URL_RE, title_has_marker),
+    )
+    for pattern, accept in strict_patterns:
         m = pattern.search(url)
         if not m:
             continue
+        if not accept:
+            return None
         base_slug = m.group(1).lower()
         try:
             part = int(m.group(2))
         except ValueError:
             continue
-        title = result.get("title") or ""
         tm = _LIT_CHAPTER_TITLE_RE.match(title)
         base_title = tm.group(1).strip() if tm else title
         return base_slug, part, base_title
@@ -867,7 +880,11 @@ def collapse_literotica_series(results):
         seen_indices.add(i)
 
     # Second pass: adopt bare-titled results as part 1 when their slug
-    # matches an existing group's base_slug and the author lines up.
+    # matches an existing group's base_slug and the author lines up —
+    # but only if that group doesn't *already* have an explicit Part 1
+    # member. That guard prevents a standalone work that happens to
+    # share a slug prefix with a later, unrelated serial from being
+    # folded into it.
     for i, r in enumerate(results):
         if i in seen_indices:
             continue
@@ -875,9 +892,13 @@ def collapse_literotica_series(results):
         if not bare:
             continue
         group_key = (r.get("author") or "", bare)
-        if group_key in groups:
-            title = r.get("title") or bare
-            groups[group_key].append((i, r, 1, title))
+        if group_key not in groups:
+            continue
+        existing_parts = {m[2] for m in groups[group_key]}
+        if 1 in existing_parts:
+            continue
+        title = r.get("title") or bare
+        groups[group_key].append((i, r, 1, title))
 
     to_collapse = {}  # anchor index → series row
     hide = set()

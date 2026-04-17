@@ -270,6 +270,59 @@ class TestCollapseLiteroticaSeries:
         assert collapsed[0].get("is_series") is True
         assert len(collapsed[0]["series_parts"]) == 2
 
+    def test_annual_year_slugs_not_treated_as_series(self):
+        # /s/foo-2023 and /s/foo-2024 are common for annual one-shots.
+        # Without a chapter marker in the title, they should NOT be
+        # collapsed into a series.
+        from ffn_dl.search import collapse_literotica_series
+        results = [
+            {
+                "title": "New Year's Eve 2023",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/new-years-eve-2023",
+            },
+            {
+                "title": "New Year's Eve 2024",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/new-years-eve-2024",
+            },
+        ]
+        collapsed = collapse_literotica_series(results)
+        assert len(collapsed) == 2
+        assert all(not r.get("is_series") for r in collapsed)
+
+    def test_bare_title_not_adopted_when_group_already_has_part_1(self):
+        # Edge: standalone `/s/foo` coexists with a later unrelated serial
+        # `/s/foo-ch-01, /s/foo-ch-02` by the same author. The standalone
+        # should stay standalone — its slug stem collision with the serial
+        # is accidental, and the serial already has its own explicit
+        # chapter 1.
+        from ffn_dl.search import collapse_literotica_series
+        results = [
+            {
+                "title": "Foo",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/foo",
+            },
+            {
+                "title": "Foo Ch. 01",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/foo-ch-01",
+            },
+            {
+                "title": "Foo Ch. 02",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/foo-ch-02",
+            },
+        ]
+        collapsed = collapse_literotica_series(results)
+        # One standalone row + one collapsed series row (2 parts)
+        assert len(collapsed) == 2
+        series_row = next(r for r in collapsed if r.get("is_series"))
+        assert len(series_row["series_parts"]) == 2
+        standalone = next(r for r in collapsed if not r.get("is_series"))
+        assert standalone["title"] == "Foo"
+
     def test_compact_p_suffix_collapses(self):
         from ffn_dl.search import collapse_literotica_series
         results = [

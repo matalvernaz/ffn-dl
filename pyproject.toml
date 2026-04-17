@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ffn-dl"
-version = "1.6.1"
+version = "1.6.2"
 description = "Cross-platform fanfiction downloader (FFN, AO3, FicWad, Royal Road, MediaMiner, Literotica)"
 requires-python = ">=3.9"
 dependencies = [

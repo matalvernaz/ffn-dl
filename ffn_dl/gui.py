@@ -874,6 +874,7 @@ class MainFrame(wx.Frame):
         tab["results_ctrl"].DeleteAllItems()
         tab["summary_ctrl"].SetValue("")
         tab["results"] = []
+        tab["_raw_results"] = []
         tab["next_page"] = 1
         tab["last_query"] = query
         tab["last_filters"] = filters
@@ -925,44 +926,33 @@ class MainFrame(wx.Frame):
     def _populate_results(self, site_key, new_results, next_page, append):
         from .search import collapse_ao3_series, collapse_literotica_series
         tab = self._tabs[site_key]
-        if site_key == "ao3":
-            new_results = collapse_ao3_series(new_results)
-        elif site_key == "literotica":
-            new_results = collapse_literotica_series(new_results)
 
+        # Keep the raw (uncollapsed) results across load-more so we can
+        # re-run collapse on the full set — otherwise parts of the same
+        # series that span page boundaries (e.g. `Miss Abby` on page 1,
+        # `Miss Abby Pt. 02` on page 2) never find each other.
         if append:
-            # Merge incoming series rows into existing ones when possible
-            existing_series = {
-                r.get("series_id"): r
-                for r in tab["results"]
-                if r.get("is_series") and r.get("series_id")
-            }
-            merged_additions = []
-            for r in new_results:
-                sid = r.get("series_id") if r.get("is_series") else None
-                if sid and sid in existing_series:
-                    existing_series[sid]["series_parts"].extend(
-                        r.get("series_parts", [])
-                    )
-                    continue
-                merged_additions.append(r)
+            raw = list(tab.get("_raw_results") or []) + list(new_results)
         else:
-            merged_additions = new_results
-            tab["results"] = []
+            raw = list(new_results)
+        tab["_raw_results"] = raw
 
-        tab["results"].extend(merged_additions)
+        if site_key == "ao3":
+            processed = collapse_ao3_series(raw)
+        elif site_key == "literotica":
+            processed = collapse_literotica_series(raw)
+        else:
+            processed = list(raw)
+
+        previous_count = len(tab["results"]) if append else 0
+        tab["results"] = processed
         tab["next_page"] = next_page
 
         ctrl = tab["results_ctrl"]
         ctrl.Freeze()
         try:
-            if not append:
-                ctrl.DeleteAllItems()
-            if not tab["results"] and not append:
-                self._log("No results found.")
-                return
-            start_row = ctrl.GetItemCount() if append else 0
-            for r in merged_additions:
+            ctrl.DeleteAllItems()
+            for r in tab["results"]:
                 row = ctrl.InsertItem(ctrl.GetItemCount(), self._result_title(r))
                 ctrl.SetItem(row, 1, r.get("author", "") or "")
                 ctrl.SetItem(row, 2, r.get("fandom", "") or "")
@@ -973,19 +963,26 @@ class MainFrame(wx.Frame):
         finally:
             ctrl.Thaw()
 
-        tab["load_more_btn"].Enable(bool(merged_additions) and not self._downloading)
-        if append and merged_additions:
-            self._log(f"Loaded {len(merged_additions)} more (total {len(tab['results'])}).")
-            ctrl.SetFocus()
-            ctrl.Focus(start_row)
-            ctrl.Select(start_row)
-        elif append and not merged_additions:
-            self._log("No more results.")
+        tab["load_more_btn"].Enable(bool(new_results) and not self._downloading)
+        if not tab["results"]:
+            self._log("No results found." if not append else "No more results.")
+            return
+
+        if append:
+            added = len(tab["results"]) - previous_count
+            focus_row = previous_count if added > 0 else 0
+            self._log(
+                f"Loaded more. Total {len(tab['results'])} rows "
+                f"(+{max(added, 0)})."
+                if added > 0 else "No more results."
+            )
         else:
+            focus_row = 0
             self._log(f"Found {len(tab['results'])} results.")
-            ctrl.SetFocus()
-            ctrl.Focus(0)
-            ctrl.Select(0)
+
+        ctrl.SetFocus()
+        ctrl.Focus(focus_row)
+        ctrl.Select(focus_row)
 
     @staticmethod
     def _result_title(r):

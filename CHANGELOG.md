@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.6.2 — 2026-04-17
+
+### Fixes
+
+- **Series parts split across search pages now merge**: the collapse
+  ran per-page, so `Miss Abby` on page 1 and `Miss Abby Pt. 02` on
+  page 2 stayed as separate rows. Load-more now re-collapses the
+  full accumulated list (GUI rebinds focus to the first new row so
+  keyboard users aren't lost; CLI reprints the whole list so the
+  numbers still line up).
+- **Annual/year URL slugs no longer falsely group**: `/s/foo-2023`
+  and `/s/foo-2024` used to collapse as a "series" because of the
+  bare trailing number. The URL pattern is now accepted only when
+  the title also carries a recognisable chapter marker (`Ch. NN`,
+  `Pt. NN`, `- N`, or `P<N>`).
+- **Slug-collision guard for bare-titled adoption**: if a standalone
+  `/s/foo` coexists with an unrelated later serial `/s/foo-ch-01,
+  /s/foo-ch-02` by the same author, the standalone is no longer
+  folded into the serial. Adoption only happens when the existing
+  group doesn't already have an explicit Part 1.
+
 ## 1.6.1 — 2026-04-17
 
 ### Fixes
