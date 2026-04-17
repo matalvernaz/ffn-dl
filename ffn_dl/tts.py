@@ -1128,6 +1128,41 @@ async def generate_chapter_audio(segments, voice_mapper, output_path, chapter_nu
     return True
 
 
+def _escape_ffmeta(value) -> str:
+    """Escape special characters for FFMETADATA1 format. The spec requires
+    backslash-escaping '=', ';', '#', '\\', and any newline in both keys
+    and values. Fanfic titles routinely carry `=`, `;`, or newlines from
+    HTML-stripping edge cases, and ffmpeg silently fails to parse the
+    whole file when any one value trips the grammar.
+    """
+    s = "" if value is None else str(value)
+    return (
+        s
+        .replace("\\", "\\\\")
+        .replace("=", "\\=")
+        .replace(";", "\\;")
+        .replace("#", "\\#")
+        .replace("\r\n", "\n")
+        .replace("\n", "\\\n")
+    )
+
+
+def _run_ffmpeg(cmd, *, step):
+    """Run an ffmpeg/ffprobe invocation and surface stderr on failure.
+    The default `subprocess.run(check=True, capture_output=True)` raises
+    CalledProcessError with the ffmpeg message hidden in `.stderr`; we
+    want that in the user's face so audiobook errors are debuggable.
+    """
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        tail = (result.stderr or "").strip().splitlines()[-20:]
+        message = "\n".join(tail) or "(no ffmpeg stderr)"
+        raise RuntimeError(
+            f"ffmpeg failed during {step} (exit {result.returncode}):\n{message}"
+        )
+    return result
+
+
 def build_m4b(chapter_files, story, output_path, cover_path=None):
     """Merge per-chapter MP3s into a single M4B with chapter markers."""
     if not chapter_files:
@@ -1143,27 +1178,25 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
 
     # First pass: merge all MP3s into one
     merged = tmp_dir / "merged.mp3"
-    subprocess.run(
+    _run_ffmpeg(
         [
             FFMPEG, "-y", "-f", "concat", "-safe", "0",
             "-i", str(list_file), "-c", "copy", str(merged),
         ],
-        capture_output=True,
-        check=True,
+        step="concat",
     )
 
     # Get chapter durations for metadata
     chapters_meta = tmp_dir / "chapters_meta.txt"
-    with open(chapters_meta, "w") as f:
+    with open(chapters_meta, "w", encoding="utf-8") as f:
         f.write(";FFMETADATA1\n")
-        f.write(f"title={story.title}\n")
-        f.write(f"artist={story.author}\n")
-        f.write(f"album={story.title}\n")
-        f.write(f"genre=Audiobook\n\n")
+        f.write(f"title={_escape_ffmeta(story.title)}\n")
+        f.write(f"artist={_escape_ffmeta(story.author)}\n")
+        f.write(f"album={_escape_ffmeta(story.title)}\n")
+        f.write("genre=Audiobook\n\n")
 
         offset_ms = 0
         for i, cf in enumerate(chapter_files):
-            # Get duration using ffprobe
             probe = subprocess.run(
                 [
                     FFPROBE, "-v", "quiet", "-show_entries",
@@ -1180,7 +1213,7 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
             f.write("TIMEBASE=1/1000\n")
             f.write(f"START={offset_ms}\n")
             f.write(f"END={offset_ms + duration_ms}\n")
-            f.write(f"title={ch_title}\n\n")
+            f.write(f"title={_escape_ffmeta(ch_title)}\n\n")
             offset_ms += duration_ms
 
     # Convert to M4B (AAC in M4A container) with chapter metadata
@@ -1194,14 +1227,13 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
         cmd.extend(["-i", str(cover_path), "-map", "0:a", "-map", "2:v",
                      "-disposition:v", "attached_pic"])
     cmd.extend([
-        "-c:a", "aac", "-b:a", "64k",  # 64k is fine for speech
+        "-c:a", "aac", "-b:a", "64k",
         "-movflags", "+faststart",
         str(output_path),
     ])
 
-    subprocess.run(cmd, capture_output=True, check=True)
+    _run_ffmpeg(cmd, step="m4b mux")
 
-    # Clean up
     import shutil as _shutil
     _shutil.rmtree(tmp_dir, ignore_errors=True)
 

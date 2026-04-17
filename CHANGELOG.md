@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.7.2 — 2026-04-17
+
+### Audiobook
+
+- **FFMETADATA1 special-character escaping**: story and chapter titles
+  containing `=`, `;`, `#`, `\`, or a newline were passed straight into
+  the chapter metadata file, silently breaking ffmpeg's parser and
+  aborting the m4b mux. Every value written to `chapters_meta.txt` now
+  goes through a spec-compliant escape helper.
+- **ffmpeg errors now surface stderr**: `subprocess.run(check=True)`
+  was hiding the actual ffmpeg message behind a bare
+  `CalledProcessError`, so when a mux failed the user just saw "error"
+  with no way to tell whether it was metadata, codec, or concat.
+  Failures now raise `RuntimeError` with the last twenty lines of
+  ffmpeg's stderr and the pipeline step that blew up.
+
 ## 1.7.1 — 2026-04-17
 
 ### Downloads

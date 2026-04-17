@@ -163,6 +163,23 @@ class TestUniversalMetadata:
         assert "Updated: 2023-11-14" in text
 
 
+class TestFFMetaEscaping:
+    def test_escapes_all_special_chars(self):
+        from ffn_dl.tts import _escape_ffmeta
+        # Each of these chars must be backslash-escaped per the
+        # FFMETADATA1 spec, otherwise ffmpeg silently fails to parse.
+        assert _escape_ffmeta("with = sign") == "with \\= sign"
+        assert _escape_ffmeta("semi; colon") == "semi\\; colon"
+        assert _escape_ffmeta("hash # mark") == "hash \\# mark"
+        assert _escape_ffmeta("back\\slash") == "back\\\\slash"
+        assert _escape_ffmeta("line1\nline2") == "line1\\\nline2"
+        assert _escape_ffmeta("crlf\r\nend") == "crlf\\\nend"
+
+    def test_leaves_plain_text_untouched(self):
+        from ffn_dl.tts import _escape_ffmeta
+        assert _escape_ffmeta("A Simple Title") == "A Simple Title"
+
+
 class TestFetchParallel:
     def test_returns_results_in_input_order(self):
         # Even though workers complete in arbitrary order, the returned
