@@ -70,9 +70,13 @@ def extract_source_url(filepath):
         except Exception:
             pass
 
-    # Fallback: look for any FFN or FicWad URL
+    # Fallback: look for any supported story URL
     match = re.search(
-        r"https?://(?:www\.)?(?:fanfiction\.net/s/\d+|ficwad\.com/story/\d+)",
+        r"https?://(?:www\.)?("
+        r"fanfiction\.net/s/\d+"
+        r"|ficwad\.com/story/\d+"
+        r"|(?:archiveofourown\.org|ao3\.org)/works/\d+"
+        r")",
         text,
     )
     if match:

@@ -6,7 +6,7 @@ import re
 import sys
 from pathlib import Path
 
-from .ao3 import AO3Scraper
+from .ao3 import AO3LockedError, AO3Scraper
 from .exporters import DEFAULT_TEMPLATE, EXPORTERS
 from .ficwad import FicWadScraper
 from .scraper import (
@@ -135,6 +135,9 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
         return False
     except StoryNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
+        return False
+    except AO3LockedError as exc:
+        print(f"Locked: {exc}", file=sys.stderr)
         return False
     except CloudflareBlockError as exc:
         print(f"Blocked: {exc}", file=sys.stderr)

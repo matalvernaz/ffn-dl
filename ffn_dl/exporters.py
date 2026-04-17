@@ -226,6 +226,16 @@ _LANG_CODES = {
 }
 
 
+def _site_info(url: str) -> tuple[str, str]:
+    """Return (identifier_prefix, publisher) for a story URL."""
+    text = (url or "").lower()
+    if "archiveofourown.org" in text or "ao3.org" in text:
+        return "ao3", "archiveofourown.org"
+    if "ficwad.com" in text:
+        return "ficwad", "ficwad.com"
+    return "ffn", "fanfiction.net"
+
+
 def export_epub(
     story: Story, output_dir: str = ".", template: str = DEFAULT_TEMPLATE
 ) -> Path:
@@ -239,12 +249,13 @@ def export_epub(
 
     meta = story.metadata
     book = epub.EpubBook()
-    book.set_identifier(f"ffn-{story.id}")
+    site_prefix, publisher = _site_info(story.url)
+    book.set_identifier(f"{site_prefix}-{story.id}")
     book.set_title(story.title)
     book.add_author(story.author)
     book.add_metadata("DC", "description", story.summary)
     book.add_metadata("DC", "source", story.url)
-    book.add_metadata("DC", "publisher", "fanfiction.net")
+    book.add_metadata("DC", "publisher", publisher)
 
     lang = meta.get("language", "English")
     book.set_language(_LANG_CODES.get(lang.lower(), "en"))
