@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.6.1 — 2026-04-17
+
+### Fixes
+
+- **Literotica series grouping misses bare-titled Part 1s**: Literotica's
+  convention is to post the first part of a serial with no suffix on
+  the title or URL, then append `Pt. 02` / `Ch. 02` / `- 2` on later
+  parts. The 1.6.0 collapse only matched suffixed titles, so the bare
+  part 1 stayed as a separate row alongside its own collapsed series.
+  A second pass now adopts any bare-titled work whose URL slug equals
+  the base stem of an existing suffixed group (same author).
+- **"- N" and "P<N>" suffixes** (e.g. `Housewife Comes Out - 6`,
+  `Under the Heels of Eleonora Vane P4`) are now recognised as chapter
+  markers alongside the existing `Ch. NN` / `Pt. NN` patterns.
+- **Enter on a series row opens "Show Parts"** instead of kicking off
+  the full merge download. Keyboard-only users (NVDA) couldn't easily
+  expand a series to see what's inside it; the merge download is still
+  one button-press away via *Download Selected*.
+
 ## 1.6.0 — 2026-04-17
 
 ### Search

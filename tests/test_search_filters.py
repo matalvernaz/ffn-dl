@@ -224,3 +224,66 @@ class TestCollapseLiteroticaSeries:
         collapsed = collapse_literotica_series(results)
         assert len(collapsed) == 2
         assert all(not r.get("is_series") for r in collapsed)
+
+    def test_bare_title_adopted_as_part_one(self):
+        # Literotica's convention: Part 1 is posted with no suffix, then
+        # Pt. 02 / Ch. 02 / etc. show up later. The bare-titled work
+        # needs to be grouped with its own subsequent parts.
+        from ffn_dl.search import collapse_literotica_series
+        results = [
+            {
+                "title": "Miss Abby Pt. 02",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/miss-abby-pt-02",
+            },
+            {
+                "title": "Miss Abby",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/miss-abby",
+            },
+        ]
+        collapsed = collapse_literotica_series(results)
+        assert len(collapsed) == 1
+        row = collapsed[0]
+        assert row.get("is_series") is True
+        assert len(row["series_parts"]) == 2
+        # The bare-titled work should be ordered first (part 1)
+        assert row["series_parts"][0]["url"].endswith("/miss-abby")
+        assert row["series_parts"][1]["url"].endswith("/miss-abby-pt-02")
+
+    def test_dash_number_suffix_collapses(self):
+        from ffn_dl.search import collapse_literotica_series
+        results = [
+            {
+                "title": "Housewife Comes Out - 5",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/housewife-comes-out-5",
+            },
+            {
+                "title": "Housewife Comes Out - 6",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/housewife-comes-out-6",
+            },
+        ]
+        collapsed = collapse_literotica_series(results)
+        assert len(collapsed) == 1
+        assert collapsed[0].get("is_series") is True
+        assert len(collapsed[0]["series_parts"]) == 2
+
+    def test_compact_p_suffix_collapses(self):
+        from ffn_dl.search import collapse_literotica_series
+        results = [
+            {
+                "title": "Under the Heels of Eleonora Vane P3",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/under-the-heels-of-eleonora-vane-p3",
+            },
+            {
+                "title": "Under the Heels of Eleonora Vane P4",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/under-the-heels-of-eleonora-vane-p4",
+            },
+        ]
+        collapsed = collapse_literotica_series(results)
+        assert len(collapsed) == 1
+        assert collapsed[0].get("is_series") is True

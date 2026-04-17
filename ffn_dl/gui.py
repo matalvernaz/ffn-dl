@@ -347,7 +347,7 @@ class MainFrame(wx.Frame):
         )
         state["results_ctrl"].Bind(
             wx.EVT_LIST_ITEM_ACTIVATED,
-            lambda evt, k=site_key: self._on_search_download(k),
+            lambda evt, k=site_key: self._on_result_activated(k),
         )
         sizer.Add(state["results_ctrl"], 1, wx.EXPAND | wx.ALL, pad)
 
@@ -1059,6 +1059,19 @@ class MainFrame(wx.Frame):
             threading.Thread(
                 target=self._run_download, args=(url,), daemon=True
             ).start()
+
+    def _on_result_activated(self, site_key):
+        # Enter/double-click: for a regular work row, start the download;
+        # for a series row, open the parts dialog so keyboard-only users
+        # can actually see what's inside the series instead of blindly
+        # kicking off a multi-part merge download.
+        tab = self._tabs[site_key]
+        idx = tab["results_ctrl"].GetFirstSelected()
+        if 0 <= idx < len(tab["results"]):
+            if tab["results"][idx].get("is_series"):
+                self._on_show_parts(site_key)
+                return
+        self._on_search_download(site_key)
 
     def _on_show_parts(self, site_key):
         tab = self._tabs[site_key]

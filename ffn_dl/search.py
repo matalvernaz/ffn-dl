@@ -787,16 +787,29 @@ def collapse_ao3_series(results):
     return collapsed
 
 
-# Literotica titles suffix chapters/parts inline: "Foo Ch. 07", "Bar Pt. 02".
-# The URL slug mirrors it: /s/foo-ch-07, /s/bar-pt-02. Authors occasionally
-# append a variant tag after the number ("Ch. 07 - Alt Ending"); we strip
-# that so variants group with their canonical siblings.
+# Literotica titles/URLs suffix chapters and parts a few different ways:
+#   /s/foo-ch-07          "Foo Ch. 07"
+#   /s/foo-pt-02          "Foo Pt. 02"
+#   /s/foo-6              "Foo - 6"     (bare-number)
+#   /s/foo-p4             "Foo P4"      (compact "P<N>")
+# Authors sometimes append a variant tag ("Ch. 07 - Alt Ending") which we
+# strip so variants group with their canonical siblings.
 _LIT_CHAPTER_URL_RE = re.compile(
     r"/s/(.+?)-(?:ch|chapter|pt|part)-(\d+)(?:-[^/]*)?/?$",
     re.IGNORECASE,
 )
+_LIT_COMPACT_P_URL_RE = re.compile(
+    r"/s/(.+?)-p(\d+)/?$",
+    re.IGNORECASE,
+)
+_LIT_BARE_NUM_URL_RE = re.compile(
+    r"/s/(.+?)-(\d+)/?$",
+)
+_LIT_BARE_SLUG_URL_RE = re.compile(r"/s/([^/?#]+?)/?$", re.IGNORECASE)
 _LIT_CHAPTER_TITLE_RE = re.compile(
-    r"^(.*?)[\s:]+(?:Ch|Chapter|Pt|Part)\.?\s*(\d+)(?:\s*[-:].*)?$",
+    r"^(.*?)(?:[\s:]+(?:Ch|Chapter|Pt|Part)\.?\s*\d+"
+    r"|\s*[-\u2013]\s*\d+"
+    r"|\s+P\d+)(?:\s*[-:].*)?$",
     re.IGNORECASE,
 )
 
@@ -805,18 +818,29 @@ def _literotica_series_key(result):
     """Return (base_slug, part_number, base_title) if the result looks like
     a numbered chapter of a larger Literotica work, else None."""
     url = result.get("url") or ""
-    m = _LIT_CHAPTER_URL_RE.search(url)
-    if not m:
-        return None
-    base_slug = m.group(1).lower()
-    try:
-        part = int(m.group(2))
-    except ValueError:
-        return None
-    title = result.get("title") or ""
-    tm = _LIT_CHAPTER_TITLE_RE.match(title)
-    base_title = tm.group(1).strip() if tm else title
-    return base_slug, part, base_title
+    for pattern in (
+        _LIT_CHAPTER_URL_RE, _LIT_COMPACT_P_URL_RE, _LIT_BARE_NUM_URL_RE,
+    ):
+        m = pattern.search(url)
+        if not m:
+            continue
+        base_slug = m.group(1).lower()
+        try:
+            part = int(m.group(2))
+        except ValueError:
+            continue
+        title = result.get("title") or ""
+        tm = _LIT_CHAPTER_TITLE_RE.match(title)
+        base_title = tm.group(1).strip() if tm else title
+        return base_slug, part, base_title
+    return None
+
+
+def _literotica_bare_slug(result):
+    """Return the /s/<slug> slug portion of a Literotica URL, lowercased."""
+    url = result.get("url") or ""
+    m = _LIT_BARE_SLUG_URL_RE.search(url)
+    return m.group(1).lower() if m else None
 
 
 def collapse_literotica_series(results):
@@ -824,8 +848,15 @@ def collapse_literotica_series(results):
     work (same URL slug stem, same author) into one series row. Only
     collapses when 2+ parts are present — otherwise a lone "Ch. 06"
     would be hidden behind a series label with no siblings to show.
+
+    Literotica's own convention is that Part 1 of a series is posted
+    *without* any suffix (just the bare title), and subsequent parts
+    get "Pt. 02" / "Ch. 02" / "- 2" appended. So if we see a bare-
+    titled work whose URL slug is the base stem of some other suffixed
+    work by the same author, we treat it as part 1 of that series.
     """
     groups = {}  # (author, base_slug) → [(index, result, part, base_title)]
+    seen_indices = set()
     for i, r in enumerate(results):
         key = _literotica_series_key(r)
         if key is None:
@@ -833,6 +864,20 @@ def collapse_literotica_series(results):
         base_slug, part, base_title = key
         group_key = (r.get("author") or "", base_slug)
         groups.setdefault(group_key, []).append((i, r, part, base_title))
+        seen_indices.add(i)
+
+    # Second pass: adopt bare-titled results as part 1 when their slug
+    # matches an existing group's base_slug and the author lines up.
+    for i, r in enumerate(results):
+        if i in seen_indices:
+            continue
+        bare = _literotica_bare_slug(r)
+        if not bare:
+            continue
+        group_key = (r.get("author") or "", bare)
+        if group_key in groups:
+            title = r.get("title") or bare
+            groups[group_key].append((i, r, 1, title))
 
     to_collapse = {}  # anchor index → series row
     hide = set()
