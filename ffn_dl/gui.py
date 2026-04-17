@@ -10,7 +10,13 @@ import sys
 import threading
 import wx
 import webbrowser
+from collections import deque
 from pathlib import Path
+
+
+_LOG_FLUSH_INTERVAL_MS = 100
+_LOG_MAX_LINES = 5000
+_LOG_TRIM_TO_LINES = 4000
 
 
 _FFN_URL_RE = re.compile(
@@ -121,6 +127,8 @@ class MainFrame(wx.Frame):
         self._watch_seen = set()
         self._last_clip = ""
         self._tabs = {}  # site_key → {query_ctrl, results_ctrl, summary_ctrl, search_dl_btn, search_btn, filter_ctrls, text_ctrls, checkbox_ctrls, search_fn, results}
+        self._log_queue = deque()
+        self._log_lock = threading.Lock()
         self._build_ui()
         self._load_prefs()
         self.Bind(wx.EVT_CLOSE, self._on_close)
@@ -191,12 +199,16 @@ class MainFrame(wx.Frame):
         root_sizer.Add(wx.StaticText(root, label="S&tatus:"), 0, wx.LEFT | wx.TOP, pad)
         self.log_ctrl = wx.TextCtrl(
             root,
-            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
         )
         self.log_ctrl.SetName("Status log")
         root_sizer.Add(self.log_ctrl, 1, wx.EXPAND | wx.ALL, pad)
 
         root.SetSizer(root_sizer)
+
+        self._log_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_log_flush, self._log_timer)
+        self._log_timer.Start(_LOG_FLUSH_INTERVAL_MS)
 
         # Accelerators
         accel = wx.AcceleratorTable([
@@ -358,7 +370,24 @@ class MainFrame(wx.Frame):
     # ── Helpers ───────────────────────────────────────────────
 
     def _log(self, msg):
-        wx.CallAfter(self.log_ctrl.AppendText, msg + "\n")
+        with self._log_lock:
+            self._log_queue.append(msg + "\n")
+
+    def _on_log_flush(self, event):
+        if not self._log_queue:
+            return
+        with self._log_lock:
+            chunk = "".join(self._log_queue)
+            self._log_queue.clear()
+        if not chunk:
+            return
+        self.log_ctrl.AppendText(chunk)
+        line_count = self.log_ctrl.GetNumberOfLines()
+        if line_count > _LOG_MAX_LINES:
+            cut_line = line_count - _LOG_TRIM_TO_LINES
+            cut_pos = self.log_ctrl.XYToPosition(0, cut_line)
+            if cut_pos > 0:
+                self.log_ctrl.Remove(0, cut_pos)
 
     def _set_busy(self, busy):
         def _update():
@@ -489,6 +518,8 @@ class MainFrame(wx.Frame):
             self._save_prefs()
         except Exception:
             pass
+        if hasattr(self, "_log_timer"):
+            self._log_timer.Stop()
         event.Skip()
 
     # ── Update check ─────────────────────────────────────────
@@ -814,26 +845,28 @@ class MainFrame(wx.Frame):
     def _populate_results(self, site_key, results):
         tab = self._tabs[site_key]
         tab["results"] = results
-        tab["results_ctrl"].DeleteAllItems()
-        if not results:
-            self._log("No results found.")
-            return
-
-        for r in results:
-            row = tab["results_ctrl"].InsertItem(
-                tab["results_ctrl"].GetItemCount(), r["title"]
-            )
-            tab["results_ctrl"].SetItem(row, 1, r["author"])
-            tab["results_ctrl"].SetItem(row, 2, r["fandom"])
-            tab["results_ctrl"].SetItem(row, 3, str(r["words"]))
-            tab["results_ctrl"].SetItem(row, 4, str(r["chapters"]))
-            tab["results_ctrl"].SetItem(row, 5, r["rating"])
-            tab["results_ctrl"].SetItem(row, 6, r["status"])
+        ctrl = tab["results_ctrl"]
+        ctrl.Freeze()
+        try:
+            ctrl.DeleteAllItems()
+            if not results:
+                self._log("No results found.")
+                return
+            for r in results:
+                row = ctrl.InsertItem(ctrl.GetItemCount(), r["title"])
+                ctrl.SetItem(row, 1, r["author"])
+                ctrl.SetItem(row, 2, r["fandom"])
+                ctrl.SetItem(row, 3, str(r["words"]))
+                ctrl.SetItem(row, 4, str(r["chapters"]))
+                ctrl.SetItem(row, 5, r["rating"])
+                ctrl.SetItem(row, 6, r["status"])
+        finally:
+            ctrl.Thaw()
 
         self._log(f"Found {len(results)} results.")
-        tab["results_ctrl"].SetFocus()
-        tab["results_ctrl"].Focus(0)
-        tab["results_ctrl"].Select(0)
+        ctrl.SetFocus()
+        ctrl.Focus(0)
+        ctrl.Select(0)
 
     def _on_result_select(self, event, site_key):
         tab = self._tabs[site_key]
