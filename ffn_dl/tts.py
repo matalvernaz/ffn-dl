@@ -12,7 +12,28 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 
-import edge_tts
+# edge_tts is only required when actually synthesizing audio — importing
+# this module (e.g. from the exporters' FFMETADATA escape helper or from
+# a unit test) should work without the `audio` optional extra installed.
+# The lazy loader below is used by the two call sites that need it.
+try:
+    import edge_tts as _edge_tts  # noqa: F401
+except ImportError:
+    _edge_tts = None
+
+
+def _require_edge_tts():
+    global _edge_tts
+    if _edge_tts is None:
+        try:
+            import edge_tts as _m
+        except ImportError as exc:
+            raise RuntimeError(
+                "edge-tts is required for audiobook generation. "
+                "Install with: pip install 'ffn-dl[audio]'"
+            ) from exc
+        _edge_tts = _m
+    return _edge_tts
 
 
 def _find_tool(name):
@@ -1001,7 +1022,7 @@ async def _generate_segment_audio(segment, voice, output_path):
         prosody = EMOTION_PROSODY.get(segment.emotion, {})
         kwargs.update(prosody)
 
-    comm = edge_tts.Communicate(text, **kwargs)
+    comm = _require_edge_tts().Communicate(text, **kwargs)
     await comm.save(str(output_path))
     return True
 
@@ -1293,7 +1314,7 @@ def detect_voices(story, map_path=None):
 
 
 async def _synth_sample_async(text, voice, output_path):
-    comm = edge_tts.Communicate(text, voice=voice)
+    comm = _require_edge_tts().Communicate(text, voice=voice)
     await comm.save(str(output_path))
 
 

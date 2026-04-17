@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.8.2 — 2026-04-17
+
+### CI fix
+
+- **Lazy-import `edge_tts`**. `ffn_dl/tts.py` did a top-level
+  `import edge_tts`, so importing anything from the module (e.g.
+  the FFMETADATA escape helper exercised by `test_exporters.py`)
+  required the `audio` optional extra. CI installs only `[dev,epub]`,
+  so the Tests workflow had been silently red since 1.7.2 when those
+  tests were added. The import is now deferred to the two call
+  sites that actually synthesize audio, with a clear error message
+  if someone tries to build an audiobook without the extra installed.
+
 ## 1.8.1 — 2026-04-17
 
 ### Fixes
