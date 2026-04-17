@@ -49,6 +49,7 @@ class BaseScraper:
         use_cache=True,
         chunk_size=0,
         chunk_delay_range=(60.0, 75.0),
+        use_wayback=False,
     ):
         self.delay_range = delay_range
         self.max_retries = max_retries
@@ -61,6 +62,7 @@ class BaseScraper:
         )
         self.chunk_size = chunk_size
         self.chunk_delay_range = chunk_delay_range
+        self.use_wayback = use_wayback
         self._fetch_count = 0
         self._browser = "chrome"
         self.session = curl_requests.Session(impersonate=self._browser)
@@ -77,6 +79,32 @@ class BaseScraper:
                 "Cloudflare challenge detected. "
                 "Try increasing delays or waiting before retrying."
             )
+
+    def _try_wayback(self, url):
+        """Ask archive.org for the latest snapshot of `url` and return its
+        HTML body, or None if nothing is archived. The Wayback toolbar
+        gets injected into the page but the original DOM is preserved,
+        so scraper selectors still match.
+        """
+        try:
+            avail = self.session.get(
+                f"https://archive.org/wayback/available?url={url}",
+                timeout=self.timeout,
+            )
+            if avail.status_code != 200:
+                return None
+            data = avail.json()
+            snap = (data.get("archived_snapshots") or {}).get("closest") or {}
+            if not snap.get("available") or snap.get("status") != "200":
+                return None
+            snap_url = snap["url"]
+            logger.info("Falling back to Wayback snapshot: %s", snap_url)
+            page = self.session.get(snap_url, timeout=self.timeout)
+            if page.status_code == 200:
+                return page.text
+        except Exception as exc:
+            logger.debug("Wayback fallback failed: %s", exc)
+        return None
 
     def _fetch(self, url):
         backoff = 30
@@ -116,6 +144,10 @@ class BaseScraper:
                 continue
 
             if resp.status_code == 404:
+                if self.use_wayback:
+                    archived = self._try_wayback(url)
+                    if archived:
+                        return archived
                 raise StoryNotFoundError(f"Not found: {url}")
 
             if resp.status_code == 403:
@@ -137,6 +169,11 @@ class BaseScraper:
             time.sleep(backoff)
             backoff = min(backoff * 2, 300)
 
+        if self.use_wayback:
+            archived = self._try_wayback(url)
+            if archived:
+                logger.warning("Live site failed; served from Wayback.")
+                return archived
         raise RateLimitError(f"Failed after {self.max_retries} retries: {url}")
 
     def _delay(self):

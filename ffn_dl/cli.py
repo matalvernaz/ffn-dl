@@ -193,6 +193,8 @@ def _build_scraper(url, args):
         kwargs["delay_range"] = (d_min, d_max)
     if args.chunk_size is not None:
         kwargs["chunk_size"] = args.chunk_size
+    if getattr(args, "use_wayback", False):
+        kwargs["use_wayback"] = True
     return scraper_cls(**kwargs)
 
 
@@ -807,6 +809,15 @@ def main(argv=None):
             "Pause ~60s after every N chapter fetches "
             "(default: 20 on FFN, disabled on FicWad). "
             "Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--use-wayback",
+        action="store_true",
+        help=(
+            "If a story 404s or the site keeps failing, try fetching "
+            "the latest archive.org snapshot instead. Useful for deleted "
+            "fics and during site outages."
         ),
     )
     parser.add_argument(
