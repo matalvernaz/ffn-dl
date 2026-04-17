@@ -11,7 +11,11 @@ from pathlib import Path
 
 
 _FFN_URL_RE = re.compile(
-    r"https?://(?:www\.)?(?:fanfiction\.net/s/\d+|ficwad\.com/story/\d+)"
+    r"https?://(?:www\.)?("
+    r"fanfiction\.net/s/\d+"
+    r"|ficwad\.com/story/\d+"
+    r"|(?:archiveofourown\.org|ao3\.org)/works/\d+"
+    r")"
 )
 
 _SEARCH_COLUMNS = [
@@ -20,9 +24,53 @@ _SEARCH_COLUMNS = [
     ("Fandom", 160),
     ("Words", 70),
     ("Ch", 40),
-    ("Rating", 60),
+    ("Rating", 80),
     ("Status", 90),
 ]
+
+
+def _ffn_search_spec():
+    from .search import (
+        FFN_CROSSOVER, FFN_GENRE, FFN_LANGUAGE, FFN_MATCH,
+        FFN_RATING, FFN_STATUS, FFN_WORDS, search_ffn,
+    )
+    return {
+        "label": "Search FFN",
+        "search_fn": search_ffn,
+        "filters": [
+            ("&Rating:", "rating", list(FFN_RATING)),
+            ("&Language:", "language", list(FFN_LANGUAGE)),
+            ("S&tatus:", "status", list(FFN_STATUS)),
+            ("&Genre:", "genre", list(FFN_GENRE)),
+            ("&Words:", "min_words", list(FFN_WORDS)),
+            ("&Crossover:", "crossover", list(FFN_CROSSOVER)),
+            ("&Match in:", "match", list(FFN_MATCH)),
+        ],
+    }
+
+
+def _ao3_search_spec():
+    from .search import AO3_COMPLETE, AO3_CROSSOVER, AO3_RATING, AO3_SORT, search_ao3
+    return {
+        "label": "Search AO3",
+        "search_fn": search_ao3,
+        "filters": [
+            ("&Rating:", "rating", list(AO3_RATING)),
+            ("S&tatus:", "complete", list(AO3_COMPLETE)),
+            ("&Crossover:", "crossover", list(AO3_CROSSOVER)),
+            ("Sor&t by:", "sort", list(AO3_SORT)),
+        ],
+        "text_filters": [
+            ("&Fandom:", "fandom"),
+            ("&Character:", "character"),
+            ("&Relationship:", "relationship"),
+            ("Lang. &code:", "language"),
+            ("&Word count:", "word_count"),
+        ],
+        "checkboxes": [
+            ("&Single-chapter only", "single_chapter"),
+        ],
+    }
 
 
 class MainFrame(wx.Frame):
@@ -30,14 +78,14 @@ class MainFrame(wx.Frame):
         super().__init__(
             None,
             title="ffn-dl - Fanfiction Downloader",
-            size=(760, 680),
+            size=(820, 720),
             style=wx.DEFAULT_FRAME_STYLE,
         )
         self._downloading = False
         self._watching = False
         self._watch_seen = set()
         self._last_clip = ""
-        self._search_results = []
+        self._tabs = {}  # site_key → {query_ctrl, results_ctrl, summary_ctrl, search_dl_btn, search_btn, filter_ctrls, text_ctrls, checkbox_ctrls, search_fn, results}
         self._build_ui()
         self.Centre()
 
@@ -46,14 +94,15 @@ class MainFrame(wx.Frame):
         root_sizer = wx.BoxSizer(wx.VERTICAL)
         pad = 6
 
-        # ── Notebook with Download / Search tabs ─────────────
+        # ── Notebook with tabs ───────────────────────────────
         self.notebook = wx.Notebook(root)
         self.notebook.SetName("Mode tabs")
 
         self._build_download_tab(self.notebook)
-        self._build_search_tab(self.notebook)
+        self._build_search_tab(self.notebook, "ffn", _ffn_search_spec())
+        self._build_search_tab(self.notebook, "ao3", _ao3_search_spec())
 
-        root_sizer.Add(self.notebook, 0, wx.EXPAND | wx.ALL, pad)
+        root_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, pad)
 
         # ── Shared options (format / filename / output folder) ─
         opts = wx.BoxSizer(wx.HORIZONTAL)
@@ -140,88 +189,112 @@ class MainFrame(wx.Frame):
         panel.SetSizer(sizer)
         notebook.AddPage(panel, "Download")
 
-    def _build_search_tab(self, notebook):
-        from .search import (
-            FFN_CROSSOVER, FFN_GENRE, FFN_LANGUAGE, FFN_MATCH,
-            FFN_RATING, FFN_STATUS, FFN_WORDS,
-        )
-
+    def _build_search_tab(self, notebook, site_key, spec):
         panel = wx.Panel(notebook)
         sizer = wx.BoxSizer(wx.VERTICAL)
         pad = 6
+        state = {
+            "search_fn": spec["search_fn"],
+            "filter_ctrls": {},
+            "text_ctrls": {},
+            "checkbox_ctrls": {},
+            "results": [],
+        }
 
         # Query row
         q_row = wx.BoxSizer(wx.HORIZONTAL)
         q_row.Add(wx.StaticText(panel, label="&Query:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        self.search_ctrl = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
-        self.search_ctrl.SetName("Search query")
-        self.search_ctrl.Bind(wx.EVT_TEXT_ENTER, self._on_search)
-        q_row.Add(self.search_ctrl, 1, wx.RIGHT, 4)
+        state["query_ctrl"] = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
+        state["query_ctrl"].SetName(f"{spec['label']} query")
+        state["query_ctrl"].Bind(
+            wx.EVT_TEXT_ENTER, lambda evt, k=site_key: self._on_search(k)
+        )
+        q_row.Add(state["query_ctrl"], 1, wx.RIGHT, 4)
 
-        self.search_btn = wx.Button(panel, label="S&earch")
-        self.search_btn.Bind(wx.EVT_BUTTON, self._on_search)
-        q_row.Add(self.search_btn, 0)
-
+        state["search_btn"] = wx.Button(panel, label="S&earch")
+        state["search_btn"].Bind(
+            wx.EVT_BUTTON, lambda evt, k=site_key: self._on_search(k)
+        )
+        q_row.Add(state["search_btn"], 0)
         sizer.Add(q_row, 0, wx.EXPAND | wx.ALL, pad)
 
-        # Filter rows: 4 combos per row
-        self.search_filters = {}
+        # Choice filters (combo boxes)
+        if spec.get("filters"):
+            fgrid = wx.FlexGridSizer(rows=0, cols=8, hgap=4, vgap=4)
+            for label, key, choices in spec["filters"]:
+                fgrid.Add(
+                    wx.StaticText(panel, label=label),
+                    0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+                )
+                ctrl = wx.Choice(panel, choices=choices)
+                ctrl.SetSelection(0)
+                ctrl.SetName(label.replace("&", "").rstrip(":"))
+                fgrid.Add(ctrl, 0, wx.RIGHT, 12)
+                state["filter_ctrls"][key] = ctrl
+            sizer.Add(fgrid, 0, wx.EXPAND | wx.ALL, pad)
 
-        def add_filter(grid, label, key, choices):
-            grid.Add(
-                wx.StaticText(panel, label=label),
-                0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
-            )
-            ctrl = wx.Choice(panel, choices=list(choices))
-            ctrl.SetSelection(0)
-            ctrl.SetName(label.replace("&", "").rstrip(":"))
-            grid.Add(ctrl, 0, wx.RIGHT, 12)
-            self.search_filters[key] = ctrl
+        # Free-text filters
+        if spec.get("text_filters"):
+            tgrid = wx.FlexGridSizer(rows=0, cols=4, hgap=4, vgap=4)
+            for label, key in spec["text_filters"]:
+                tgrid.Add(
+                    wx.StaticText(panel, label=label),
+                    0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+                )
+                ctrl = wx.TextCtrl(panel, size=(140, -1))
+                ctrl.SetName(label.replace("&", "").rstrip(":"))
+                tgrid.Add(ctrl, 0, wx.RIGHT, 12)
+                state["text_ctrls"][key] = ctrl
+            sizer.Add(tgrid, 0, wx.EXPAND | wx.ALL, pad)
 
-        fgrid = wx.FlexGridSizer(rows=0, cols=8, hgap=4, vgap=4)
-        add_filter(fgrid, "&Rating:", "rating", FFN_RATING)
-        add_filter(fgrid, "&Language:", "language", FFN_LANGUAGE)
-        add_filter(fgrid, "S&tatus:", "status", FFN_STATUS)
-        add_filter(fgrid, "&Genre:", "genre", FFN_GENRE)
-        sizer.Add(fgrid, 0, wx.EXPAND | wx.ALL, pad)
-
-        fgrid2 = wx.FlexGridSizer(rows=0, cols=8, hgap=4, vgap=4)
-        add_filter(fgrid2, "&Words:", "min_words", FFN_WORDS)
-        add_filter(fgrid2, "&Crossover:", "crossover", FFN_CROSSOVER)
-        add_filter(fgrid2, "&Match in:", "match", FFN_MATCH)
-        sizer.Add(fgrid2, 0, wx.EXPAND | wx.ALL, pad)
+        # Checkboxes
+        if spec.get("checkboxes"):
+            cb_row = wx.BoxSizer(wx.HORIZONTAL)
+            for label, key in spec["checkboxes"]:
+                ctrl = wx.CheckBox(panel, label=label)
+                cb_row.Add(ctrl, 0, wx.RIGHT, 16)
+                state["checkbox_ctrls"][key] = ctrl
+            sizer.Add(cb_row, 0, wx.EXPAND | wx.ALL, pad)
 
         # Results list
         sizer.Add(wx.StaticText(panel, label="&Results:"), 0, wx.LEFT | wx.TOP, pad)
-        self.results_ctrl = wx.ListCtrl(
+        state["results_ctrl"] = wx.ListCtrl(
             panel,
             style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SUNKEN,
         )
-        self.results_ctrl.SetName("Search results")
-        for i, (label, width) in enumerate(_SEARCH_COLUMNS):
-            self.results_ctrl.InsertColumn(i, label, width=width)
-        self.results_ctrl.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_result_select)
-        self.results_ctrl.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_result_activate)
-        sizer.Add(self.results_ctrl, 1, wx.EXPAND | wx.ALL, pad)
+        state["results_ctrl"].SetName(f"{spec['label']} results")
+        for i, (col_label, width) in enumerate(_SEARCH_COLUMNS):
+            state["results_ctrl"].InsertColumn(i, col_label, width=width)
+        state["results_ctrl"].Bind(
+            wx.EVT_LIST_ITEM_SELECTED,
+            lambda evt, k=site_key: self._on_result_select(evt, k),
+        )
+        state["results_ctrl"].Bind(
+            wx.EVT_LIST_ITEM_ACTIVATED,
+            lambda evt, k=site_key: self._on_search_download(k),
+        )
+        sizer.Add(state["results_ctrl"], 1, wx.EXPAND | wx.ALL, pad)
 
         # Summary
         sizer.Add(wx.StaticText(panel, label="S&ummary:"), 0, wx.LEFT | wx.TOP, pad)
-        self.summary_ctrl = wx.TextCtrl(
+        state["summary_ctrl"] = wx.TextCtrl(
             panel,
             style=wx.TE_MULTILINE | wx.TE_READONLY,
-            size=(-1, 80),
+            size=(-1, 70),
         )
-        self.summary_ctrl.SetName("Story summary")
-        sizer.Add(self.summary_ctrl, 0, wx.EXPAND | wx.ALL, pad)
+        state["summary_ctrl"].SetName(f"{spec['label']} summary")
+        sizer.Add(state["summary_ctrl"], 0, wx.EXPAND | wx.ALL, pad)
 
-        # Download selected
-        self.search_dl_btn = wx.Button(panel, label="Do&wnload Selected")
-        self.search_dl_btn.Bind(wx.EVT_BUTTON, self._on_search_download)
-        self.search_dl_btn.Disable()
-        sizer.Add(self.search_dl_btn, 0, wx.ALL, pad)
+        state["search_dl_btn"] = wx.Button(panel, label="Do&wnload Selected")
+        state["search_dl_btn"].Bind(
+            wx.EVT_BUTTON, lambda evt, k=site_key: self._on_search_download(k)
+        )
+        state["search_dl_btn"].Disable()
+        sizer.Add(state["search_dl_btn"], 0, wx.ALL, pad)
 
         panel.SetSizer(sizer)
-        notebook.AddPage(panel, "Search")
+        notebook.AddPage(panel, spec["label"])
+        self._tabs[site_key] = state
 
     # ── Helpers ───────────────────────────────────────────────
 
@@ -233,13 +306,11 @@ class MainFrame(wx.Frame):
             self._downloading = busy
             self.dl_btn.Enable(not busy)
             self.update_btn.Enable(not busy)
-            self.search_btn.Enable(not busy)
-            # Search-download button only re-enables if something is selected
-            has_selection = self.results_ctrl.GetFirstSelected() != -1
-            self.search_dl_btn.Enable(not busy and has_selection)
+            for tab in self._tabs.values():
+                tab["search_btn"].Enable(not busy)
+                has_selection = tab["results_ctrl"].GetFirstSelected() != -1
+                tab["search_dl_btn"].Enable(not busy and has_selection)
         wx.CallAfter(_update)
-
-    # ── Browse ───────────────────────────────────────────────
 
     def _on_browse(self, event):
         dlg = wx.DirDialog(
@@ -264,8 +335,6 @@ class MainFrame(wx.Frame):
         threading.Thread(
             target=self._run_download, args=(url,), daemon=True
         ).start()
-
-    # ── Update ───────────────────────────────────────────────
 
     def _on_update(self, event):
         if self._downloading:
@@ -305,90 +374,96 @@ class MainFrame(wx.Frame):
 
     # ── Search ───────────────────────────────────────────────
 
-    def _collect_search_filters(self):
+    def _collect_filters(self, tab):
         filters = {}
-        for key, ctrl in self.search_filters.items():
+        for key, ctrl in tab["filter_ctrls"].items():
             idx = ctrl.GetSelection()
             if idx <= 0:
-                # Index 0 is always "any"/"all" — no filter
+                # First entry is always "any"/"all"/"best match" — no filter
                 continue
             filters[key] = ctrl.GetString(idx)
+        for key, ctrl in tab["text_ctrls"].items():
+            value = ctrl.GetValue().strip()
+            if value:
+                filters[key] = value
+        for key, ctrl in tab["checkbox_ctrls"].items():
+            if ctrl.GetValue():
+                filters[key] = True
         return filters
 
-    def _on_search(self, event):
-        query = self.search_ctrl.GetValue().strip()
+    def _on_search(self, site_key):
+        tab = self._tabs[site_key]
+        query = tab["query_ctrl"].GetValue().strip()
         if not query:
             self._log("Error: Please enter a search query.")
             return
         if self._downloading:
             return
-        filters = self._collect_search_filters()
+        filters = self._collect_filters(tab)
         self._set_busy(True)
-        self.results_ctrl.DeleteAllItems()
-        self.summary_ctrl.SetValue("")
-        self._search_results = []
+        tab["results_ctrl"].DeleteAllItems()
+        tab["summary_ctrl"].SetValue("")
+        tab["results"] = []
         filter_str = (
             " [" + ", ".join(f"{k}={v}" for k, v in filters.items()) + "]"
             if filters else ""
         )
-        self._log(f"Searching fanfiction.net for: {query}{filter_str}")
+        site_label = "AO3" if site_key == "ao3" else "FFN"
+        self._log(f"Searching {site_label} for: {query}{filter_str}")
         threading.Thread(
-            target=self._run_search, args=(query, filters), daemon=True,
+            target=self._run_search, args=(site_key, query, filters), daemon=True,
         ).start()
 
-    def _run_search(self, query, filters):
+    def _run_search(self, site_key, query, filters):
+        tab = self._tabs[site_key]
         try:
-            from .search import search_ffn
-            results = search_ffn(query, **filters)
+            results = tab["search_fn"](query, **filters)
         except Exception as e:
             self._log(f"Search error: {e}")
             self._set_busy(False)
             return
-
-        wx.CallAfter(self._populate_results, results)
+        wx.CallAfter(self._populate_results, site_key, results)
         self._set_busy(False)
 
-    def _populate_results(self, results):
-        self._search_results = results
-        self.results_ctrl.DeleteAllItems()
+    def _populate_results(self, site_key, results):
+        tab = self._tabs[site_key]
+        tab["results"] = results
+        tab["results_ctrl"].DeleteAllItems()
         if not results:
             self._log("No results found.")
             return
 
         for r in results:
-            row = self.results_ctrl.InsertItem(
-                self.results_ctrl.GetItemCount(), r["title"]
+            row = tab["results_ctrl"].InsertItem(
+                tab["results_ctrl"].GetItemCount(), r["title"]
             )
-            self.results_ctrl.SetItem(row, 1, r["author"])
-            self.results_ctrl.SetItem(row, 2, r["fandom"])
-            self.results_ctrl.SetItem(row, 3, str(r["words"]))
-            self.results_ctrl.SetItem(row, 4, str(r["chapters"]))
-            self.results_ctrl.SetItem(row, 5, r["rating"])
-            self.results_ctrl.SetItem(row, 6, r["status"])
+            tab["results_ctrl"].SetItem(row, 1, r["author"])
+            tab["results_ctrl"].SetItem(row, 2, r["fandom"])
+            tab["results_ctrl"].SetItem(row, 3, str(r["words"]))
+            tab["results_ctrl"].SetItem(row, 4, str(r["chapters"]))
+            tab["results_ctrl"].SetItem(row, 5, r["rating"])
+            tab["results_ctrl"].SetItem(row, 6, r["status"])
 
         self._log(f"Found {len(results)} results.")
-        # Move focus to the results list so keyboard users land on the list
-        self.results_ctrl.SetFocus()
-        self.results_ctrl.Focus(0)
-        self.results_ctrl.Select(0)
+        tab["results_ctrl"].SetFocus()
+        tab["results_ctrl"].Focus(0)
+        tab["results_ctrl"].Select(0)
 
-    def _on_result_select(self, event):
+    def _on_result_select(self, event, site_key):
+        tab = self._tabs[site_key]
         idx = event.GetIndex()
-        if 0 <= idx < len(self._search_results):
-            r = self._search_results[idx]
-            self.summary_ctrl.SetValue(r.get("summary", "") or "(no summary)")
-            self.search_dl_btn.Enable(not self._downloading)
+        if 0 <= idx < len(tab["results"]):
+            r = tab["results"][idx]
+            tab["summary_ctrl"].SetValue(r.get("summary", "") or "(no summary)")
+            tab["search_dl_btn"].Enable(not self._downloading)
         event.Skip()
 
-    def _on_result_activate(self, event):
-        # Enter / double-click on a result → download it
-        self._on_search_download(event)
-
-    def _on_search_download(self, event):
-        idx = self.results_ctrl.GetFirstSelected()
-        if idx < 0 or idx >= len(self._search_results):
+    def _on_search_download(self, site_key):
+        tab = self._tabs[site_key]
+        idx = tab["results_ctrl"].GetFirstSelected()
+        if idx < 0 or idx >= len(tab["results"]):
             return
-        url = self._search_results[idx]["url"]
+        url = tab["results"][idx]["url"]
         if not url:
             self._log("Error: selected result has no URL.")
             return
@@ -406,7 +481,6 @@ class MainFrame(wx.Frame):
         if self.watch_btn.GetValue():
             self._watching = True
             self._watch_seen.clear()
-            # Snapshot current clipboard so we don't immediately trigger
             self._last_clip = self._get_clipboard()
             self._clip_timer.Start(2000)
             self._log("Watching clipboard. Copy a fanfiction URL to auto-download.")
@@ -457,11 +531,15 @@ class MainFrame(wx.Frame):
     # ── Download worker ──────────────────────────────────────
 
     def _scraper_for(self, url):
+        from .ao3 import AO3Scraper
         from .ficwad import FicWadScraper
         from .scraper import FFNScraper
 
-        if "ficwad.com" in url.lower():
+        text = url.lower()
+        if "ficwad.com" in text:
             return FicWadScraper()
+        if "archiveofourown.org" in text or "ao3.org" in text:
+            return AO3Scraper()
         return FFNScraper()
 
     def _export_story(self, story):

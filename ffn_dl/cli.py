@@ -6,6 +6,7 @@ import re
 import sys
 from pathlib import Path
 
+from .ao3 import AO3Scraper
 from .exporters import DEFAULT_TEMPLATE, EXPORTERS
 from .ficwad import FicWadScraper
 from .scraper import (
@@ -22,12 +23,18 @@ def _detect_site(url):
     text = str(url).lower()
     if "ficwad.com" in text:
         return FicWadScraper
+    if "archiveofourown.org" in text or "ao3.org" in text:
+        return AO3Scraper
     return FFNScraper
 
 
 def _is_author_url(url):
     """Return True if the URL points to an author page on any supported site."""
-    return FFNScraper.is_author_url(url) or FicWadScraper.is_author_url(url)
+    return (
+        FFNScraper.is_author_url(url)
+        or FicWadScraper.is_author_url(url)
+        or AO3Scraper.is_author_url(url)
+    )
 
 
 def _scrape_author_stories(url, args):
@@ -160,29 +167,50 @@ def _read_batch_file(path):
 
 _FFN_URL_RE = re.compile(r"https?://(?:www\.)?fanfiction\.net/s/\d+", re.I)
 _FICWAD_URL_RE = re.compile(r"https?://(?:www\.)?ficwad\.com/story/\d+", re.I)
+_AO3_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:archiveofourown\.org|ao3\.org)/works/\d+", re.I
+)
 
 
 def _handle_search(args):
-    """Interactive search mode: search FFN, display results, download on pick."""
-    from .search import search_ffn
+    """Interactive search mode: search FFN or AO3, display results, download on pick."""
+    from .search import search_ao3, search_ffn
 
-    filters = {
-        "rating": args.rating,
-        "language": args.language,
-        "status": args.status,
-        "genre": args.genre,
-        "min_words": args.min_words,
-        "crossover": args.crossover,
-        "match": args.match,
-    }
+    if args.site == "ao3":
+        site_label = "archiveofourown.org"
+        filters = {
+            "rating": args.rating,
+            "language": args.language,
+            "complete": args.status,
+            "crossover": args.crossover,
+            "sort": args.sort,
+            "fandom": args.fandom,
+            "word_count": args.word_count,
+            "character": args.character,
+            "relationship": args.relationship,
+            "single_chapter": args.single_chapter,
+        }
+        search_fn = search_ao3
+    else:
+        site_label = "fanfiction.net"
+        filters = {
+            "rating": args.rating,
+            "language": args.language,
+            "status": args.status,
+            "genre": args.genre,
+            "min_words": args.min_words,
+            "crossover": args.crossover,
+            "match": args.match,
+        }
+        search_fn = search_ffn
     filters = {k: v for k, v in filters.items() if v}
 
-    print(f"Searching fanfiction.net for: {args.search}")
+    print(f"Searching {site_label} for: {args.search}")
     if filters:
         print("Filters: " + ", ".join(f"{k}={v}" for k, v in filters.items()))
     print()
     try:
-        results = search_ffn(args.search, **filters)
+        results = search_fn(args.search, **filters)
     except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -287,15 +315,13 @@ def _handle_watch(args):
                 continue
             last_clip = clip
 
-            # Check if clipboard contains an FFN or FicWad URL
+            # Check if clipboard contains a supported URL
             url = None
-            ffn_match = _FFN_URL_RE.search(clip)
-            ficwad_match = _FICWAD_URL_RE.search(clip)
-
-            if ffn_match:
-                url = ffn_match.group(0)
-            elif ficwad_match:
-                url = ficwad_match.group(0)
+            for pattern in (_FFN_URL_RE, _FICWAD_URL_RE, _AO3_URL_RE):
+                match = pattern.search(clip)
+                if match:
+                    url = match.group(0)
+                    break
 
             if not url:
                 continue
@@ -321,7 +347,7 @@ def main(argv=None):
         prog="ffn-dl",
         description="Download fanfiction from fanfiction.net and ficwad.com",
         epilog=(
-            "Supported sites: fanfiction.net, ficwad.com\n"
+            "Supported sites: fanfiction.net, ficwad.com, archiveofourown.org\n"
             "Name template placeholders: "
             "{title} {author} {id} {words} {status} {rating} {language} {chapters}"
         ),
@@ -430,52 +456,92 @@ def main(argv=None):
         "-s",
         "--search",
         metavar="QUERY",
-        help="Search fanfiction.net for stories matching QUERY",
+        help="Search for stories matching QUERY (see --site to pick FFN or AO3)",
     )
-    # Search filters (only apply when --search is used)
+    parser.add_argument(
+        "--site",
+        choices=["ffn", "ao3"],
+        default="ffn",
+        help="Which site to search (default: ffn)",
+    )
+    # Search filters (only apply when --search is used). Values accepted
+    # depend on --site; see the search module for the full tables.
     from .search import (
-        FFN_CROSSOVER, FFN_GENRE, FFN_LANGUAGE, FFN_MATCH,
-        FFN_RATING, FFN_STATUS, FFN_WORDS,
+        FFN_GENRE, FFN_LANGUAGE, FFN_WORDS, AO3_RATING, AO3_SORT,
     )
     parser.add_argument(
         "--rating",
-        choices=list(FFN_RATING),
         metavar="R",
-        help=f"Filter by rating ({', '.join(FFN_RATING)})",
+        help=(
+            "Rating filter. FFN: K, K+, T, M, K-T. "
+            f"AO3: {', '.join(k for k in AO3_RATING if k != 'all')}."
+        ),
     )
     parser.add_argument(
         "--language",
         metavar="LANG",
-        help=f"Filter by language (e.g. {', '.join(list(FFN_LANGUAGE)[:6])}, ...)",
+        help=(
+            "Language filter. FFN: english, spanish, french, german, ... "
+            "AO3: ISO code (e.g. en, fr)."
+        ),
     )
     parser.add_argument(
         "--status",
-        choices=list(FFN_STATUS),
         metavar="S",
-        help=f"Filter by completion status ({', '.join(FFN_STATUS)})",
+        help=(
+            "Completion status: in-progress, complete "
+            "(mapped to AO3's 'complete' field automatically)."
+        ),
     )
     parser.add_argument(
         "--genre",
         metavar="G",
-        help=f"Filter by genre (e.g. {', '.join(list(FFN_GENRE)[:6])}, ...)",
+        help=f"FFN-only: {', '.join(list(FFN_GENRE)[1:8])}, ... (see search.FFN_GENRE)",
     )
     parser.add_argument(
         "--min-words",
-        choices=list(FFN_WORDS),
         metavar="N",
-        help=f"Filter by word count ({', '.join(FFN_WORDS)})",
+        help=f"FFN-only word-count bucket: {', '.join(list(FFN_WORDS)[1:])}",
     )
     parser.add_argument(
         "--crossover",
-        choices=list(FFN_CROSSOVER),
         metavar="X",
-        help=f"Crossover filter ({', '.join(FFN_CROSSOVER)})",
+        help="Crossover filter: any, only, exclude",
     )
     parser.add_argument(
         "--match",
-        choices=list(FFN_MATCH),
         metavar="M",
-        help=f"Match keywords against ({', '.join(FFN_MATCH)})",
+        help="FFN-only: match keywords in title or summary (any, title, summary)",
+    )
+    parser.add_argument(
+        "--sort",
+        metavar="S",
+        help=f"AO3-only sort: {', '.join(list(AO3_SORT)[:4])}, ...",
+    )
+    parser.add_argument(
+        "--fandom",
+        metavar="NAME",
+        help="AO3-only: filter by fandom name(s)",
+    )
+    parser.add_argument(
+        "--word-count",
+        metavar="RANGE",
+        help="AO3-only word-count range, e.g. '<5000', '>10000', '1000-5000'",
+    )
+    parser.add_argument(
+        "--character",
+        metavar="NAME",
+        help="AO3-only: filter by character name(s)",
+    )
+    parser.add_argument(
+        "--relationship",
+        metavar="NAME",
+        help="AO3-only: filter by relationship tag(s)",
+    )
+    parser.add_argument(
+        "--single-chapter",
+        action="store_true",
+        help="AO3-only: one-shots only",
     )
     parser.add_argument(
         "-w",

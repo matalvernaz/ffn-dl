@@ -1,0 +1,332 @@
+"""Archive of Our Own (archiveofourown.org) scraper.
+
+AO3 hosts the full work on one page via view_full_work=true, so we
+fetch the whole story in a single HTTP request rather than paging
+through chapters like FFN. view_adult=true skips the adult-content
+interstitial for Explicit-rated works (we're not logged in, so the
+setting persists only for the session).
+"""
+
+import logging
+import re
+
+from bs4 import BeautifulSoup
+
+from .models import Chapter, Story
+from .scraper import BaseScraper, StoryNotFoundError
+
+logger = logging.getLogger(__name__)
+
+AO3_BASE = "https://archiveofourown.org"
+
+
+class AO3LockedError(Exception):
+    """Raised when a work requires an AO3 login to view."""
+
+
+class AO3Scraper(BaseScraper):
+    """Scraper for archiveofourown.org."""
+
+    site_name = "ao3"
+
+    def __init__(self, **kwargs):
+        # AO3 is gentler than FFN; shorter delays are fine and we only
+        # make one HTTP request per work anyway.
+        kwargs.setdefault("delay_range", (1.0, 3.0))
+        super().__init__(**kwargs)
+
+    @staticmethod
+    def parse_story_id(url_or_id):
+        text = str(url_or_id).strip()
+        if text.isdigit():
+            return int(text)
+        match = re.search(r"archiveofourown\.org/works/(\d+)", text)
+        if match:
+            return int(match.group(1))
+        # Also accept the mirror hostname used in some links
+        match = re.search(r"ao3\.org/works/(\d+)", text)
+        if match:
+            return int(match.group(1))
+        raise ValueError(
+            f"Cannot parse AO3 work ID from: {text!r}\n"
+            "Expected a URL like https://archiveofourown.org/works/12345 "
+            "or a numeric ID."
+        )
+
+    def _check_for_blocks(self, html):
+        super()._check_for_blocks(html)
+        lower = html[:4000].lower()
+        if "this work could have adult content" in lower and "proceed" in lower:
+            # Should not happen when view_adult=true is set, but guard anyway
+            raise AO3LockedError(
+                "Adult-content gate was not bypassed. Try again — AO3 may "
+                "require the view_adult=true parameter to be on the URL."
+            )
+        if "users must be logged in to access" in lower or (
+            "sorry, you don't have permission" in lower
+        ):
+            raise AO3LockedError(
+                "This work requires an AO3 login to view."
+            )
+
+    @staticmethod
+    def is_author_url(url):
+        """Return True if the URL is an AO3 user (author) page."""
+        return bool(re.search(r"archiveofourown\.org/users/[\w.-]+", str(url)))
+
+    @staticmethod
+    def _parse_metadata(soup):
+        """Extract title, author, summary, and stats from a work page."""
+        title_tag = soup.find("h2", class_="title")
+        title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
+
+        byline = soup.find("h3", class_="byline")
+        author = "Unknown Author"
+        author_url = ""
+        if byline:
+            author_link = byline.find(
+                "a", href=re.compile(r"^/users/[^/]+/pseuds/")
+            )
+            if author_link:
+                author = author_link.get_text(strip=True)
+                author_url = AO3_BASE + author_link["href"]
+            else:
+                # Anonymous or orphan_account works
+                author = byline.get_text(strip=True) or "Anonymous"
+
+        summary_tag = None
+        # AO3 summary lives inside a preface module: div.summary.module > h3 + blockquote.userstuff
+        preface = soup.find("div", class_="preface") or soup
+        summary_mod = preface.find("div", class_="summary")
+        if summary_mod:
+            bq = summary_mod.find("blockquote")
+            summary_tag = bq or summary_mod
+        summary = summary_tag.get_text(strip=True) if summary_tag else ""
+
+        extra = {}
+        meta_dl = soup.select_one("dl.work.meta")
+        if meta_dl:
+            def dd_text(cls):
+                dd = meta_dl.find("dd", class_=cls)
+                return dd.get_text(" ", strip=True) if dd else None
+
+            def dd_tags(cls):
+                dd = meta_dl.find("dd", class_=cls)
+                if not dd:
+                    return []
+                return [a.get_text(strip=True) for a in dd.find_all("a")]
+
+            fandoms = dd_tags("fandom")
+            if fandoms:
+                extra["category"] = " / ".join(fandoms)
+            rating = dd_text("rating")
+            if rating:
+                extra["rating"] = rating
+            language = dd_text("language")
+            if language:
+                extra["language"] = language
+            relationships = dd_tags("relationship")
+            if relationships:
+                extra["relationships"] = ", ".join(relationships)
+            characters = dd_tags("character")
+            if characters:
+                extra["characters"] = ", ".join(characters)
+            freeform = dd_tags("freeform")
+            if freeform:
+                extra["tags"] = ", ".join(freeform)
+            warnings = dd_tags("warning")
+            if warnings:
+                extra["warnings"] = ", ".join(warnings)
+            categories = dd_tags("category")
+            if categories:
+                extra["pairing_category"] = ", ".join(categories)
+
+        stats = soup.find("dl", class_="stats")
+        if stats:
+            for dt, dd in zip(stats.find_all("dt"), stats.find_all("dd")):
+                key = dt.get_text(strip=True).rstrip(":").lower().replace(" ", "_")
+                val = dd.get_text(strip=True)
+                if key == "words":
+                    extra["words"] = val
+                elif key == "chapters":
+                    extra["chapter_ratio"] = val  # e.g. "5/10" or "5/?"
+                elif key == "published":
+                    extra["published"] = val
+                elif key in ("completed", "updated"):
+                    extra["date_updated_text"] = val
+                elif key == "kudos":
+                    extra["kudos"] = val
+                elif key == "hits":
+                    extra["hits"] = val
+                elif key == "bookmarks":
+                    extra["bookmarks"] = val
+                elif key == "comments":
+                    extra["comments"] = val
+
+        # Derive "status" from the chapter ratio (5/5 = complete, 5/? = WIP)
+        ratio = extra.get("chapter_ratio", "")
+        if ratio:
+            parts = ratio.split("/")
+            if len(parts) == 2 and parts[0] == parts[1]:
+                extra["status"] = "Complete"
+            else:
+                extra["status"] = "In-Progress"
+
+        return {
+            "title": title,
+            "author": author,
+            "author_url": author_url,
+            "summary": summary,
+            "extra": extra,
+        }
+
+    @staticmethod
+    def _parse_chapters(soup, fallback_title):
+        """Extract chapters from the full-work page.
+
+        Multi-chapter works have <div id="chapter-N"> blocks with an
+        inner h3.title and a div.userstuff. Single-chapter works have
+        a single div.userstuff under #workskin with no chapter wrapper.
+        """
+        chapters = []
+        numbered = soup.find_all(
+            "div", id=re.compile(r"^chapter-\d+$")
+        )
+
+        if numbered:
+            for idx, div in enumerate(numbered, 1):
+                title_tag = div.find("h3", class_="title")
+                title = (
+                    title_tag.get_text(strip=True) if title_tag
+                    else f"Chapter {idx}"
+                )
+                title = re.sub(r"^Chapter\s+\d+\s*:\s*", "", title).strip() or f"Chapter {idx}"
+                userstuff = div.find("div", class_="userstuff")
+                if userstuff is None:
+                    continue
+                # Strip the "Chapter Text" landmark AO3 injects
+                for landmark in userstuff.find_all(
+                    "h3", class_="landmark heading"
+                ):
+                    landmark.decompose()
+                html = userstuff.decode_contents()
+                chapters.append(Chapter(number=idx, title=title, html=html))
+        else:
+            # Single-chapter work
+            workskin = soup.find(id="workskin")
+            userstuff = workskin.find("div", class_="userstuff") if workskin else None
+            if userstuff is None:
+                raise ValueError(
+                    "Could not locate chapter content on AO3 work page."
+                )
+            for landmark in userstuff.find_all(
+                "h3", class_="landmark heading"
+            ):
+                landmark.decompose()
+            chapters.append(
+                Chapter(number=1, title=fallback_title, html=userstuff.decode_contents())
+            )
+
+        return chapters
+
+    def scrape_author_stories(self, url):
+        """Fetch an AO3 user works page (all pages) and return
+        (author_name, [story_urls]).
+        """
+        # Normalise: accept /users/Name, /users/Name/works, /users/Name/pseuds/X
+        match = re.search(r"archiveofourown\.org/users/([\w.-]+)", url)
+        if not match:
+            raise ValueError(f"Not an AO3 user URL: {url}")
+        user = match.group(1)
+        author_name = user
+        story_urls = []
+        seen = set()
+        page = 1
+
+        while True:
+            page_url = f"{AO3_BASE}/users/{user}/works?page={page}"
+            html = self._fetch(page_url)
+            soup = BeautifulSoup(html, "lxml")
+
+            if page == 1:
+                # Author display name from the heading, if present
+                h2 = soup.find("h2", class_="heading")
+                if h2:
+                    heading = h2.get_text(strip=True)
+                    m = re.search(r"Works by (.+)$", heading)
+                    if m:
+                        author_name = m.group(1).strip()
+
+            new_on_page = 0
+            for a in soup.find_all(
+                "a", href=re.compile(r"^/works/\d+(?:[?#].*)?$")
+            ):
+                wid_m = re.search(r"/works/(\d+)", a["href"])
+                if not wid_m:
+                    continue
+                wid = wid_m.group(1)
+                if wid in seen:
+                    continue
+                seen.add(wid)
+                story_urls.append(f"{AO3_BASE}/works/{wid}")
+                new_on_page += 1
+
+            # Stop when we've paginated past the end
+            next_link = soup.find("a", attrs={"rel": "next"})
+            if not next_link or new_on_page == 0:
+                break
+            page += 1
+            self._delay()
+
+        return author_name, story_urls
+
+    def download(self, url_or_id, progress_callback=None, skip_chapters=0):
+        """Download an AO3 work. Skip_chapters is honoured after the
+        single-page fetch so update mode and caching still work."""
+        work_id = self.parse_story_id(url_or_id)
+        work_url = f"{AO3_BASE}/works/{work_id}"
+        full_url = f"{work_url}?view_adult=true&view_full_work=true"
+
+        # Try the chapter cache first — if all chapters cached and
+        # metadata cached, we can skip the fetch.
+        cached_meta = self._load_meta_cache(work_id)
+        fetched_soup = None
+
+        if cached_meta is None or skip_chapters == 0:
+            logger.info("Fetching AO3 work %s...", work_id)
+            html = self._fetch(full_url)
+            fetched_soup = BeautifulSoup(html, "lxml")
+            meta = self._parse_metadata(fetched_soup)
+        else:
+            meta = cached_meta
+
+        self._save_meta_cache(work_id, meta)
+
+        story = Story(
+            id=work_id,
+            title=meta["title"],
+            author=meta["author"],
+            summary=meta["summary"],
+            url=work_url,
+            author_url=meta.get("author_url", ""),
+            metadata=meta.get("extra", {}),
+        )
+
+        if fetched_soup is None:
+            # Update mode without cache refresh: re-fetch to check for new chapters
+            html = self._fetch(full_url)
+            fetched_soup = BeautifulSoup(html, "lxml")
+
+        chapters = self._parse_chapters(fetched_soup, meta["title"])
+        total = len(chapters)
+
+        for ch in chapters:
+            if ch.number <= skip_chapters:
+                continue
+            # Cache each chapter so update mode stays cheap next time
+            self._save_chapter_cache(work_id, ch)
+            story.chapters.append(ch)
+            if progress_callback:
+                progress_callback(ch.number, total, ch.title, False)
+
+        return story

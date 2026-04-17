@@ -1,4 +1,4 @@
-"""Search fanfiction.net from the CLI."""
+"""Search fanfiction.net and Archive of Our Own."""
 
 import logging
 import re
@@ -10,6 +10,7 @@ from curl_cffi import requests as curl_requests
 logger = logging.getLogger(__name__)
 
 FFN_BASE = "https://www.fanfiction.net"
+AO3_BASE = "https://archiveofourown.org"
 SEARCH_PATH = "/search/"
 MAX_RESULTS = 25
 
@@ -255,7 +256,7 @@ def search_ffn(query, **filters):
         language: english / spanish / french / ... (see FFN_LANGUAGE)
         status: all / in-progress / complete
         genre: romance / humor / adventure / angst / ... (see FFN_GENRE)
-        min_words: <1k / <5k / 5k+ / 10k+ / 30k+ / 50k+ / 150k+ / 300k+
+        min_words: <1k / <5k / 5k+ / 30k+ / 50k+ / 150k+ / 300k+
         crossover: any / only / exclude
         match: any / title / summary  (where the keywords must appear)
 
@@ -265,3 +266,197 @@ def search_ffn(query, **filters):
     url = _build_search_url(query, filters)
     html = _fetch_search_page(url)
     return _parse_results(html)
+
+
+# ── AO3 search ────────────────────────────────────────────────────
+
+AO3_RATING = {
+    "all": None,
+    "not rated": 9,
+    "general": 10,
+    "teen": 11,
+    "mature": 12,
+    "explicit": 13,
+}
+
+AO3_COMPLETE = {
+    "any": None,
+    "complete": "T",
+    "in-progress": "F",
+}
+
+AO3_CROSSOVER = {
+    "any": None,
+    "only": "T",
+    "exclude": "F",
+}
+
+AO3_SORT = {
+    "best match": "_score",
+    "author": "authors_to_sort_on",
+    "title": "title_to_sort_on",
+    "date posted": "created_at",
+    "date updated": "revised_at",
+    "word count": "word_count",
+    "hits": "hits",
+    "kudos": "kudos_count",
+    "comments": "comments_count",
+    "bookmarks": "bookmarks_count",
+}
+
+
+def _build_ao3_search_url(query, filters):
+    params = {}
+    if query:
+        params["work_search[query]"] = query
+
+    def resolve(value, choices, name):
+        if value is None or value == "":
+            return None
+        s = str(value).strip()
+        if s.isdigit():
+            return int(s) if name != "complete" and name != "crossover" else s
+        lower = s.lower()
+        for key, resolved in choices.items():
+            if key.lower() == lower:
+                return resolved
+        valid = ", ".join(k for k in choices if k != "any" and k != "all")
+        raise ValueError(f"Unknown {name}: {value!r}. Valid: {valid}")
+
+    rating = resolve(filters.get("rating"), AO3_RATING, "rating")
+    if rating is not None:
+        params["work_search[rating_ids]"] = rating
+
+    complete = resolve(filters.get("complete"), AO3_COMPLETE, "complete")
+    if complete is not None:
+        params["work_search[complete]"] = complete
+
+    crossover = resolve(filters.get("crossover"), AO3_CROSSOVER, "crossover")
+    if crossover is not None:
+        params["work_search[crossover]"] = crossover
+
+    sort = resolve(filters.get("sort"), AO3_SORT, "sort")
+    if sort is not None:
+        params["work_search[sort_column]"] = sort
+
+    if filters.get("single_chapter"):
+        params["work_search[single_chapter]"] = 1
+
+    # Free-text AO3 fields pass straight through
+    for key, param in [
+        ("language", "work_search[language_id]"),
+        ("fandom", "work_search[fandom_names]"),
+        ("word_count", "work_search[word_count]"),
+        ("character", "work_search[character_names]"),
+        ("relationship", "work_search[relationship_names]"),
+        ("freeform", "work_search[freeform_names]"),
+        ("title", "work_search[title]"),
+        ("creator", "work_search[creators]"),
+    ]:
+        value = filters.get(key)
+        if value:
+            params[param] = value
+
+    return AO3_BASE + "/works/search?" + urlencode(params)
+
+
+def _parse_ao3_results(html):
+    soup = BeautifulSoup(html, "lxml")
+    results = []
+    works_ol = soup.find("ol", class_="work")
+    if not works_ol:
+        return results
+
+    for li in works_ol.find_all("li", recursive=False)[:MAX_RESULTS]:
+        heading = li.find("h4", class_="heading")
+        if not heading:
+            continue
+
+        title_link = heading.find("a", href=re.compile(r"^/works/\d+"))
+        if not title_link:
+            continue
+        title = title_link.get_text(strip=True)
+        work_id_m = re.search(r"/works/(\d+)", title_link["href"])
+        if not work_id_m:
+            continue
+        url = f"{AO3_BASE}/works/{work_id_m.group(1)}"
+
+        # Authors are the other <a> tags in the heading (all but the title link)
+        authors = [
+            a.get_text(strip=True)
+            for a in heading.find_all("a")
+            if a is not title_link and "/users/" in a.get("href", "")
+        ]
+        author = ", ".join(authors) if authors else "Anonymous"
+
+        fandoms_h5 = li.find("h5", class_="fandoms")
+        fandom = ""
+        if fandoms_h5:
+            fandoms = [a.get_text(strip=True) for a in fandoms_h5.find_all("a")]
+            fandom = ", ".join(fandoms)
+
+        summary_bq = li.find("blockquote", class_="summary")
+        summary = summary_bq.get_text(" ", strip=True) if summary_bq else ""
+
+        stats_dl = li.find("dl", class_="stats")
+        words = "?"
+        chapters = "1"
+        status = "In-Progress"
+        if stats_dl:
+            w = stats_dl.find("dd", class_="words")
+            if w:
+                words = w.get_text(strip=True)
+            c = stats_dl.find("dd", class_="chapters")
+            if c:
+                ratio = c.get_text(strip=True)
+                parts = ratio.split("/")
+                if parts:
+                    chapters = parts[0]
+                if len(parts) == 2 and parts[0] == parts[1]:
+                    status = "Complete"
+
+        rating = "?"
+        rating_li = li.find("span", class_="rating")
+        if rating_li:
+            rating = rating_li.get("title") or rating_li.get_text(strip=True)
+
+        results.append(
+            {
+                "title": title,
+                "author": author,
+                "url": url,
+                "summary": summary,
+                "words": words,
+                "chapters": chapters,
+                "rating": rating,
+                "fandom": fandom,
+                "status": status,
+            }
+        )
+
+    return results
+
+
+def search_ao3(query, **filters):
+    """Search Archive of Our Own and return a list of result dicts.
+
+    Keyword filters (all optional):
+        rating: all / not rated / general / teen / mature / explicit
+        complete: any / complete / in-progress
+        crossover: any / only / exclude
+        sort: best match / date updated / kudos / hits / ... (see AO3_SORT)
+        single_chapter: truthy → one-shots only
+        language: ISO code (e.g. "en", "fr")
+        fandom: fandom name(s) (AO3 accepts loose matching)
+        word_count: range expression e.g. "<5000", ">10000", "1000-5000"
+        character, relationship, freeform, title, creator: AO3 free-text fields
+    """
+    url = _build_ao3_search_url(query, filters)
+    session = curl_requests.Session(impersonate="chrome")
+    resp = session.get(url, timeout=30)
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"AO3 search failed (HTTP {resp.status_code}). "
+            "The site may be temporarily unavailable."
+        )
+    return _parse_ao3_results(resp.text)
