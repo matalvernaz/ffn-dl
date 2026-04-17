@@ -9,6 +9,7 @@ from pathlib import Path
 from .ao3 import AO3LockedError, AO3Scraper
 from .exporters import DEFAULT_TEMPLATE, EXPORTERS
 from .ficwad import FicWadScraper
+from .models import parse_chapter_spec
 from .royalroad import RoyalRoadScraper
 from .scraper import (
     CloudflareBlockError,
@@ -220,10 +221,12 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
         else:
             print(f"Downloading story {story_id} from {scraper.site_name}...")
 
+        chapter_spec = parse_chapter_spec(getattr(args, "chapters", None))
         story = scraper.download(
             url,
             progress_callback=progress,
             skip_chapters=existing_chapters,
+            chapters=chapter_spec,
         )
 
         new_count = len(story.chapters)
@@ -249,7 +252,7 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
             # For update, we need the full story to re-export.
             # Re-download everything (cache makes this fast).
             print("\n  Re-exporting full story...")
-            story = scraper.download(url, skip_chapters=0)
+            story = scraper.download(url, skip_chapters=0, chapters=chapter_spec)
 
         if args.format == "audio":
             from .tts import generate_audiobook
@@ -828,6 +831,16 @@ def main(argv=None):
             "Pause ~60s after every N chapter fetches "
             "(default: 20 on FFN, disabled on FicWad). "
             "Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--chapters",
+        metavar="SPEC",
+        help=(
+            "Restrict download to specific chapters. "
+            "SPEC is a comma-separated list of single chapters and/or "
+            "ranges. Examples: '1-5', '1,3,5', '1-5,10', '20-', '-3'. "
+            "'20-' means chapter 20 through the end; '-3' means 1 through 3."
         ),
     )
     parser.add_argument(

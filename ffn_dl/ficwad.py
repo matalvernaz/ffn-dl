@@ -201,7 +201,9 @@ class FicWadScraper(BaseScraper):
         # Single-chapter work: fall back to presence of storytext on the page
         return 1 if soup.find(id="storytext") else 0
 
-    def download(self, url_or_id, progress_callback=None, skip_chapters=0):
+    def download(self, url_or_id, progress_callback=None, skip_chapters=0, chapters=None):
+        from .models import chapter_in_spec
+
         story_id = self.parse_story_id(url_or_id)
         story_url = f"{FICWAD_BASE}/story/{story_id}"
 
@@ -264,6 +266,8 @@ class FicWadScraper(BaseScraper):
 
         for i, ch_info in enumerate(chapter_list, 1):
             if i <= skip_chapters:
+                continue
+            if not chapter_in_spec(i, chapters):
                 continue
 
             ch_id = ch_info["id"]

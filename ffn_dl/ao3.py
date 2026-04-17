@@ -355,9 +355,11 @@ class AO3Scraper(BaseScraper):
 
         return author_name, story_urls
 
-    def download(self, url_or_id, progress_callback=None, skip_chapters=0):
+    def download(self, url_or_id, progress_callback=None, skip_chapters=0, chapters=None):
         """Download an AO3 work. Skip_chapters is honoured after the
         single-page fetch so update mode and caching still work.
+        When `chapters` is a list of (lo, hi) ranges (the chapter-spec
+        format), only chapters in those ranges are kept.
 
         Update-mode optimisation: if a cached meta block exists and the
         caller claims they already have `skip_chapters` chapters, probe
@@ -366,6 +368,9 @@ class AO3Scraper(BaseScraper):
         no chapters (caller's "no new chapters" signal) without paying
         for the full-work download.
         """
+        from .models import chapter_in_spec
+
+        chapter_spec = chapters  # don't shadow the parsed list below
         work_id = self.parse_story_id(url_or_id)
         work_url = f"{AO3_BASE}/works/{work_id}"
         full_url = f"{work_url}?view_adult=true&view_full_work=true"
@@ -409,6 +414,8 @@ class AO3Scraper(BaseScraper):
 
         for ch in chapters:
             if ch.number <= skip_chapters:
+                continue
+            if not chapter_in_spec(ch.number, chapter_spec):
                 continue
             self._save_chapter_cache(work_id, ch)
             story.chapters.append(ch)

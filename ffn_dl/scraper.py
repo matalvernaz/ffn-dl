@@ -244,7 +244,7 @@ class BaseScraper:
     def parse_story_id(url_or_id):
         raise NotImplementedError
 
-    def download(self, url_or_id, progress_callback=None):
+    def download(self, url_or_id, progress_callback=None, skip_chapters=0, chapters=None):
         raise NotImplementedError
 
     def get_chapter_count(self, url_or_id):
@@ -454,9 +454,13 @@ class FFNScraper(BaseScraper):
         meta = self._parse_metadata(soup)
         return meta["num_chapters"]
 
-    def download(self, url_or_id, progress_callback=None, skip_chapters=0):
+    def download(self, url_or_id, progress_callback=None, skip_chapters=0, chapters=None):
         """Download a story. If skip_chapters > 0, only fetch metadata
-        and chapters beyond that count (for update mode)."""
+        and chapters beyond that count (for update mode).
+        If chapters is a list of (lo, hi) tuples, only fetch chapters
+        that fall inside one of the ranges."""
+        from .models import chapter_in_spec
+
         story_id = self.parse_story_id(url_or_id)
         story_url = f"{FFN_BASE}/s/{story_id}"
 
@@ -484,7 +488,7 @@ class FFNScraper(BaseScraper):
             return story  # nothing new
 
         # Chapter 1 — always parsed from the metadata page we already have
-        if skip_chapters < 1:
+        if skip_chapters < 1 and chapter_in_spec(1, chapters):
             html = self._parse_chapter_html(soup)
             ch1_title = chapter_titles.get("1", "Chapter 1")
             ch1 = Chapter(number=1, title=ch1_title, html=html)
@@ -494,6 +498,8 @@ class FFNScraper(BaseScraper):
                 progress_callback(1, num_chapters, ch1_title, False)
 
         for chap_num in range(max(2, skip_chapters + 1), num_chapters + 1):
+            if not chapter_in_spec(chap_num, chapters):
+                continue
             ch_title = chapter_titles.get(str(chap_num), f"Chapter {chap_num}")
 
             cached = self._load_chapter_cache(story_id, chap_num)

@@ -205,7 +205,9 @@ class RoyalRoadScraper(BaseScraper):
 
         return author_name, story_urls
 
-    def download(self, url_or_id, progress_callback=None, skip_chapters=0):
+    def download(self, url_or_id, progress_callback=None, skip_chapters=0, chapters=None):
+        from .models import chapter_in_spec
+
         fiction_id = self.parse_story_id(url_or_id)
         fiction_url = f"{RR_BASE}/fiction/{fiction_id}"
 
@@ -235,6 +237,8 @@ class RoyalRoadScraper(BaseScraper):
         total = len(chapter_list)
         for i, ch_info in enumerate(chapter_list, 1):
             if i <= skip_chapters:
+                continue
+            if not chapter_in_spec(i, chapters):
                 continue
 
             cached = self._load_chapter_cache(fiction_id, i)
