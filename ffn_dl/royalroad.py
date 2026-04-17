@@ -162,12 +162,16 @@ class RoyalRoadScraper(BaseScraper):
 
         hidden = cls._hidden_classes(soup)
         if hidden:
-            removed = 0
-            for tag in content.find_all(True):
-                tag_classes = tag.get("class") or []
-                if any(cls_name in hidden for cls_name in tag_classes):
-                    tag.decompose()
-                    removed += 1
+            # Collect first, then decompose: mutating the tree mid-iteration
+            # leaves orphaned descendants whose `attrs` becomes None, which
+            # then crashes the next `tag.get("class")` call.
+            doomed = [
+                tag for tag in content.find_all(True)
+                if any(c in hidden for c in (tag.get("class") or []))
+            ]
+            for tag in doomed:
+                tag.decompose()
+            removed = len(doomed)
             if removed:
                 logger.debug(
                     "Stripped %d element(s) hidden by page CSS (likely "

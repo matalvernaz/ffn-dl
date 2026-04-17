@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0 — 2026-04-17
+
+### Fixes
+
+- **Royal Road download crash** (`'NoneType' object has no attribute 'get'`):
+  the anti-piracy stripper called `tag.decompose()` while iterating the
+  same tree, which left orphaned descendants whose `attrs` became `None`
+  and crashed the next `tag.get("class")`. Hidden tags are now collected
+  before any are removed.
+
 ## 1.3.1 — 2026-04-17
 
 ### Fixes

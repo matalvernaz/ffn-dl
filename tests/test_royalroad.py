@@ -127,6 +127,26 @@ class TestAntiPiracyStripping:
         result = RoyalRoadScraper._parse_chapter_html(soup)
         assert "stolen a glance" in result.lower()
 
+    def test_hidden_tag_with_children_does_not_crash(self):
+        """Regression: decomposing a hidden parent mid-iteration used to
+        orphan its children, leaving them with attrs=None — the next
+        loop step then crashed on `tag.get('class')`."""
+        html = """
+        <html>
+        <head><style>.h{display:none}</style></head>
+        <body><div class="chapter-inner">
+            <p>keep me</p>
+            <div class="h"><span><em>nested junk</em></span></div>
+            <p>also keep me</p>
+        </div></body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        result = RoyalRoadScraper._parse_chapter_html(soup)
+        assert "keep me" in result.lower()
+        assert "also keep me" in result.lower()
+        assert "nested junk" not in result.lower()
+
     def test_hidden_classes_collector(self):
         html = """
         <style>
