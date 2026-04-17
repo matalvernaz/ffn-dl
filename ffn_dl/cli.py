@@ -54,6 +54,129 @@ def _scrape_series_works(url, args):
     return scraper.scrape_series_works(url)
 
 
+def _merge_stories(series_name, series_url, stories):
+    """Combine a series of Story objects into one Story for single-file export."""
+    from html import escape
+    from .models import Chapter, Story
+
+    authors = []
+    for s in stories:
+        if s.author and s.author not in authors:
+            authors.append(s.author)
+    combined_author = authors[0] if len(authors) == 1 else ", ".join(authors)
+
+    summaries = []
+    for s in stories:
+        if s.summary:
+            summaries.append(f"<strong>{escape(s.title)}</strong>: {escape(s.summary)}")
+    combined_summary = "\n".join(summaries) or "A series of works."
+
+    total_words = 0
+    per_work_words = []
+    for s in stories:
+        w = s.metadata.get("words", "").replace(",", "").strip()
+        if w.isdigit():
+            total_words += int(w)
+            per_work_words.append(int(w))
+
+    all_complete = all(
+        s.metadata.get("status", "").lower() == "complete" for s in stories
+    )
+
+    merged = Story(
+        id=0,
+        title=series_name,
+        author=combined_author or "Various",
+        summary=combined_summary,
+        url=series_url,
+    )
+    if total_words:
+        merged.metadata["words"] = f"{total_words:,}"
+    merged.metadata["status"] = "Complete" if all_complete else "In-Progress"
+    merged.metadata["category"] = "AO3 series"
+
+    ch_num = 1
+    for s in stories:
+        header_html = (
+            f"<h1>{escape(s.title)}</h1>"
+            f"<p><em>by {escape(s.author)}</em></p>"
+        )
+        if s.summary:
+            header_html += f"<blockquote>{escape(s.summary)}</blockquote>"
+        if s.url:
+            header_html += (
+                f'<p><a href="{escape(s.url)}">Original on AO3</a></p>'
+            )
+        merged.chapters.append(
+            Chapter(number=ch_num, title=s.title, html=header_html)
+        )
+        ch_num += 1
+        for ch in s.chapters:
+            merged.chapters.append(
+                Chapter(number=ch_num, title=ch.title, html=ch.html)
+            )
+            ch_num += 1
+
+    return merged
+
+
+def _handle_merge_series(series_urls, args, output_dir):
+    """Download each AO3 series URL, merge its works, and export as one file."""
+    from .ao3 import AO3Scraper
+    scraper = AO3Scraper()
+    all_ok = True
+    for series_url in series_urls:
+        try:
+            series_name, work_urls = scraper.scrape_series_works(series_url)
+        except (RateLimitError, CloudflareBlockError, StoryNotFoundError) as exc:
+            print(f"Error fetching series {series_url}: {exc}", file=sys.stderr)
+            all_ok = False
+            continue
+        if not work_urls:
+            print(f"No works found in series: {series_url}", file=sys.stderr)
+            all_ok = False
+            continue
+
+        print(f"\nSeries: {series_name}")
+        print(f"Downloading and merging {len(work_urls)} works...\n")
+        stories = []
+        for i, work_url in enumerate(work_urls, 1):
+            print(f"  [{i}/{len(work_urls)}] {work_url}")
+            def progress(current, total, title, cached):
+                tag = " (cached)" if cached else ""
+                print(f"      [{current}/{total}] {title}{tag}")
+            try:
+                story = scraper.download(work_url, progress_callback=progress)
+                stories.append(story)
+            except Exception as exc:
+                print(f"    Error: {exc}", file=sys.stderr)
+                all_ok = False
+
+        if not stories:
+            print(f"Nothing downloaded for series {series_name}.", file=sys.stderr)
+            all_ok = False
+            continue
+
+        merged = _merge_stories(series_name, series_url, stories)
+
+        print(f"\n  Merged {len(stories)} works / {len(merged.chapters)} sections")
+        if args.format == "audio":
+            from .tts import generate_audiobook
+            def audio_progress(current, total, title):
+                print(f"  Synthesizing [{current}/{total}] {title}")
+            path = generate_audiobook(
+                merged, str(output_dir), progress_callback=audio_progress
+            )
+        else:
+            exporter = EXPORTERS[args.format]
+            path = exporter(
+                merged, str(output_dir), template=args.name,
+                hr_as_stars=args.hr_as_stars,
+            )
+        print(f"  Saved: {path}")
+    return all_ok
+
+
 def _build_scraper(url, args):
     """Build a scraper instance for the given URL using CLI args."""
     scraper_cls = _detect_site(url)
@@ -611,6 +734,15 @@ def main(argv=None):
         ),
     )
     parser.add_argument(
+        "--merge-series",
+        action="store_true",
+        help=(
+            "When given an AO3 series URL, download every work and combine "
+            "them into a single file instead of one file per work. Each work "
+            "is rendered as a title chapter followed by its own chapters."
+        ),
+    )
+    parser.add_argument(
         "-a",
         "--author",
         metavar="URL",
@@ -885,6 +1017,22 @@ def main(argv=None):
             except FileNotFoundError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
                 sys.exit(1)
+
+        # --- --merge-series: handle series URLs specially ---
+        if args.merge_series:
+            series_urls = [u for u in urls if _is_series_url(u)]
+            if series_urls:
+                if args.format is None:
+                    args.format = "epub"
+                if args.output is None:
+                    args.output = "."
+                output_dir = Path(args.output)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                ok = _handle_merge_series(series_urls, args, output_dir)
+                # Remove series URLs from further processing
+                urls = [u for u in urls if not _is_series_url(u)]
+                if not urls:
+                    sys.exit(0 if ok else 1)
 
         # Expand any author or series URLs found in positional args
         expanded = []
