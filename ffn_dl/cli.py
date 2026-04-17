@@ -172,6 +172,7 @@ def _handle_merge_series(series_urls, args, output_dir):
             path = exporter(
                 merged, str(output_dir), template=args.name,
                 hr_as_stars=args.hr_as_stars,
+                strip_notes=args.strip_notes,
             )
         print(f"  Saved: {path}")
     return all_ok
@@ -261,6 +262,7 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
                 str(output_dir),
                 template=args.name,
                 hr_as_stars=args.hr_as_stars,
+                strip_notes=args.strip_notes,
             )
         print(f"\nSaved to: {path}")
 
@@ -819,6 +821,15 @@ def main(argv=None):
             "Replace each <hr/> scene break with a centred '* * *' marker "
             "in HTML/EPUB output (TXT output already renders hr as '* * *'). "
             "Useful for readers whose stylesheet draws hr as a barely-visible line."
+        ),
+    )
+    parser.add_argument(
+        "--strip-notes",
+        action="store_true",
+        help=(
+            "Remove paragraphs that start with 'A/N', \"Author's Note\", etc. "
+            "Heuristic — catches the common FFN pattern; AO3's structured "
+            "notes are already excluded at scrape time."
         ),
     )
     parser.add_argument(

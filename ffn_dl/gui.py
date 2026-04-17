@@ -134,7 +134,12 @@ class MainFrame(wx.Frame):
             root, label="Render scene breaks as &* * *  (instead of a thin rule)"
         )
         self.hr_stars_ctrl.SetName("Render scene breaks as asterisks")
-        opts2.Add(self.hr_stars_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
+        opts2.Add(self.hr_stars_ctrl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
+        self.strip_notes_ctrl = wx.CheckBox(
+            root, label="Strip &author's notes (A/N paragraphs)"
+        )
+        self.strip_notes_ctrl.SetName("Strip author's notes")
+        opts2.Add(self.strip_notes_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
         root_sizer.Add(opts2, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
 
         out_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -361,6 +366,7 @@ class MainFrame(wx.Frame):
             self.output_ctrl.SetValue(out)
 
         self.hr_stars_ctrl.SetValue(self.prefs.get_bool(_p.KEY_HR_AS_STARS))
+        self.strip_notes_ctrl.SetValue(self.prefs.get_bool(_p.KEY_STRIP_NOTES))
 
         for site_key, pref_key in (
             ("ffn", _p.KEY_SEARCH_STATE_FFN),
@@ -387,6 +393,7 @@ class MainFrame(wx.Frame):
         )
         self.prefs.set(_p.KEY_OUTPUT_DIR, self.output_ctrl.GetValue())
         self.prefs.set_bool(_p.KEY_HR_AS_STARS, self.hr_stars_ctrl.GetValue())
+        self.prefs.set_bool(_p.KEY_STRIP_NOTES, self.strip_notes_ctrl.GetValue())
 
         for site_key, pref_key in (
             ("ffn", _p.KEY_SEARCH_STATE_FFN),
@@ -822,6 +829,7 @@ class MainFrame(wx.Frame):
         output_dir = self.output_ctrl.GetValue()
         template = self.name_ctrl.GetValue()
         hr_as_stars = self.hr_stars_ctrl.GetValue()
+        strip_notes = self.strip_notes_ctrl.GetValue()
 
         if fmt == "audio":
             from .tts import generate_audiobook
@@ -837,7 +845,8 @@ class MainFrame(wx.Frame):
         from .exporters import EXPORTERS
         exporter = EXPORTERS[fmt]
         return exporter(
-            story, output_dir, template=template, hr_as_stars=hr_as_stars,
+            story, output_dir, template=template,
+            hr_as_stars=hr_as_stars, strip_notes=strip_notes,
         )
 
     def _run_download(self, url, skip_chapters=0, is_update=False):

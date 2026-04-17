@@ -122,11 +122,21 @@ def html_to_text(html: str) -> str:
 # ── Exporters ─────────────────────────────────────────────────────
 
 
+def _prepare_chapter_html(html: str, hr_as_stars: bool, strip_notes: bool) -> str:
+    """Apply optional chapter-level transformations in the right order."""
+    if strip_notes:
+        html = strip_note_paragraphs(html)
+    if hr_as_stars:
+        html = _apply_hr_as_stars(html)
+    return html
+
+
 def export_txt(
     story: Story,
     output_dir: str = ".",
     template: str = DEFAULT_TEMPLATE,
     hr_as_stars: bool = False,  # accepted for signature parity; TXT always renders hr as "* * *"
+    strip_notes: bool = False,
 ) -> Path:
     filename = format_filename(story, template) + ".txt"
     path = Path(output_dir) / filename
@@ -138,7 +148,8 @@ def export_txt(
 
         for ch in story.chapters:
             f.write(f"\n\n--- {ch.title} ---\n\n")
-            f.write(html_to_text(ch.html))
+            html = strip_note_paragraphs(ch.html) if strip_notes else ch.html
+            f.write(html_to_text(html))
 
     return path
 
@@ -148,6 +159,7 @@ def export_html(
     output_dir: str = ".",
     template: str = DEFAULT_TEMPLATE,
     hr_as_stars: bool = False,
+    strip_notes: bool = False,
 ) -> Path:
     filename = format_filename(story, template) + ".html"
     path = Path(output_dir) / filename
@@ -202,7 +214,7 @@ def export_html(
         for i, ch in enumerate(story.chapters, 1):
             ch_title = escape(ch.title)
             f.write(f'<div class="chapter" id="chapter-{i}"><h2>{ch_title}</h2>\n')
-            chapter_html = _apply_hr_as_stars(ch.html) if hr_as_stars else ch.html
+            chapter_html = _prepare_chapter_html(ch.html, hr_as_stars, strip_notes)
             f.write(chapter_html)
             f.write("\n</div><hr>\n")
 
@@ -256,11 +268,53 @@ def _apply_hr_as_stars(html: str) -> str:
     return _HR_RE.sub(_HR_STARS_REPLACEMENT, html)
 
 
+# Phrases that start an author's note paragraph on FFN (where notes are
+# mingled with story text in the #storytext container). Kept conservative
+# so we don't strip in-story prose that happens to start with "Note".
+_AN_MARKER_RE = re.compile(
+    r"""^\s*
+        [\[\(]?\s*                             # optional opening bracket
+        (?:
+            a\s*/\s*n                          # A/N  A / N
+            | a\.\s*n\.?                       # A.N. / A. N.
+            | an(?=\s*[:\-—–])                 # "AN" when followed by a separator
+            | author[’'`´]?s?\s+note            # Author's Note / Author Note
+            | author[’'`´]?s?\s+n\.?            # Author's N. (rare)
+        )
+        [\s:\-—–)\]\.]*                        # trailing punctuation
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def strip_note_paragraphs(html: str) -> str:
+    """Drop paragraph-level author's notes from chapter HTML.
+
+    Heuristic — matches paragraphs (or top-level divs) whose visible text
+    starts with 'A/N', "Author's Note", etc. AO3's structured notes are
+    already outside the chapter content and don't need this. FFN mingles
+    notes with story text so a pattern pass is the best we can do without
+    an LLM.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    # Find top-level-ish note blocks
+    for tag in soup.find_all(["p", "div", "blockquote"]):
+        text = tag.get_text(" ", strip=True)
+        if not text:
+            continue
+        if _AN_MARKER_RE.match(text):
+            tag.decompose()
+    return str(soup)
+
+
 def export_epub(
     story: Story,
     output_dir: str = ".",
     template: str = DEFAULT_TEMPLATE,
     hr_as_stars: bool = False,
+    strip_notes: bool = False,
 ) -> Path:
     try:
         from ebooklib import epub
@@ -362,7 +416,7 @@ def export_epub(
             lang="en",
         )
         heading = escape(ch.title)
-        chapter_html = _apply_hr_as_stars(ch.html) if hr_as_stars else ch.html
+        chapter_html = _prepare_chapter_html(ch.html, hr_as_stars, strip_notes)
         ec.content = f"<h2>{heading}</h2>\n{chapter_html}".encode("utf-8")
         ec.add_item(css)
         book.add_item(ec)

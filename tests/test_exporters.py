@@ -50,6 +50,34 @@ class TestSiteInfo:
         assert _site_info("")[0] == "ffn"
 
 
+class TestStripNotes:
+    def test_strips_common_an_markers(self):
+        from ffn_dl.exporters import strip_note_paragraphs
+        cases = [
+            "<p>Story.</p><p>A/N: late update</p>",
+            "<p>Story.</p><p>AN: thanks!</p>",
+            "<p>Story.</p><p>AN - yes</p>",
+            "<p>Story.</p><p>A.N. note here</p>",
+            "<p>Story.</p><p>Author's Note: thanks</p>",
+            "<p>Story.</p><p>[A/N: bracketed]</p>",
+            "<p>Story.</p><p>Author Note: hi</p>",
+        ]
+        for html in cases:
+            out = strip_note_paragraphs(html)
+            assert out.count("<p>") == 1, f"should strip: {html}"
+
+    def test_keeps_prose_that_looks_similar(self):
+        from ffn_dl.exporters import strip_note_paragraphs
+        cases = [
+            "<p>An arrow hit him.</p>",
+            "<p>note to self: be careful</p>",
+            "<p>A nice day.</p>",
+        ]
+        for html in cases:
+            out = strip_note_paragraphs(html)
+            assert out.count("<p>") == html.count("<p>"), f"should keep: {html}"
+
+
 class TestHrAsStars:
     def test_substitutes_hr_tags(self):
         out = _apply_hr_as_stars("before<hr/>middle<hr>after")
