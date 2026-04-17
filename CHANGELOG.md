@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.7.0 — 2026-04-17
+
+### Metadata
+
+- **Word count in the header, everywhere**: RR, MediaMiner, and
+  Literotica downloads used to skip the Words / Reading Time rows
+  because none of those sites expose a total word count in their
+  metadata. The exporter now falls back to counting the downloaded
+  chapter text when no site-provided count is present, so every
+  export has a Words line. When the site does expose a count (FFN,
+  AO3, FicWad), it's still preferred because it includes anything
+  the downloader doesn't fetch (omakes, appendices).
+- **Royal Road: Published and Last Updated dates**: the RR scraper
+  now lifts the first and last chapter's timestamps out of the
+  chapters table and emits them as `date_published` / `date_updated`
+  so the exporter renders `Published: YYYY-MM-DD` and
+  `Updated: YYYY-MM-DD` in the header block. These were missing
+  from RR downloads entirely.
+
 ## 1.6.4 — 2026-04-17
 
 ### Accessibility

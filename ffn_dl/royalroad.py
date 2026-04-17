@@ -92,7 +92,10 @@ class RoyalRoadScraper(BaseScraper):
 
     @staticmethod
     def _parse_chapter_list(soup):
-        """Return a list of {id, title, url} dicts from the chapters table."""
+        """Return a list of {id, title, url, unixtime} dicts from the chapters table.
+        `unixtime` is the chapter's publish time as an int epoch, or
+        None if the row doesn't expose one.
+        """
         table = soup.find("table", id="chapters")
         if not table:
             return []
@@ -108,10 +111,18 @@ class RoyalRoadScraper(BaseScraper):
             match = re.search(r"/chapter/(\d+)", href)
             if not match:
                 continue
+            unixtime = None
+            time_tag = row.find("time")
+            if time_tag and time_tag.get("unixtime"):
+                try:
+                    unixtime = int(time_tag["unixtime"])
+                except ValueError:
+                    unixtime = None
             chapters.append({
                 "id": int(match.group(1)),
                 "title": link.get_text(strip=True),
                 "url": RR_BASE + href if href.startswith("/") else href,
+                "unixtime": unixtime,
             })
         return chapters
 
@@ -262,6 +273,15 @@ class RoyalRoadScraper(BaseScraper):
             raise StoryNotFoundError(
                 f"No chapters found on Royal Road fiction {fiction_id}."
             )
+
+        # First chapter's timestamp is publish date, last is last-updated.
+        # RR doesn't expose these on the fiction header, only per-chapter.
+        chapter_times = [
+            c["unixtime"] for c in chapter_list if c.get("unixtime")
+        ]
+        if chapter_times:
+            meta.setdefault("extra", {})["date_published"] = chapter_times[0]
+            meta["extra"]["date_updated"] = chapter_times[-1]
 
         self._save_meta_cache(fiction_id, {**meta, "num_chapters": len(chapter_list)})
 

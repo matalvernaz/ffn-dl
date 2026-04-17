@@ -47,6 +47,20 @@ def _format_epoch(ts):
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
+def _count_story_words(story: Story) -> int:
+    """Total word count across every downloaded chapter's rendered text.
+    Used as a fallback when the source site doesn't expose a word count
+    in its metadata. Counts runs of \\w+ characters after HTML strip.
+    """
+    total = 0
+    for ch in story.chapters:
+        if not ch.html:
+            continue
+        text = BeautifulSoup(ch.html, "html.parser").get_text(" ", strip=True)
+        total += len(re.findall(r"\w+", text))
+    return total
+
+
 def _meta_fields(story: Story) -> list[tuple[str, str]]:
     """Return an ordered list of (label, value) pairs for the story header."""
     m = story.metadata
@@ -66,10 +80,27 @@ def _meta_fields(story: Story) -> list[tuple[str, str]]:
     if "rating" in m:
         fields.append(("Rating", m["rating"]))
     fields.append(("Chapters", str(len(story.chapters))))
-    if "words" in m:
-        fields.append(("Words", m["words"]))
+    # Words: prefer the source site's count (accurate, includes anything
+    # we didn't download like omakes or appendices); fall back to
+    # counting our rendered chapter text so sites that don't expose one
+    # (RR, MediaMiner, Literotica) still get a number in the header.
+    total_words = None
+    if "words" in m and m["words"]:
+        words_display = m["words"]
         try:
-            total_words = int(m["words"].replace(",", ""))
+            total_words = int(str(m["words"]).replace(",", ""))
+        except (TypeError, ValueError):
+            total_words = None
+    else:
+        counted = _count_story_words(story)
+        if counted:
+            words_display = f"{counted:,}"
+            total_words = counted
+        else:
+            words_display = None
+    if words_display:
+        fields.append(("Words", words_display))
+        if total_words:
             total_minutes = max(1, round(total_words / 250))
             if total_minutes >= 60:
                 hours, minutes = divmod(total_minutes, 60)
@@ -77,8 +108,6 @@ def _meta_fields(story: Story) -> list[tuple[str, str]]:
             else:
                 reading_time = f"{total_minutes} minutes"
             fields.append(("Reading Time", reading_time))
-        except (ValueError, AttributeError):
-            pass
     if "date_updated" in m:
         fields.append(("Updated", _format_epoch(m["date_updated"])))
     elif "updated" in m:

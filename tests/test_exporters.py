@@ -134,3 +134,47 @@ class TestHtmlAndTxtExport:
         assert "Source:" in text
         assert "Status:" in text
         assert "Complete" in text
+
+
+class TestUniversalMetadata:
+    def test_words_counted_from_chapters_when_missing(self, tmp_path):
+        # Sites that don't expose a word count (RR, MediaMiner, Literotica)
+        # should still get a Words line in the header, computed from the
+        # downloaded chapter text.
+        story = Story(id=9, title="X", author="A", summary="", url="http://x")
+        story.chapters.append(
+            Chapter(number=1, title="c", html="<p>one two three four</p>"),
+        )
+        path = export_txt(story, str(tmp_path))
+        text = Path(path).read_text()
+        assert "Words: 4" in text
+        assert "Reading Time:" in text
+
+    def test_published_and_updated_epochs_render_as_dates(self, tmp_path):
+        # RR populates `date_published` / `date_updated` as unix epochs.
+        # The header should convert them to YYYY-MM-DD.
+        story = Story(id=9, title="X", author="A", summary="", url="http://x")
+        story.metadata["date_published"] = 1600000000
+        story.metadata["date_updated"] = 1700000000
+        story.chapters.append(Chapter(number=1, title="c", html="<p>x</p>"))
+        path = export_txt(story, str(tmp_path))
+        text = Path(path).read_text()
+        assert "Published: 2020-09-13" in text
+        assert "Updated: 2023-11-14" in text
+
+
+class TestRoyalRoadDates:
+    def test_chapter_list_captures_publish_unixtime(self):
+        from bs4 import BeautifulSoup
+        from ffn_dl.royalroad import RoyalRoadScraper
+        html = '''
+        <table id="chapters"><tbody>
+          <tr><td><a href="/fiction/1/x/chapter/10">Ch 1</a></td>
+              <td><time unixtime="1600000000">x</time></td></tr>
+          <tr><td><a href="/fiction/1/x/chapter/20">Ch 2</a></td>
+              <td><time unixtime="1700000000">x</time></td></tr>
+        </tbody></table>
+        '''
+        soup = BeautifulSoup(html, "lxml")
+        rows = RoyalRoadScraper._parse_chapter_list(soup)
+        assert [r["unixtime"] for r in rows] == [1600000000, 1700000000]
