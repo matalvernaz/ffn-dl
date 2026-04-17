@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.8.3 — 2026-04-17
+
+### Fix
+
+- **Filter-only searches no longer rejected as "missing query"**. After
+  1.8.0 added the Genres / Tags / Warnings multi-pickers, clicking
+  Search with just a tag ticked (and no free-text query typed) bounced
+  off the "Please enter a search query" guard and did nothing — even
+  though Royal Road's `/fictions/search?tagsAdd=progression` works
+  fine on its own. The GUI gate now recognizes RR tag-only, genre-only,
+  warning-only, and numeric-bound-only searches, plus Literotica
+  category-only, as valid standalone browses. The CLI gate was widened
+  in the same way: `--rr-genres Fantasy` (no `--search`) now runs.
+
 ## 1.8.2 — 2026-04-17
 
 ### CI fix

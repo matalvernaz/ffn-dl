@@ -958,14 +958,36 @@ class MainFrame(wx.Frame):
         if self._downloading:
             return
         filters = self._collect_filters(tab)
-        # RR list browse (Rising Stars, Best Rated, etc.) doesn't need a
-        # free-text query; everything else still does.
+        # Most searches need a free-text query, but several site/filter
+        # combinations are valid *without* one:
+        #   • RR list browse (Rising Stars, Best Rated, …)
+        #   • RR filter-only browse (tags, genres, warnings, or numeric
+        #     bounds with no title) — RR's /fictions/search accepts
+        #     tagsAdd-only, and that's the whole point of the Pick
+        #     Genres / Pick Tags dialogs.
+        #   • Literotica category browse — the category slug IS the
+        #     browse target.
         list_browse = (
             site_key == "royalroad"
             and filters.get("list")
             and filters["list"].strip().lower() != "search"
         )
-        if not query and not list_browse:
+        rr_filter_only = (
+            site_key == "royalroad"
+            and any(
+                filters.get(k)
+                for k in (
+                    "tags", "tags_picked", "genres", "warnings",
+                    "status", "type", "order_by",
+                    "min_words", "max_words", "min_pages", "max_pages",
+                    "min_rating",
+                )
+            )
+        )
+        lit_cat_browse = (
+            site_key == "literotica" and filters.get("category")
+        )
+        if not query and not (list_browse or rr_filter_only or lit_cat_browse):
             self._log("Error: Please enter a search query.")
             return
         self._set_busy(True)

@@ -1320,12 +1320,20 @@ def main(argv=None):
     )
 
     # --- Search mode ---
-    # RR list browse and Literotica category browse don't need a
-    # free-text query, so allow --rr-list / --lit-category to stand in
-    # for --search.
+    # Most searches need --search, but several flags stand in for a
+    # free-text query on their own: RR list browse, RR filter-only
+    # browse (tags/genres/warnings/bounds), and Literotica category.
+    rr_filter_only = any(
+        getattr(args, attr, None)
+        for attr in (
+            "rr_list", "rr_tags", "rr_genres", "rr_warnings",
+            "rr_min_words", "rr_max_words", "rr_min_pages",
+            "rr_max_pages", "rr_min_rating",
+        )
+    )
     if (
         args.search
-        or getattr(args, "rr_list", None)
+        or rr_filter_only
         or getattr(args, "lit_category", None)
     ):
         if not args.search:
