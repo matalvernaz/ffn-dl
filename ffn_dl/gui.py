@@ -5,8 +5,10 @@ screen readers can read every widget natively.
 """
 
 import re
+import sys
 import threading
 import wx
+import webbrowser
 from pathlib import Path
 
 
@@ -92,6 +94,7 @@ class MainFrame(wx.Frame):
         self._load_prefs()
         self.Bind(wx.EVT_CLOSE, self._on_close)
         self.Centre()
+        self._start_update_check()
 
     def _build_ui(self):
         root = wx.Panel(self)
@@ -363,6 +366,160 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
         event.Skip()
+
+    # ── Update check ─────────────────────────────────────────
+
+    def _start_update_check(self):
+        from . import prefs as _p, self_update
+
+        # Clean up any leftover .exe.old from a previous update
+        self_update.cleanup_old_exe()
+
+        if not self.prefs.get_bool(_p.KEY_CHECK_UPDATES):
+            return
+
+        threading.Thread(target=self._run_update_check, daemon=True).start()
+
+    def _run_update_check(self):
+        from . import prefs as _p, self_update
+
+        try:
+            info = self_update.check_for_update()
+        except Exception as exc:
+            # Silent — a failed check shouldn't bug the user
+            wx.CallAfter(self._log, f"(Update check failed: {exc})")
+            return
+        if info is None:
+            return
+
+        skipped = self.prefs.get(_p.KEY_SKIPPED_VERSION)
+        if skipped and skipped == info["tag"]:
+            return
+
+        wx.CallAfter(self._prompt_update, info)
+
+    def _prompt_update(self, info):
+        from . import __version__
+        from . import prefs as _p, self_update
+
+        tag = info["tag"]
+        size_mb = (info.get("size") or 0) / 1024 / 1024
+
+        if not self_update.can_self_replace():
+            # Linux/Mac/dev install: offer to open the release page
+            msg = (
+                f"Version {tag} is available (you have {__version__}).\n\n"
+                f"Automatic update is only supported in the Windows build. "
+                f"Open the release page to update manually?"
+            )
+            dlg = wx.MessageDialog(
+                self, msg, "Update Available",
+                style=wx.YES_NO | wx.CANCEL | wx.YES_DEFAULT,
+            )
+            dlg.SetYesNoCancelLabels(
+                "&Open Release Page", "Re&mind Me Later", "&Skip This Version",
+            )
+            result = dlg.ShowModal()
+            dlg.Destroy()
+            if result == wx.ID_YES and info.get("release_url"):
+                webbrowser.open(info["release_url"])
+            elif result == wx.ID_CANCEL:
+                self.prefs.set(_p.KEY_SKIPPED_VERSION, tag)
+            return
+
+        msg = (
+            f"Version {tag} is available. You currently have {__version__}.\n\n"
+            f"What will happen if you update:\n"
+            f"  \u2022 ffn-dl will download the new version (about "
+            f"{size_mb:.0f} MB).\n"
+            f"  \u2022 The app will close, replace itself, and reopen "
+            f"automatically.\n"
+            f"  \u2022 Your settings, cached chapters, and saved files are "
+            f"untouched.\n"
+            f"  \u2022 If the download fails or is cancelled, the current "
+            f"version keeps running \u2014 nothing is changed until the "
+            f"new file is fully downloaded.\n\n"
+            f"Update now?"
+        )
+        dlg = wx.MessageDialog(
+            self, msg, "Update Available",
+            style=wx.YES_NO | wx.CANCEL | wx.YES_DEFAULT,
+        )
+        dlg.SetYesNoCancelLabels(
+            "&Update Now", "Re&mind Me Later", "&Skip This Version",
+        )
+        result = dlg.ShowModal()
+        dlg.Destroy()
+
+        if result == wx.ID_YES:
+            self._perform_update(info)
+        elif result == wx.ID_CANCEL:
+            self.prefs.set(_p.KEY_SKIPPED_VERSION, tag)
+
+    def _perform_update(self, info):
+        from . import self_update
+
+        # Save prefs now so they're on disk before the swap
+        try:
+            self._save_prefs()
+        except Exception:
+            pass
+
+        progress = wx.ProgressDialog(
+            "Downloading update",
+            f"Downloading {info['tag']}...",
+            maximum=100,
+            parent=self,
+            style=(
+                wx.PD_APP_MODAL | wx.PD_CAN_ABORT
+                | wx.PD_ELAPSED_TIME | wx.PD_REMAINING_TIME
+            ),
+        )
+        self._update_cancelled = False
+
+        def progress_cb(done, total):
+            if self._update_cancelled:
+                raise RuntimeError("Update cancelled by user.")
+            if total > 0:
+                pct = min(100, int(done * 100 / total))
+                done_mb = done / 1024 / 1024
+                total_mb = total / 1024 / 1024
+                kept_going, _ = progress.Update(
+                    pct, f"Downloaded {done_mb:.0f} / {total_mb:.0f} MB"
+                )
+                if not kept_going:
+                    self._update_cancelled = True
+                    raise RuntimeError("Update cancelled by user.")
+
+        def worker():
+            try:
+                self_update.download_and_replace(info, progress_cb=progress_cb)
+            except Exception as exc:
+                wx.CallAfter(self._update_failed, progress, exc)
+                return
+            wx.CallAfter(self._update_succeeded, progress, info["tag"])
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_failed(self, progress, exc):
+        progress.Destroy()
+        wx.MessageBox(
+            f"Update failed: {exc}\n\nYour current version is unchanged.",
+            "Update Error",
+            wx.OK | wx.ICON_ERROR,
+            parent=self,
+        )
+
+    def _update_succeeded(self, progress, tag):
+        from . import self_update
+        progress.Destroy()
+        wx.MessageBox(
+            f"Updated to {tag}. The app will now restart.",
+            "Update Complete",
+            wx.OK,
+            parent=self,
+        )
+        self_update.restart()
 
     # ── Download ─────────────────────────────────────────────
 
