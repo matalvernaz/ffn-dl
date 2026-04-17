@@ -127,6 +127,15 @@ class MainFrame(wx.Frame):
 
         root_sizer.Add(opts, 0, wx.EXPAND | wx.ALL, pad)
 
+        # Extra export options row
+        opts2 = wx.BoxSizer(wx.HORIZONTAL)
+        self.hr_stars_ctrl = wx.CheckBox(
+            root, label="Render scene breaks as &* * *  (instead of a thin rule)"
+        )
+        self.hr_stars_ctrl.SetName("Render scene breaks as asterisks")
+        opts2.Add(self.hr_stars_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
+        root_sizer.Add(opts2, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+
         out_sizer = wx.BoxSizer(wx.HORIZONTAL)
         out_sizer.Add(wx.StaticText(root, label="&Save to:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         default_dir = str(Path.home() / "Downloads")
@@ -350,6 +359,8 @@ class MainFrame(wx.Frame):
         if out:
             self.output_ctrl.SetValue(out)
 
+        self.hr_stars_ctrl.SetValue(self.prefs.get_bool(_p.KEY_HR_AS_STARS))
+
     def _save_prefs(self):
         from . import prefs as _p
 
@@ -359,6 +370,7 @@ class MainFrame(wx.Frame):
             self.format_ctrl.GetString(self.format_ctrl.GetSelection()),
         )
         self.prefs.set(_p.KEY_OUTPUT_DIR, self.output_ctrl.GetValue())
+        self.prefs.set_bool(_p.KEY_HR_AS_STARS, self.hr_stars_ctrl.GetValue())
 
     def _on_close(self, event):
         try:
@@ -746,6 +758,7 @@ class MainFrame(wx.Frame):
         fmt = self.format_ctrl.GetString(self.format_ctrl.GetSelection())
         output_dir = self.output_ctrl.GetValue()
         template = self.name_ctrl.GetValue()
+        hr_as_stars = self.hr_stars_ctrl.GetValue()
 
         if fmt == "audio":
             from .tts import generate_audiobook
@@ -760,7 +773,9 @@ class MainFrame(wx.Frame):
 
         from .exporters import EXPORTERS
         exporter = EXPORTERS[fmt]
-        return exporter(story, output_dir, template=template)
+        return exporter(
+            story, output_dir, template=template, hr_as_stars=hr_as_stars,
+        )
 
     def _run_download(self, url, skip_chapters=0, is_update=False):
         try:

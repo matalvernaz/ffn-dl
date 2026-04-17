@@ -123,7 +123,10 @@ def html_to_text(html: str) -> str:
 
 
 def export_txt(
-    story: Story, output_dir: str = ".", template: str = DEFAULT_TEMPLATE
+    story: Story,
+    output_dir: str = ".",
+    template: str = DEFAULT_TEMPLATE,
+    hr_as_stars: bool = False,  # accepted for signature parity; TXT always renders hr as "* * *"
 ) -> Path:
     filename = format_filename(story, template) + ".txt"
     path = Path(output_dir) / filename
@@ -141,7 +144,10 @@ def export_txt(
 
 
 def export_html(
-    story: Story, output_dir: str = ".", template: str = DEFAULT_TEMPLATE
+    story: Story,
+    output_dir: str = ".",
+    template: str = DEFAULT_TEMPLATE,
+    hr_as_stars: bool = False,
 ) -> Path:
     filename = format_filename(story, template) + ".html"
     path = Path(output_dir) / filename
@@ -196,7 +202,8 @@ def export_html(
         for i, ch in enumerate(story.chapters, 1):
             ch_title = escape(ch.title)
             f.write(f'<div class="chapter" id="chapter-{i}"><h2>{ch_title}</h2>\n')
-            f.write(ch.html)
+            chapter_html = _apply_hr_as_stars(ch.html) if hr_as_stars else ch.html
+            f.write(chapter_html)
             f.write("\n</div><hr>\n")
 
         f.write("</body>\n</html>\n")
@@ -236,8 +243,24 @@ def _site_info(url: str) -> tuple[str, str]:
     return "ffn", "fanfiction.net"
 
 
+_HR_RE = re.compile(r"<hr\s*/?>|<hr\s[^>]*/?>", re.IGNORECASE)
+_HR_STARS_REPLACEMENT = (
+    '<div class="scenebreak" '
+    'style="text-align:center;margin:1em 0">* * *</div>'
+)
+
+
+def _apply_hr_as_stars(html: str) -> str:
+    """Replace <hr> tags with a centred '* * *' divider for readers whose
+    stylesheet renders rules as a thin line that's easy to miss."""
+    return _HR_RE.sub(_HR_STARS_REPLACEMENT, html)
+
+
 def export_epub(
-    story: Story, output_dir: str = ".", template: str = DEFAULT_TEMPLATE
+    story: Story,
+    output_dir: str = ".",
+    template: str = DEFAULT_TEMPLATE,
+    hr_as_stars: bool = False,
 ) -> Path:
     try:
         from ebooklib import epub
@@ -339,7 +362,8 @@ def export_epub(
             lang="en",
         )
         heading = escape(ch.title)
-        ec.content = f"<h2>{heading}</h2>\n{ch.html}".encode("utf-8")
+        chapter_html = _apply_hr_as_stars(ch.html) if hr_as_stars else ch.html
+        ec.content = f"<h2>{heading}</h2>\n{chapter_html}".encode("utf-8")
         ec.add_item(css)
         book.add_item(ec)
         epub_chapters.append(ec)

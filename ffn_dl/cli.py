@@ -122,7 +122,12 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
             )
         else:
             exporter = EXPORTERS[args.format]
-            path = exporter(story, str(output_dir), template=args.name)
+            path = exporter(
+                story,
+                str(output_dir),
+                template=args.name,
+                hr_as_stars=args.hr_as_stars,
+            )
         print(f"\nSaved to: {path}")
 
         if args.clean_cache:
@@ -556,6 +561,15 @@ def main(argv=None):
         "--no-cache",
         action="store_true",
         help="Disable chapter caching (re-download everything)",
+    )
+    parser.add_argument(
+        "--hr-as-stars",
+        action="store_true",
+        help=(
+            "Replace each <hr/> scene break with a centred '* * *' marker "
+            "in HTML/EPUB output (TXT output already renders hr as '* * *'). "
+            "Useful for readers whose stylesheet draws hr as a barely-visible line."
+        ),
     )
     parser.add_argument(
         "--clean-cache",

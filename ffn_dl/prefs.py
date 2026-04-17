@@ -10,11 +10,13 @@ KEY_FORMAT = "format"
 KEY_OUTPUT_DIR = "output_dir"
 KEY_CHECK_UPDATES = "check_updates"
 KEY_SKIPPED_VERSION = "skipped_update_version"
+KEY_HR_AS_STARS = "hr_as_stars"
 
 DEFAULTS = {
     KEY_NAME_TEMPLATE: "{title} - {author}",
     KEY_FORMAT: "epub",
     KEY_CHECK_UPDATES: True,
+    KEY_HR_AS_STARS: False,
 }
 
 
