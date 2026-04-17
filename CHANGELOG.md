@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.1 — 2026-04-17
+
+### Fixes
+
+- **Auto-updater freeze**: the download-progress callback was calling
+  `wx.ProgressDialog.Update()` from the worker thread, which deadlocks
+  the main event loop — the app downloaded the new build and then
+  froze. Progress is now marshalled through `wx.CallAfter` (throttled
+  to ~10 Hz) and cancel state goes through a `threading.Event` instead
+  of a cross-thread widget read.
+
 ## 1.3.0 — 2026-04-17
 
 ### Search

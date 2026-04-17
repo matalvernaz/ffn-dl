@@ -646,6 +646,8 @@ class MainFrame(wx.Frame):
             self.prefs.set(_p.KEY_SKIPPED_VERSION, tag)
 
     def _perform_update(self, info):
+        import time
+
         from . import self_update
 
         # Save prefs now so they're on disk before the swap
@@ -664,21 +666,38 @@ class MainFrame(wx.Frame):
                 | wx.PD_ELAPSED_TIME | wx.PD_REMAINING_TIME
             ),
         )
-        self._update_cancelled = False
+        cancel_event = threading.Event()
+        # progress_cb runs on the worker thread, but wxPython widgets are
+        # not thread-safe — calling progress.Update() directly from the
+        # worker deadlocks the main event loop (freeze). Marshal display
+        # updates through wx.CallAfter and read the cancel state via a
+        # threading.Event that the main thread sets when the user clicks
+        # Abort. Throttle to ~10 Hz so we don't flood the main thread.
+        last_call = [0.0]
+
+        def _apply_update(done, total):
+            if cancel_event.is_set():
+                return
+            if total <= 0:
+                return
+            pct = min(100, int(done * 100 / total))
+            done_mb = done / 1024 / 1024
+            total_mb = total / 1024 / 1024
+            kept_going, _ = progress.Update(
+                pct, f"Downloaded {done_mb:.0f} / {total_mb:.0f} MB"
+            )
+            if not kept_going:
+                cancel_event.set()
 
         def progress_cb(done, total):
-            if self._update_cancelled:
+            if cancel_event.is_set():
                 raise RuntimeError("Update cancelled by user.")
-            if total > 0:
-                pct = min(100, int(done * 100 / total))
-                done_mb = done / 1024 / 1024
-                total_mb = total / 1024 / 1024
-                kept_going, _ = progress.Update(
-                    pct, f"Downloaded {done_mb:.0f} / {total_mb:.0f} MB"
-                )
-                if not kept_going:
-                    self._update_cancelled = True
-                    raise RuntimeError("Update cancelled by user.")
+            now = time.monotonic()
+            # Always push the final update; throttle intermediate ones
+            if done < total and now - last_call[0] < 0.1:
+                return
+            last_call[0] = now
+            wx.CallAfter(_apply_update, done, total)
 
         def worker():
             try:
