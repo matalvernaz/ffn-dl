@@ -37,6 +37,52 @@ def count_chapters(filepath):
     return 0
 
 
+def extract_status(filepath) -> str:
+    """Return the story's completion status ('Complete' / 'In-Progress' / '')
+    by reading the metadata block of an ffn-dl export. Empty string if not
+    recognisable, so callers can treat unknown as "not complete."
+    """
+    path = Path(filepath)
+    if not path.exists():
+        return ""
+    suffix = path.suffix.lower()
+
+    if suffix == ".html":
+        text = path.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"<th>Status</th><td>([^<]+)</td>", text)
+        if match:
+            return match.group(1).strip()
+        return ""
+
+    if suffix == ".txt":
+        text = path.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"^Status:\s*(.+)$", text, re.MULTILINE)
+        if match:
+            return match.group(1).strip()
+        return ""
+
+    if suffix == ".epub":
+        try:
+            from ebooklib import epub
+            book = epub.read_epub(str(path))
+            # Status lands in the description block we render into the title
+            # page. ebooklib exposes the first-chapter / title-page HTML via
+            # get_items; scan the first HTML item's body.
+            for item in book.get_items():
+                if not hasattr(item, "file_name"):
+                    continue
+                if not item.file_name.startswith("title"):
+                    continue
+                body = item.content.decode("utf-8", errors="replace")
+                match = re.search(r"<th>Status</th><td>([^<]+)</td>", body)
+                if match:
+                    return match.group(1).strip()
+        except Exception:
+            pass
+
+    return ""
+
+
 def extract_source_url(filepath):
     """Read an existing export file and extract the source URL."""
     path = Path(filepath)

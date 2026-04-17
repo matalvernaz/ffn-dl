@@ -15,7 +15,7 @@ from .scraper import (
     RateLimitError,
     StoryNotFoundError,
 )
-from .updater import count_chapters, extract_source_url
+from .updater import count_chapters, extract_source_url, extract_status
 
 
 def _detect_site(url):
@@ -285,43 +285,66 @@ def _handle_update_all(args):
         sys.exit(1)
 
     exts = (".epub", ".html", ".txt")
+    iterator = folder.rglob("*") if args.recursive else folder.iterdir()
     files = sorted(
-        p for p in folder.iterdir()
+        p for p in iterator
         if p.is_file() and p.suffix.lower() in exts
     )
     if not files:
-        print(f"No .epub, .html, or .txt files in {folder}.")
+        where = "recursively in" if args.recursive else "in"
+        print(f"No .epub, .html, or .txt files {where} {folder}.")
         sys.exit(0)
 
-    print(f"Scanning {len(files)} files in {folder}...\n")
+    mode_bits = []
+    if args.recursive:
+        mode_bits.append("recursive")
+    if args.dry_run:
+        mode_bits.append("dry-run")
+    if args.skip_complete:
+        mode_bits.append("skipping completed")
+    mode = f" ({', '.join(mode_bits)})" if mode_bits else ""
+    print(f"Scanning {len(files)} files in {folder}{mode}...\n")
+
     updated = []
     up_to_date = []
     failed = []
     skipped = []
+    would_update = []
 
     fmt_map = {".epub": "epub", ".html": "html", ".txt": "txt"}
 
     for i, path in enumerate(files, 1):
-        print(f"[{i}/{len(files)}] {path.name}")
+        rel = path.relative_to(folder) if args.recursive else path.name
+        print(f"[{i}/{len(files)}] {rel}")
 
         try:
             url = extract_source_url(path)
         except (ValueError, FileNotFoundError) as exc:
             print(f"  Skipping (no source URL): {exc}")
-            skipped.append(path.name)
+            skipped.append(str(rel))
             continue
 
         try:
             local = count_chapters(path)
         except Exception as exc:
             print(f"  Skipping (couldn't read): {exc}")
-            skipped.append(path.name)
+            skipped.append(str(rel))
             continue
 
         if local == 0:
             print("  Skipping (local chapter count is 0, probably not an ffn-dl export).")
-            skipped.append(path.name)
+            skipped.append(str(rel))
             continue
+
+        if args.skip_complete:
+            try:
+                status = extract_status(path)
+            except Exception:
+                status = ""
+            if status.lower() == "complete":
+                print(f"  Skipping (marked Complete in file, {local} chapters).")
+                skipped.append(str(rel))
+                continue
 
         scraper = _build_scraper(url, args)
         try:
@@ -329,22 +352,26 @@ def _handle_update_all(args):
         except (RateLimitError, CloudflareBlockError, StoryNotFoundError,
                 AO3LockedError, ValueError) as exc:
             print(f"  Could not check remote count: {exc}")
-            failed.append(path.name)
+            failed.append(str(rel))
             continue
         except Exception as exc:
             print(f"  Error checking remote: {exc}")
-            failed.append(path.name)
+            failed.append(str(rel))
             continue
 
         if remote <= local:
             label = "up to date" if remote == local else f"remote has fewer chapters ({remote} < {local}) — leaving alone"
             print(f"  {local} local / {remote} remote — {label}")
-            up_to_date.append(path.name)
+            up_to_date.append(str(rel))
             continue
 
-        print(f"  {local} local / {remote} remote — downloading {remote - local} new chapter(s)")
+        new_count = remote - local
+        print(f"  {local} local / {remote} remote — {new_count} new chapter(s)")
 
-        # Per-file format + output override so each file re-exports in its own format
+        if args.dry_run:
+            would_update.append((str(rel), local, remote))
+            continue
+
         args.format = fmt_map.get(path.suffix.lower(), "epub")
         args.output = str(path.parent)
         output_dir = Path(args.output)
@@ -357,16 +384,27 @@ def _handle_update_all(args):
             print("\nCancelled.")
             break
         if ok:
-            updated.append(path.name)
+            updated.append(str(rel))
         else:
-            failed.append(path.name)
+            failed.append(str(rel))
 
     print(f"\n{'='*60}")
-    print(
-        f"Update-all complete — {len(updated)} updated, "
-        f"{len(up_to_date)} up to date, {len(failed)} failed, "
-        f"{len(skipped)} skipped."
-    )
+    if args.dry_run:
+        print(
+            f"Dry run — would update {len(would_update)}, "
+            f"{len(up_to_date)} up to date, {len(failed)} failed, "
+            f"{len(skipped)} skipped."
+        )
+        if would_update:
+            print("Would update:")
+            for name, local, remote in would_update:
+                print(f"  {name}  ({local} -> {remote})")
+    else:
+        print(
+            f"Update-all complete — {len(updated)} updated, "
+            f"{len(up_to_date)} up to date, {len(failed)} failed, "
+            f"{len(skipped)} skipped."
+        )
     if failed:
         print("Failed:")
         for name in failed:
@@ -490,6 +528,28 @@ def main(argv=None):
         help=(
             "Update every .epub/.html/.txt in DIR. Uses a cheap chapter-count "
             "probe per story so unchanged fics cost one HTTP request."
+        ),
+    )
+    parser.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="With --update-all: descend into subdirectories",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "With --update-all: report what would be updated, skipped, or "
+            "is up to date, without downloading any new chapters"
+        ),
+    )
+    parser.add_argument(
+        "--skip-complete",
+        action="store_true",
+        help=(
+            "With --update-all: skip stories whose local file is already "
+            "marked Complete (saves the remote probe)"
         ),
     )
     parser.add_argument(
