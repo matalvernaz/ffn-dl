@@ -44,7 +44,7 @@ _SEARCH_COLUMNS = [
 def _ffn_search_spec():
     from .search import (
         FFN_CROSSOVER, FFN_GENRE, FFN_LANGUAGE, FFN_MATCH,
-        FFN_RATING, FFN_STATUS, FFN_WORDS, search_ffn,
+        FFN_RATING, FFN_SORT, FFN_STATUS, FFN_WORDS, search_ffn,
     )
     return {
         "label": "Search FFN",
@@ -57,6 +57,7 @@ def _ffn_search_spec():
             ("&Words:", "min_words", list(FFN_WORDS)),
             ("&Crossover:", "crossover", list(FFN_CROSSOVER)),
             ("&Match in:", "match", list(FFN_MATCH)),
+            ("Sor&t by:", "sort", list(FFN_SORT)),
         ],
     }
 
@@ -270,6 +271,10 @@ class MainFrame(wx.Frame):
             "text_ctrls": {},
             "checkbox_ctrls": {},
             "results": [],
+            "site_key": site_key,
+            "next_page": 1,
+            "last_query": None,
+            "last_filters": {},
         }
 
         # Query row
@@ -356,12 +361,28 @@ class MainFrame(wx.Frame):
         state["summary_ctrl"].SetName(f"{spec['label']} summary")
         sizer.Add(state["summary_ctrl"], 0, wx.EXPAND | wx.ALL, pad)
 
+        dl_row = wx.BoxSizer(wx.HORIZONTAL)
         state["search_dl_btn"] = wx.Button(panel, label="Do&wnload Selected")
         state["search_dl_btn"].Bind(
             wx.EVT_BUTTON, lambda evt, k=site_key: self._on_search_download(k)
         )
         state["search_dl_btn"].Disable()
-        sizer.Add(state["search_dl_btn"], 0, wx.ALL, pad)
+        dl_row.Add(state["search_dl_btn"], 0, wx.RIGHT, 8)
+
+        state["show_parts_btn"] = wx.Button(panel, label="Show &Parts...")
+        state["show_parts_btn"].Bind(
+            wx.EVT_BUTTON, lambda evt, k=site_key: self._on_show_parts(k)
+        )
+        state["show_parts_btn"].Disable()
+        dl_row.Add(state["show_parts_btn"], 0, wx.RIGHT, 8)
+
+        state["load_more_btn"] = wx.Button(panel, label="Load &More")
+        state["load_more_btn"].Bind(
+            wx.EVT_BUTTON, lambda evt, k=site_key: self._on_load_more(k)
+        )
+        state["load_more_btn"].Disable()
+        dl_row.Add(state["load_more_btn"], 0)
+        sizer.Add(dl_row, 0, wx.ALL, pad)
 
         panel.SetSizer(sizer)
         notebook.AddPage(panel, spec["label"])
@@ -398,7 +419,20 @@ class MainFrame(wx.Frame):
             for tab in self._tabs.values():
                 tab["search_btn"].Enable(not busy)
                 has_selection = tab["results_ctrl"].GetFirstSelected() != -1
+                selected_is_series = False
+                if has_selection:
+                    idx = tab["results_ctrl"].GetFirstSelected()
+                    if 0 <= idx < len(tab["results"]):
+                        selected_is_series = bool(
+                            tab["results"][idx].get("is_series")
+                        )
                 tab["search_dl_btn"].Enable(not busy and has_selection)
+                tab["show_parts_btn"].Enable(
+                    not busy and has_selection and selected_is_series
+                )
+                tab["load_more_btn"].Enable(
+                    not busy and bool(tab.get("last_query"))
+                )
         wx.CallAfter(_update)
 
     def _on_browse(self, event):
@@ -821,59 +855,145 @@ class MainFrame(wx.Frame):
         tab["results_ctrl"].DeleteAllItems()
         tab["summary_ctrl"].SetValue("")
         tab["results"] = []
+        tab["next_page"] = 1
+        tab["last_query"] = query
+        tab["last_filters"] = filters
         filter_str = (
             " [" + ", ".join(f"{k}={v}" for k, v in filters.items()) + "]"
             if filters else ""
         )
-        site_label = "AO3" if site_key == "ao3" else "FFN"
+        site_label = {
+            "ao3": "AO3", "ffn": "FFN",
+            "royalroad": "Royal Road", "literotica": "Literotica",
+        }.get(site_key, site_key)
         self._log(f"Searching {site_label} for: {query}{filter_str}")
         threading.Thread(
-            target=self._run_search, args=(site_key, query, filters), daemon=True,
+            target=self._run_search,
+            args=(site_key, query, filters, 1, False),
+            daemon=True,
         ).start()
 
-    def _run_search(self, site_key, query, filters):
+    def _on_load_more(self, site_key):
+        tab = self._tabs[site_key]
+        if self._downloading or not tab.get("last_query"):
+            return
+        self._set_busy(True)
+        next_page = tab.get("next_page", 2)
+        self._log(f"Loading page {next_page}...")
+        threading.Thread(
+            target=self._run_search,
+            args=(site_key, tab["last_query"], tab["last_filters"], next_page, True),
+            daemon=True,
+        ).start()
+
+    def _run_search(self, site_key, query, filters, page, append):
+        from .search import fetch_until_limit
         tab = self._tabs[site_key]
         try:
-            results = tab["search_fn"](query, **filters)
+            page_results, next_page = fetch_until_limit(
+                tab["search_fn"], query,
+                limit=25, start_page=page, **filters,
+            )
         except Exception as e:
             self._log(f"Search error: {e}")
             self._set_busy(False)
             return
-        wx.CallAfter(self._populate_results, site_key, results)
+        wx.CallAfter(
+            self._populate_results, site_key, page_results, next_page, append,
+        )
         self._set_busy(False)
 
-    def _populate_results(self, site_key, results):
+    def _populate_results(self, site_key, new_results, next_page, append):
+        from .search import collapse_ao3_series
         tab = self._tabs[site_key]
-        tab["results"] = results
+        if site_key == "ao3":
+            new_results = collapse_ao3_series(new_results)
+
+        if append:
+            # Merge incoming series rows into existing ones when possible
+            existing_series = {
+                r.get("series_id"): r
+                for r in tab["results"]
+                if r.get("is_series") and r.get("series_id")
+            }
+            merged_additions = []
+            for r in new_results:
+                sid = r.get("series_id") if r.get("is_series") else None
+                if sid and sid in existing_series:
+                    existing_series[sid]["series_parts"].extend(
+                        r.get("series_parts", [])
+                    )
+                    continue
+                merged_additions.append(r)
+        else:
+            merged_additions = new_results
+            tab["results"] = []
+
+        tab["results"].extend(merged_additions)
+        tab["next_page"] = next_page
+
         ctrl = tab["results_ctrl"]
         ctrl.Freeze()
         try:
-            ctrl.DeleteAllItems()
-            if not results:
+            if not append:
+                ctrl.DeleteAllItems()
+            if not tab["results"] and not append:
                 self._log("No results found.")
                 return
-            for r in results:
-                row = ctrl.InsertItem(ctrl.GetItemCount(), r["title"])
-                ctrl.SetItem(row, 1, r["author"])
-                ctrl.SetItem(row, 2, r["fandom"])
-                ctrl.SetItem(row, 3, str(r["words"]))
-                ctrl.SetItem(row, 4, str(r["chapters"]))
-                ctrl.SetItem(row, 5, r["rating"])
-                ctrl.SetItem(row, 6, r["status"])
+            start_row = ctrl.GetItemCount() if append else 0
+            for r in merged_additions:
+                row = ctrl.InsertItem(ctrl.GetItemCount(), self._result_title(r))
+                ctrl.SetItem(row, 1, r.get("author", "") or "")
+                ctrl.SetItem(row, 2, r.get("fandom", "") or "")
+                ctrl.SetItem(row, 3, str(r.get("words", "")))
+                ctrl.SetItem(row, 4, str(r.get("chapters", "")))
+                ctrl.SetItem(row, 5, r.get("rating", "") or "")
+                ctrl.SetItem(row, 6, r.get("status", "") or "")
         finally:
             ctrl.Thaw()
 
-        self._log(f"Found {len(results)} results.")
-        ctrl.SetFocus()
-        ctrl.Focus(0)
-        ctrl.Select(0)
+        tab["load_more_btn"].Enable(bool(merged_additions) and not self._downloading)
+        if append and merged_additions:
+            self._log(f"Loaded {len(merged_additions)} more (total {len(tab['results'])}).")
+            ctrl.SetFocus()
+            ctrl.Focus(start_row)
+            ctrl.Select(start_row)
+        elif append and not merged_additions:
+            self._log("No more results.")
+        else:
+            self._log(f"Found {len(tab['results'])} results.")
+            ctrl.SetFocus()
+            ctrl.Focus(0)
+            ctrl.Select(0)
+
+    @staticmethod
+    def _result_title(r):
+        if r.get("is_series"):
+            parts = len(r.get("series_parts") or [])
+            return f"[Series · {parts} part(s)] {r['title']}"
+        return r.get("title", "")
 
     def _on_result_select(self, event, site_key):
         tab = self._tabs[site_key]
         idx = event.GetIndex()
         if 0 <= idx < len(tab["results"]):
             r = tab["results"][idx]
-            tab["summary_ctrl"].SetValue(r.get("summary", "") or "(no summary)")
+            summary = r.get("summary", "") or ""
+            if r.get("is_series"):
+                parts = r.get("series_parts") or []
+                part_lines = "\n".join(
+                    f"  - {p.get('title', '(untitled)')}" for p in parts
+                )
+                preview = (
+                    f"[Series of {len(parts)} part(s) from search results]\n"
+                    f"{summary}\n\n{part_lines}"
+                    if part_lines else f"[Series]\n{summary}"
+                )
+                tab["summary_ctrl"].SetValue(preview.strip())
+                tab["show_parts_btn"].Enable(bool(parts))
+            else:
+                tab["summary_ctrl"].SetValue(summary or "(no summary)")
+                tab["show_parts_btn"].Disable()
             tab["search_dl_btn"].Enable(not self._downloading)
         event.Skip()
 
@@ -882,17 +1002,104 @@ class MainFrame(wx.Frame):
         idx = tab["results_ctrl"].GetFirstSelected()
         if idx < 0 or idx >= len(tab["results"]):
             return
-        url = tab["results"][idx]["url"]
+        picked = tab["results"][idx]
+        url = picked.get("url")
         if not url:
             self._log("Error: selected result has no URL.")
             return
         if self._downloading:
             return
         self._set_busy(True)
-        self._log(f"Starting download: {url}")
-        threading.Thread(
-            target=self._run_download, args=(url,), daemon=True
-        ).start()
+        if picked.get("is_series"):
+            self._log(f"Starting series download: {url}")
+            threading.Thread(
+                target=self._run_series_merge_download,
+                args=(url,), daemon=True,
+            ).start()
+        else:
+            self._log(f"Starting download: {url}")
+            threading.Thread(
+                target=self._run_download, args=(url,), daemon=True
+            ).start()
+
+    def _on_show_parts(self, site_key):
+        tab = self._tabs[site_key]
+        idx = tab["results_ctrl"].GetFirstSelected()
+        if idx < 0 or idx >= len(tab["results"]):
+            return
+        row = tab["results"][idx]
+        if not row.get("is_series"):
+            return
+        parts = row.get("series_parts") or []
+        if not parts:
+            wx.MessageBox(
+                "No parts have been loaded for this series yet.",
+                "Series parts",
+                wx.OK | wx.ICON_INFORMATION, self,
+            )
+            return
+        dlg = SeriesPartsDialog(self, row["title"], parts)
+        if dlg.ShowModal() == wx.ID_OK:
+            picked = dlg.picked_url()
+            if picked and not self._downloading:
+                self._set_busy(True)
+                self._log(f"Starting part download: {picked}")
+                threading.Thread(
+                    target=self._run_download, args=(picked,), daemon=True
+                ).start()
+        dlg.Destroy()
+
+    def _run_series_merge_download(self, series_url):
+        try:
+            from .ao3 import AO3Scraper
+            from .cli import _merge_stories
+            from .literotica import LiteroticaScraper
+
+            if AO3Scraper.is_series_url(series_url):
+                scraper = AO3Scraper()
+            elif LiteroticaScraper.is_series_url(series_url):
+                scraper = LiteroticaScraper()
+            else:
+                scraper = self._scraper_for(series_url)
+
+            self._log(f"Fetching series: {series_url}")
+            series_name, work_urls = scraper.scrape_series_works(series_url)
+            if not work_urls:
+                self._log("No works found in this series.")
+                return
+
+            self._log(f"Series: {series_name}")
+            self._log(f"Downloading and merging {len(work_urls)} works...")
+
+            def progress(current, total, title, cached):
+                tag = " (cached)" if cached else ""
+                self._log(f"    [{current}/{total}] {title}{tag}")
+
+            stories = []
+            for i, work_url in enumerate(work_urls, 1):
+                self._log(f"\n[{i}/{len(work_urls)}] {work_url}")
+                try:
+                    work_scraper = self._scraper_for(work_url)
+                    stories.append(
+                        work_scraper.download(work_url, progress_callback=progress)
+                    )
+                except Exception as exc:
+                    self._log(f"  Error: {exc}")
+
+            if not stories:
+                self._log("Nothing downloaded.")
+                return
+
+            merged = _merge_stories(series_name, series_url, stories)
+            self._log(
+                f"\nMerged {len(stories)} works / {len(merged.chapters)} sections"
+            )
+            path = self._export_story(merged)
+            self._log(f"Saved: {path}")
+        except Exception as exc:
+            self._log(f"Series download failed: {exc}")
+        finally:
+            self._set_busy(False)
 
     # ── Clipboard watch ──────────────────────────────────────
 
@@ -1276,6 +1483,84 @@ class VoicePreviewDialog(wx.Dialog):
         if self._tmp_dir and self._tmp_dir.exists():
             _shutil.rmtree(self._tmp_dir, ignore_errors=True)
         event.Skip()
+
+
+class SeriesPartsDialog(wx.Dialog):
+    """Show the parts of a series and let the user pick one to download on
+    its own. Returns wx.ID_OK if a part was picked; retrieve it via
+    `picked_url()`.
+    """
+
+    def __init__(self, parent, series_name, parts):
+        super().__init__(
+            parent, title=f"Parts of {series_name}",
+            size=(560, 400),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._parts = parts
+        self._picked = None
+
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        sizer.Add(
+            wx.StaticText(
+                panel,
+                label=(
+                    f"{len(parts)} part(s) of {series_name} loaded from "
+                    "search. Pick one to download on its own, or close "
+                    "this dialog and click Download Selected to merge the "
+                    "full series into a single file."
+                ),
+            ),
+            0, wx.ALL, 8,
+        )
+
+        self.list_ctrl = wx.ListCtrl(
+            panel,
+            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SUNKEN,
+        )
+        self.list_ctrl.SetName("Series parts")
+        for i, (label, width) in enumerate([
+            ("Part", 260), ("Author", 140), ("Words", 80), ("Rating", 80),
+        ]):
+            self.list_ctrl.InsertColumn(i, label, width=width)
+        for p in parts:
+            row = self.list_ctrl.InsertItem(
+                self.list_ctrl.GetItemCount(), p.get("title", "") or "",
+            )
+            self.list_ctrl.SetItem(row, 1, p.get("author", "") or "")
+            self.list_ctrl.SetItem(row, 2, str(p.get("words", "") or ""))
+            self.list_ctrl.SetItem(row, 3, p.get("rating", "") or "")
+        if parts:
+            self.list_ctrl.Focus(0)
+            self.list_ctrl.Select(0)
+        self.list_ctrl.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_activate)
+        sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        btn_row.AddStretchSpacer(1)
+        dl_btn = wx.Button(panel, id=wx.ID_OK, label="&Download Part")
+        dl_btn.SetDefault()
+        dl_btn.Bind(wx.EVT_BUTTON, self._on_ok)
+        btn_row.Add(dl_btn, 0, wx.RIGHT, 8)
+        cancel_btn = wx.Button(panel, id=wx.ID_CANCEL, label="&Close")
+        btn_row.Add(cancel_btn, 0)
+        sizer.Add(btn_row, 0, wx.EXPAND | wx.ALL, 8)
+
+        panel.SetSizer(sizer)
+
+    def _on_activate(self, event):
+        self._on_ok(event)
+
+    def _on_ok(self, event):
+        idx = self.list_ctrl.GetFirstSelected()
+        if 0 <= idx < len(self._parts):
+            self._picked = self._parts[idx].get("url")
+        self.EndModal(wx.ID_OK)
+
+    def picked_url(self):
+        return self._picked
 
 
 def main():

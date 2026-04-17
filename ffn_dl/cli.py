@@ -356,7 +356,10 @@ _LIT_URL_RE = re.compile(
 
 def _handle_search(args):
     """Interactive search mode: search the chosen site, display results, download on pick."""
-    from .search import search_ao3, search_ffn, search_literotica, search_royalroad
+    from .search import (
+        collapse_ao3_series, fetch_until_limit,
+        search_ao3, search_ffn, search_literotica, search_royalroad,
+    )
 
     if args.site == "ao3":
         site_label = "archiveofourown.org"
@@ -384,8 +387,10 @@ def _handle_search(args):
         search_fn = search_royalroad
     elif args.site == "literotica":
         site_label = "literotica.com (tag browse)"
-        filters = {"page": getattr(args, "lit_page", None)}
+        filters = {}
         search_fn = search_literotica
+        if getattr(args, "lit_page", None):
+            args.start_page = max(args.start_page, int(args.lit_page))
     else:
         site_label = "fanfiction.net"
         filters = {
@@ -396,6 +401,7 @@ def _handle_search(args):
             "min_words": args.min_words,
             "crossover": args.crossover,
             "match": args.match,
+            "sort": args.sort,
         }
         search_fn = search_ffn
     filters = {k: v for k, v in filters.items() if v}
@@ -404,8 +410,13 @@ def _handle_search(args):
     if filters:
         print("Filters: " + ", ".join(f"{k}={v}" for k, v in filters.items()))
     print()
+
+    limit = max(1, int(args.limit))
     try:
-        results = search_fn(args.search, **filters)
+        results, next_page = fetch_until_limit(
+            search_fn, args.search,
+            limit=limit, start_page=args.start_page, **filters,
+        )
     except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -414,42 +425,79 @@ def _handle_search(args):
         print("No results found.")
         sys.exit(0)
 
-    for i, r in enumerate(results, 1):
-        status_tag = " [Complete]" if r["status"] == "Complete" else ""
-        print(f"  {i:>2}. {r['title']}")
-        print(f"      by {r['author']} | {r['fandom']} | "
-              f"{r['words']} words | {r['chapters']} ch | "
-              f"Rated {r['rating']}{status_tag}")
-        if r["summary"]:
-            # Truncate long summaries
-            s = r["summary"]
-            if len(s) > 120:
-                s = s[:117] + "..."
-            print(f"      {s}")
-        print()
+    if args.site == "ao3":
+        results = collapse_ao3_series(results)
+
+    def _print_results(rs, start_idx=1):
+        for i, r in enumerate(rs, start=start_idx):
+            if r.get("is_series"):
+                parts = len(r.get("series_parts") or [])
+                print(f"  {i:>2}. {r['title']}  [Series · {parts} part(s) seen]")
+                print(f"      by {r.get('author', '')} | {r.get('fandom', '')}")
+            else:
+                status_tag = " [Complete]" if r.get("status") == "Complete" else ""
+                print(f"  {i:>2}. {r['title']}")
+                print(
+                    f"      by {r['author']} | {r['fandom']} | "
+                    f"{r['words']} words | {r['chapters']} ch | "
+                    f"Rated {r['rating']}{status_tag}"
+                )
+            summary = r.get("summary") or ""
+            if summary:
+                s = summary if len(summary) <= 120 else summary[:117] + "..."
+                print(f"      {s}")
+            print()
+
+    _print_results(results)
+
+    def _pick(rs):
+        prompt = (
+            f"Enter a number (1-{len(rs)}) to download, 'm' to load more, "
+            f"or 'q' to quit: "
+        )
+        while True:
+            try:
+                choice = input(prompt)
+            except (EOFError, KeyboardInterrupt):
+                print()
+                sys.exit(0)
+            choice = choice.strip().lower()
+            if choice == "q":
+                sys.exit(0)
+            if choice in ("m", "more"):
+                return "more"
+            try:
+                idx = int(choice)
+            except ValueError:
+                print("Invalid input. Enter a number, 'm', or 'q'.")
+                continue
+            if not 1 <= idx <= len(rs):
+                print(f"Pick a number between 1 and {len(rs)}.")
+                continue
+            return idx
 
     while True:
-        try:
-            choice = input(f"Enter a number (1-{len(results)}) to download, or 'q' to quit: ")
-        except (EOFError, KeyboardInterrupt):
-            print()
-            sys.exit(0)
-
-        choice = choice.strip().lower()
-        if choice == "q":
-            sys.exit(0)
-
-        try:
-            idx = int(choice)
-        except ValueError:
-            print("Invalid input. Enter a number or 'q'.")
+        picked_n = _pick(results)
+        if picked_n == "more":
+            try:
+                more_raw, next_page = fetch_until_limit(
+                    search_fn, args.search,
+                    limit=limit, start_page=next_page, **filters,
+                )
+            except (RuntimeError, ValueError) as exc:
+                print(f"Error loading more: {exc}", file=sys.stderr)
+                continue
+            if not more_raw:
+                print("(No more results.)")
+                continue
+            if args.site == "ao3":
+                more_raw = collapse_ao3_series(more_raw)
+            start_at = len(results) + 1
+            results.extend(more_raw)
+            _print_results(more_raw, start_idx=start_at)
             continue
 
-        if not 1 <= idx <= len(results):
-            print(f"Pick a number between 1 and {len(results)}.")
-            continue
-
-        picked = results[idx - 1]
+        picked = results[picked_n - 1]
         print(f"\nDownloading: {picked['title']}")
         print(f"  {picked['url']}\n")
 
@@ -460,7 +508,12 @@ def _handle_search(args):
 
         output_dir = Path(args.output)
         output_dir.mkdir(parents=True, exist_ok=True)
-        ok = _download_one(picked["url"], args, output_dir)
+
+        if picked.get("is_series"):
+            args.merge_series = True
+            ok = _handle_merge_series([picked["url"]], args, output_dir)
+        else:
+            ok = _download_one(picked["url"], args, output_dir)
         sys.exit(0 if ok else 1)
 
 
@@ -989,7 +1042,10 @@ def main(argv=None):
     parser.add_argument(
         "--sort",
         metavar="S",
-        help=f"AO3-only sort: {', '.join(list(AO3_SORT)[:4])}, ...",
+        help=(
+            f"Sort order. FFN: updated, published, reviews, favorites, "
+            f"follows. AO3: {', '.join(list(AO3_SORT)[:4])}, ..."
+        ),
     )
     parser.add_argument(
         "--fandom",
@@ -1036,6 +1092,23 @@ def main(argv=None):
         type=int,
         metavar="N",
         help="Literotica-only: which page of tag results to fetch (default 1)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        metavar="N",
+        help="Minimum search results to fetch (default 25). Pages keep "
+             "loading until N is reached or the site runs out.",
+    )
+    parser.add_argument(
+        "--start-page",
+        type=int,
+        default=1,
+        metavar="P",
+        help="Results page to start from (default 1). Useful for scripted "
+             "'load more' workflows that want to pick up where a previous "
+             "run left off.",
     )
     parser.add_argument(
         "-w",

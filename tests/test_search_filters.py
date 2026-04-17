@@ -4,12 +4,16 @@ import pytest
 
 from ffn_dl.search import (
     _build_ao3_search_url,
+    _build_rr_search_url,
     _build_search_url,
+    _parse_ao3_results,
+    _parse_results,
     _resolve_filter,
     AO3_RATING,
     FFN_GENRE,
     FFN_RATING,
     FFN_STATUS,
+    collapse_ao3_series,
 )
 
 
@@ -67,3 +71,91 @@ class TestAO3SearchURL:
         assert "word_count" in url
         # Spaces are encoded, + or %20 both valid
         assert "Harry" in url and "Potter" in url
+
+
+class TestPagination:
+    def test_ffn_page_one_has_no_ppage(self):
+        url = _build_search_url("harry", {})
+        assert "ppage=" not in url
+
+    def test_ffn_higher_page_adds_ppage(self):
+        url = _build_search_url("harry", {}, page=3)
+        assert "ppage=3" in url
+
+    def test_ffn_sort_translates(self):
+        url = _build_search_url("harry", {"sort": "favorites"})
+        assert "sortid=4" in url
+
+    def test_ao3_page_one_has_no_page(self):
+        url = _build_ao3_search_url("harry", {})
+        assert "page=" not in url
+
+    def test_ao3_higher_page_adds_page(self):
+        url = _build_ao3_search_url("harry", {}, page=2)
+        assert "page=2" in url
+
+    def test_rr_higher_page_adds_page(self):
+        url = _build_rr_search_url("magic", {}, page=4)
+        assert "page=4" in url
+
+
+class TestAO3ResultParsing:
+    def test_series_membership_appears_in_results(self, ao3_search_html):
+        results = _parse_ao3_results(ao3_search_html)
+        with_series = [r for r in results if r.get("series")]
+        assert with_series, "expected at least one result with series info"
+        first = with_series[0]["series"][0]
+        assert first["id"].isdigit()
+        assert first["url"].startswith("https://archiveofourown.org/series/")
+        assert first["name"]
+
+
+class TestCollapseSeries:
+    def test_single_series_work_collapses_to_series_row(self):
+        results = [
+            {
+                "title": "Part One",
+                "author": "A",
+                "url": "u1",
+                "summary": "",
+                "words": "1000",
+                "chapters": "1",
+                "rating": "T",
+                "fandom": "",
+                "status": "Complete",
+                "series": [
+                    {"id": "99", "name": "Saga", "url": "s/99", "part": 1},
+                ],
+            },
+        ]
+        collapsed = collapse_ao3_series(results)
+        assert len(collapsed) == 1
+        row = collapsed[0]
+        assert row["is_series"] is True
+        assert row["title"] == "Saga"
+        assert row["url"] == "s/99"
+        assert row["series_parts"] == [results[0]]
+
+    def test_multi_membership_work_stays_as_work(self):
+        results = [
+            {
+                "title": "Part",
+                "series": [
+                    {"id": "1", "name": "A", "url": "s/1", "part": 1},
+                    {"id": "2", "name": "B", "url": "s/2", "part": 3},
+                ],
+            },
+        ]
+        collapsed = collapse_ao3_series(results)
+        assert collapsed == results
+
+    def test_parts_of_same_series_merge_into_one_row(self):
+        results = [
+            {"title": "P1", "series": [{"id": "7", "name": "S", "url": "s/7"}]},
+            {"title": "P2", "series": [{"id": "7", "name": "S", "url": "s/7"}]},
+            {"title": "Standalone", "series": []},
+        ]
+        collapsed = collapse_ao3_series(results)
+        assert len(collapsed) == 2
+        series_row = next(r for r in collapsed if r.get("is_series"))
+        assert len(series_row["series_parts"]) == 2

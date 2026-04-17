@@ -15,7 +15,7 @@ RR_BASE = "https://www.royalroad.com"
 LIT_BASE = "https://www.literotica.com"
 LIT_TAGS_BASE = "https://tags.literotica.com"
 SEARCH_PATH = "/search/"
-MAX_RESULTS = 25
+DEFAULT_LIMIT = 25
 
 
 # ── Filter option tables ──────────────────────────────────────────
@@ -108,6 +108,15 @@ FFN_MATCH = {
     "summary": "summary",
 }
 
+FFN_SORT = {
+    "best match": None,
+    "updated": 1,
+    "published": 2,
+    "reviews": 3,
+    "favorites": 4,
+    "follows": 5,
+}
+
 
 def _resolve_filter(value, choices, name):
     """Map a user value (label or raw ID) to a FFN param value.
@@ -129,7 +138,7 @@ def _resolve_filter(value, choices, name):
     raise ValueError(f"Unknown {name}: {value!r}. Valid: {valid}")
 
 
-def _build_search_url(query, filters):
+def _build_search_url(query, filters, page=1):
     params = {"keywords": query, "ready": 1, "type": "story"}
 
     mapping = [
@@ -140,12 +149,16 @@ def _build_search_url(query, filters):
         ("words", "min_words", FFN_WORDS),
         ("formatid", "crossover", FFN_CROSSOVER),
         ("match", "match", FFN_MATCH),
+        ("sortid", "sort", FFN_SORT),
     ]
     for param, key, table in mapping:
         value = filters.get(key)
         resolved = _resolve_filter(value, table, key)
         if resolved is not None:
             params[param] = resolved
+
+    if page and page > 1:
+        params["ppage"] = int(page)
 
     return FFN_BASE + SEARCH_PATH + "?" + urlencode(params)
 
@@ -187,7 +200,7 @@ def _parse_results(html):
     result_divs = soup.find_all("div", class_="z-list")
     results = []
 
-    for div in result_divs[:MAX_RESULTS]:
+    for div in result_divs:
         stitle = div.find("a", class_="stitle")
         if not stitle:
             continue
@@ -250,7 +263,7 @@ def _parse_results(html):
     return results
 
 
-def search_ffn(query, **filters):
+def search_ffn(query, *, page=1, **filters):
     """Search fanfiction.net and return a list of result dicts.
 
     Keyword filters (all optional — pass a label from the corresponding
@@ -265,8 +278,11 @@ def search_ffn(query, **filters):
 
     Each result dict has keys: title, author, url, summary, words,
     chapters, rating, fandom, status.
+
+    `page` (keyword-only) selects a specific results page for "load more"
+    workflows — defaults to 1.
     """
-    url = _build_search_url(query, filters)
+    url = _build_search_url(query, filters, page=page)
     html = _fetch_search_page(url)
     return _parse_results(html)
 
@@ -308,10 +324,12 @@ AO3_SORT = {
 }
 
 
-def _build_ao3_search_url(query, filters):
+def _build_ao3_search_url(query, filters, page=1):
     params = {}
     if query:
         params["work_search[query]"] = query
+    if page and page > 1:
+        params["page"] = int(page)
 
     def resolve(value, choices, name):
         if value is None or value == "":
@@ -370,7 +388,7 @@ def _parse_ao3_results(html):
     if not works_ol:
         return results
 
-    for li in works_ol.find_all("li", recursive=False)[:MAX_RESULTS]:
+    for li in works_ol.find_all("li", recursive=False):
         heading = li.find("h4", class_="heading")
         if not heading:
             continue
@@ -423,6 +441,25 @@ def _parse_ao3_results(html):
         if rating_li:
             rating = rating_li.get("title") or rating_li.get_text(strip=True)
 
+        # Series membership — AO3 blurbs show "Part N of <a>Series</a>"
+        series_entries = []
+        for s_li in li.select("ul.series li"):
+            s_link = s_li.find("a", href=re.compile(r"^/series/\d+"))
+            if not s_link:
+                continue
+            s_id_m = re.search(r"/series/(\d+)", s_link["href"])
+            if not s_id_m:
+                continue
+            part_m = re.match(
+                r"Part\s+(\d+)\s+of", s_li.get_text(" ", strip=True), re.I,
+            )
+            series_entries.append({
+                "id": s_id_m.group(1),
+                "name": s_link.get_text(strip=True),
+                "url": f"{AO3_BASE}/series/{s_id_m.group(1)}",
+                "part": int(part_m.group(1)) if part_m else None,
+            })
+
         results.append(
             {
                 "title": title,
@@ -434,13 +471,14 @@ def _parse_ao3_results(html):
                 "rating": rating,
                 "fandom": fandom,
                 "status": status,
+                "series": series_entries,
             }
         )
 
     return results
 
 
-def search_ao3(query, **filters):
+def search_ao3(query, *, page=1, **filters):
     """Search Archive of Our Own and return a list of result dicts.
 
     Keyword filters (all optional):
@@ -453,8 +491,10 @@ def search_ao3(query, **filters):
         fandom: fandom name(s) (AO3 accepts loose matching)
         word_count: range expression e.g. "<5000", ">10000", "1000-5000"
         character, relationship, freeform, title, creator: AO3 free-text fields
+
+    `page` (keyword-only) selects a specific results page.
     """
-    url = _build_ao3_search_url(query, filters)
+    url = _build_ao3_search_url(query, filters, page=page)
     session = curl_requests.Session(impersonate="chrome")
     resp = session.get(url, timeout=30)
     if resp.status_code != 200:
@@ -493,10 +533,12 @@ RR_ORDER_BY = {
 }
 
 
-def _build_rr_search_url(query, filters):
+def _build_rr_search_url(query, filters, page=1):
     params = {}
     if query:
         params["title"] = query
+    if page and page > 1:
+        params["page"] = int(page)
     status = (filters.get("status") or "").strip().lower()
     if status and status in RR_STATUS and RR_STATUS[status]:
         params["status"] = RR_STATUS[status]
@@ -523,7 +565,7 @@ def _build_rr_search_url(query, filters):
 def _parse_rr_results(html):
     soup = BeautifulSoup(html, "lxml")
     results = []
-    for item in soup.find_all("div", class_="fiction-list-item")[:MAX_RESULTS]:
+    for item in soup.find_all("div", class_="fiction-list-item"):
         title_link = item.find("h2", class_="fiction-title")
         if title_link:
             title_link = title_link.find("a", href=re.compile(r"/fiction/\d+"))
@@ -583,7 +625,7 @@ def _parse_rr_results(html):
     return results
 
 
-def search_royalroad(query, **filters):
+def search_royalroad(query, *, page=1, **filters):
     """Search royalroad.com. Returns result dicts matching search_ffn shape.
 
     Keyword filters:
@@ -591,8 +633,10 @@ def search_royalroad(query, **filters):
         type:     any / original / fanfiction
         order_by: relevance / popularity / last update / pages / rating / title
         tags:     comma-separated tag list (e.g. "progression,magic")
+
+    `page` (keyword-only) selects a specific results page.
     """
-    url = _build_rr_search_url(query, filters)
+    url = _build_rr_search_url(query, filters, page=page)
     session = curl_requests.Session(impersonate="chrome")
     resp = session.get(url, timeout=30)
     if resp.status_code != 200:
@@ -621,7 +665,7 @@ def _parse_literotica_results(html):
     results = []
     for card in soup.find_all(
         "div", attrs={"property": "itemListElement"}
-    )[:MAX_RESULTS]:
+    ):
         url = card.get("resource") or ""
         title = ""
         h_tag = card.find(["h4", "h3"])
@@ -676,7 +720,66 @@ def _parse_literotica_results(html):
     return results
 
 
-def search_literotica(query, **filters):
+def fetch_until_limit(search_fn, query, *, limit, start_page=1, **kwargs):
+    """Call `search_fn` across successive pages until `limit` results are
+    collected or a page comes back empty. Returns (results, next_page).
+
+    `results` is the full list of dicts from all fetched pages (may run a
+    little past `limit` if the last page's natural size overshoots). The
+    caller can trim it further if they want a hard cap. `next_page` is
+    the page number a subsequent "load more" should request.
+    """
+    collected = []
+    page = max(1, int(start_page))
+    while len(collected) < limit:
+        page_results = search_fn(query, page=page, **kwargs)
+        if not page_results:
+            break
+        collected.extend(page_results)
+        page += 1
+    return collected, page
+
+
+def collapse_ao3_series(results):
+    """Replace AO3 work results that belong to a series with a single
+    series row, preserving non-series works in place. The series row
+    carries the list of known parts under the "series_parts" key so
+    callers can expand it back out if the user wants to see the pieces.
+
+    Works that belong to more than one series still appear as a work
+    row — collapsing them would hide the multi-membership.
+    """
+    collapsed = []
+    seen_series = {}
+    for r in results:
+        series = r.get("series") or []
+        if len(series) != 1:
+            collapsed.append(r)
+            continue
+        s = series[0]
+        if s["id"] in seen_series:
+            seen_series[s["id"]]["series_parts"].append(r)
+            continue
+        row = {
+            "title": s["name"],
+            "author": r.get("author", ""),
+            "url": s["url"],
+            "summary": r.get("summary", ""),
+            "words": "?",
+            "chapters": "?",
+            "rating": r.get("rating", "?"),
+            "fandom": r.get("fandom", ""),
+            "status": "Series",
+            "is_series": True,
+            "series_id": s["id"],
+            "series_parts": [r],
+        }
+        seen_series[s["id"]] = row
+        collapsed.append(row)
+    return collapsed
+
+
+def search_literotica(query, *, page=1, **filters):
     """Search Literotica by tag. `query` is converted to a tag slug
     (lowercased, whitespace → hyphens) and looked up on
     tags.literotica.com — the server-rendered alternative to
@@ -685,21 +788,18 @@ def search_literotica(query, **filters):
     Unknown tags return no results; the response is still a 200 page,
     just without story cards.
 
-    Supported filter: `page` (integer, default 1).
+    `page` (keyword-only) selects a specific results page.
     """
     slug = _literotica_tag_slug(query)
     if not slug:
         return []
     url = f"{LIT_TAGS_BASE}/{slug}"
-    page = filters.get("page")
-    if page:
-        try:
-            page_n = int(str(page).strip())
-            if page_n > 1:
-                url += f"?page={page_n}"
-        except ValueError:
-            # Silently ignore a non-numeric page value rather than crash
-            pass
+    try:
+        page_n = int(str(page).strip()) if page else 1
+    except (TypeError, ValueError):
+        page_n = 1
+    if page_n > 1:
+        url += f"?page={page_n}"
     session = curl_requests.Session(impersonate="chrome")
     resp = session.get(url, timeout=30, allow_redirects=True)
     if resp.status_code != 200:
