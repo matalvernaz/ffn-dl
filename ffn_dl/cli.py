@@ -272,6 +272,104 @@ def _handle_search(args):
         sys.exit(0 if ok else 1)
 
 
+def _handle_update_all(args):
+    """Scan a folder for previously-downloaded exports and update each."""
+    folder = Path(args.update_all)
+    if not folder.is_dir():
+        print(f"Error: {folder} is not a directory.", file=sys.stderr)
+        sys.exit(1)
+
+    exts = (".epub", ".html", ".txt")
+    files = sorted(
+        p for p in folder.iterdir()
+        if p.is_file() and p.suffix.lower() in exts
+    )
+    if not files:
+        print(f"No .epub, .html, or .txt files in {folder}.")
+        sys.exit(0)
+
+    print(f"Scanning {len(files)} files in {folder}...\n")
+    updated = []
+    up_to_date = []
+    failed = []
+    skipped = []
+
+    fmt_map = {".epub": "epub", ".html": "html", ".txt": "txt"}
+
+    for i, path in enumerate(files, 1):
+        print(f"[{i}/{len(files)}] {path.name}")
+
+        try:
+            url = extract_source_url(path)
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"  Skipping (no source URL): {exc}")
+            skipped.append(path.name)
+            continue
+
+        try:
+            local = count_chapters(path)
+        except Exception as exc:
+            print(f"  Skipping (couldn't read): {exc}")
+            skipped.append(path.name)
+            continue
+
+        if local == 0:
+            print("  Skipping (local chapter count is 0, probably not an ffn-dl export).")
+            skipped.append(path.name)
+            continue
+
+        scraper = _build_scraper(url, args)
+        try:
+            remote = scraper.get_chapter_count(url)
+        except (RateLimitError, CloudflareBlockError, StoryNotFoundError,
+                AO3LockedError, ValueError) as exc:
+            print(f"  Could not check remote count: {exc}")
+            failed.append(path.name)
+            continue
+        except Exception as exc:
+            print(f"  Error checking remote: {exc}")
+            failed.append(path.name)
+            continue
+
+        if remote <= local:
+            label = "up to date" if remote == local else f"remote has fewer chapters ({remote} < {local}) — leaving alone"
+            print(f"  {local} local / {remote} remote — {label}")
+            up_to_date.append(path.name)
+            continue
+
+        print(f"  {local} local / {remote} remote — downloading {remote - local} new chapter(s)")
+
+        # Per-file format + output override so each file re-exports in its own format
+        args.format = fmt_map.get(path.suffix.lower(), "epub")
+        args.output = str(path.parent)
+        output_dir = Path(args.output)
+        try:
+            ok = _download_one(
+                url, args, output_dir,
+                update_path=path, existing_chapters=local,
+            )
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+            break
+        if ok:
+            updated.append(path.name)
+        else:
+            failed.append(path.name)
+
+    print(f"\n{'='*60}")
+    print(
+        f"Update-all complete — {len(updated)} updated, "
+        f"{len(up_to_date)} up to date, {len(failed)} failed, "
+        f"{len(skipped)} skipped."
+    )
+    if failed:
+        print("Failed:")
+        for name in failed:
+            print(f"  {name}")
+    print('='*60)
+    sys.exit(0 if not failed else 1)
+
+
 def _handle_watch(args):
     """Clipboard watch mode: poll clipboard for FFN/FicWad URLs."""
     try:
@@ -379,6 +477,15 @@ def main(argv=None):
         "--update",
         metavar="FILE",
         help="Update an existing file — reads source URL, downloads new chapters",
+    )
+    parser.add_argument(
+        "-U",
+        "--update-all",
+        metavar="DIR",
+        help=(
+            "Update every .epub/.html/.txt in DIR. Uses a cheap chapter-count "
+            "probe per story so unchanged fics cost one HTTP request."
+        ),
     )
     parser.add_argument(
         "-a",
@@ -568,6 +675,11 @@ def main(argv=None):
     # --- Search mode ---
     if args.search:
         _handle_search(args)
+        return
+
+    # --- Update-all folder mode ---
+    if args.update_all:
+        _handle_update_all(args)
         return
 
     # --- Clipboard watch mode ---
