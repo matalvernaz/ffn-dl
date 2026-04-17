@@ -116,13 +116,63 @@ class RoyalRoadScraper(BaseScraper):
             })
         return chapters
 
-    @staticmethod
-    def _parse_chapter_html(soup):
+    # Royal Road injects anti-piracy paragraphs ("if you spot this
+    # narrative on amazon, know that it has been stolen — report the
+    # violation", and rotating variants) into chapter HTML. Each
+    # injected element carries a random class that's hidden via a
+    # display:none rule in the same page's <style> block. Real browsers
+    # never show them; curl_cffi doesn't render CSS, so the text ends up
+    # in the EPUB unless we strip at scrape time. FanFicFare and
+    # Aivean/royalroad-downloader both solve this the same way: collect
+    # the hidden classes from CSS, drop elements that use them. That's
+    # survived ~2 years of RR rotating both class names and phrasing.
+    _HIDDEN_RULE_RE = re.compile(
+        r"\.([A-Za-z0-9_-]+)\s*\{[^}]*"
+        r"(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|"
+        r"font-size\s*:\s*0|speak\s*:\s*never)"
+        r"[^}]*\}",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _hidden_classes(cls, soup) -> set:
+        """Collect CSS class names that any inline <style> block hides.
+
+        Royal Road's anti-piracy injection attaches one of these classes
+        to the paragraph it wants hidden. We only look at <style> tags
+        on the page itself — external stylesheets are normal site CSS
+        unrelated to per-request injection.
+        """
+        classes = set()
+        for style in soup.find_all("style"):
+            css = style.string or style.get_text() or ""
+            if not css:
+                continue
+            for match in cls._HIDDEN_RULE_RE.finditer(css):
+                classes.add(match.group(1))
+        return classes
+
+    @classmethod
+    def _parse_chapter_html(cls, soup):
         content = soup.find("div", class_="chapter-inner")
         if content is None:
             content = soup.find("div", class_="chapter-content")
         if content is None:
             raise ValueError("Could not locate chapter content on Royal Road page.")
+
+        hidden = cls._hidden_classes(soup)
+        if hidden:
+            removed = 0
+            for tag in content.find_all(True):
+                tag_classes = tag.get("class") or []
+                if any(cls_name in hidden for cls_name in tag_classes):
+                    tag.decompose()
+                    removed += 1
+            if removed:
+                logger.debug(
+                    "Stripped %d element(s) hidden by page CSS (likely "
+                    "Royal Road anti-piracy injection)", removed,
+                )
         return content.decode_contents()
 
     def get_chapter_count(self, url_or_id):
