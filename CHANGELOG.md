@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.7.1 — 2026-04-17
+
+### Downloads
+
+- **Parallel chapter fetches on Royal Road, FicWad, and MediaMiner**:
+  these scrapers used to fetch every chapter serially — on a 500-chapter
+  RR epic that meant paying the HTTP round-trip 500 times in sequence.
+  Downloads now run with a small worker pool (default 3) so idle wire
+  time turns into actual throughput. Each worker uses its own session
+  so concurrent libcurl handles don't race.
+- **AIMD on concurrency too**: the same feedback loop that halves the
+  delay on 429/503 now also halves the active concurrency for the next
+  batch, all the way down to sequential if the site keeps pushing
+  back. FFN stays at concurrency=1 — it captcha-bans on bulk fetching
+  regardless of parallelism.
+- **AO3 and Literotica are unchanged**: AO3 grabs the whole work in a
+  single `view_full_work=true` request (no chapter loop to parallelise),
+  and Literotica stories are typically one or two pages where the
+  pooling overhead isn't worth it.
+
 ## 1.7.0 — 2026-04-17
 
 ### Metadata

@@ -53,6 +53,7 @@ class BaseScraper:
         chunk_size=0,
         chunk_delay_range=(60.0, 75.0),
         use_wayback=False,
+        concurrency=1,
     ):
         # Two rate-limit modes:
         #   * delay_range set → static random.uniform(*delay_range) between
@@ -78,6 +79,11 @@ class BaseScraper:
         self.chunk_size = chunk_size
         self.chunk_delay_range = chunk_delay_range
         self.use_wayback = use_wayback
+        # Parallel chapter fetching. AIMD applies here too: we start at the
+        # subclass's configured concurrency and halve it whenever a batch
+        # trips a 429/503 (detected via `_current_delay` bumping up). FFN
+        # stays at 1 — it captcha-bans on bulk, parallel or not.
+        self.concurrency = max(1, int(concurrency))
         self._fetch_count = 0
         self._browser = "chrome"
         self.session = curl_requests.Session(impersonate=self._browser)
@@ -121,12 +127,15 @@ class BaseScraper:
             logger.debug("Wayback fallback failed: %s", exc)
         return None
 
-    def _fetch(self, url):
+    def _fetch(self, url, session=None):
+        # `session` is an optional per-request session object — parallel
+        # workers pass their own so they don't race on the shared one.
+        sess = session if session is not None else self.session
         backoff = 30
         hit_rate_limit = False
         for attempt in range(self.max_retries):
             try:
-                resp = self.session.get(url, timeout=self.timeout)
+                resp = sess.get(url, timeout=self.timeout)
             except curl_requests.errors.ConnectionError as exc:
                 logger.warning(
                     "Connection error (attempt %d/%d): %s",
@@ -227,6 +236,55 @@ class BaseScraper:
                 "Rate-limit recovery: raising per-fetch delay %.1fs → %.1fs",
                 prev, self._current_delay,
             )
+
+    def _fetch_parallel(self, urls):
+        """Fetch a list of URLs, up to `self.concurrency` in flight. Returns
+        the HTML bodies in input order. When a batch trips the rate-limit
+        retry path (detected via `_current_delay` rising), concurrency is
+        halved for subsequent batches — same AIMD shape as the inter-fetch
+        delay. Falls through to plain sequential `_fetch` calls at
+        concurrency 1, so subclasses can call this unconditionally.
+        """
+        if not urls:
+            return []
+        if self.concurrency <= 1 or len(urls) == 1:
+            return [self._fetch(u) for u in urls]
+
+        import concurrent.futures
+
+        results = [None] * len(urls)
+        concurrency = self.concurrency
+        i = 0
+        while i < len(urls):
+            batch = urls[i:i + concurrency]
+            delay_before = self._current_delay
+
+            def fetch_one(url):
+                # Each worker gets its own session so concurrent libcurl
+                # handles don't race on the shared one.
+                session = curl_requests.Session(impersonate=self._browser)
+                return self._fetch(url, session=session)
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(batch),
+            ) as executor:
+                future_to_local = {
+                    executor.submit(fetch_one, u): local_i
+                    for local_i, u in enumerate(batch)
+                }
+                for future in concurrent.futures.as_completed(future_to_local):
+                    local_i = future_to_local[future]
+                    results[i + local_i] = future.result()
+
+            if self._current_delay > delay_before and concurrency > 1:
+                concurrency = max(1, concurrency // 2)
+                logger.info(
+                    "Parallel fetch backing off to concurrency=%d "
+                    "after rate-limit response.", concurrency,
+                )
+            i += len(batch)
+
+        return results
 
     # ── Cache ─────────────────────────────────────────────────────
 

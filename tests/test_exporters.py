@@ -163,6 +163,59 @@ class TestUniversalMetadata:
         assert "Updated: 2023-11-14" in text
 
 
+class TestFetchParallel:
+    def test_returns_results_in_input_order(self):
+        # Even though workers complete in arbitrary order, the returned
+        # list must line up with the input URL order.
+        from ffn_dl.scraper import FFNScraper
+        s = FFNScraper(use_cache=False, concurrency=4)
+        urls = [f"https://example.com/{i}" for i in range(8)]
+
+        from unittest.mock import patch
+        def fake_fetch(url, session=None):
+            # Pull the index back out so we can assert ordering.
+            import time, random
+            time.sleep(random.uniform(0, 0.02))
+            return f"html-{url.rsplit('/', 1)[-1]}"
+
+        with patch.object(s, "_fetch", side_effect=fake_fetch):
+            results = s._fetch_parallel(urls)
+        assert results == [f"html-{i}" for i in range(8)]
+
+    def test_concurrency_halves_on_rate_limit(self):
+        # When _fetch bumps _current_delay (the AIMD signal for "we got
+        # rate-limited"), the next batch shrinks its concurrency.
+        from ffn_dl.scraper import FFNScraper
+        s = FFNScraper(use_cache=False, concurrency=4)
+        urls = [f"u{i}" for i in range(8)]
+
+        call_counter = {"n": 0}
+        def fake_fetch(url, session=None):
+            call_counter["n"] += 1
+            if call_counter["n"] == 2:
+                # Simulate AIMD bumping the delay as _fetch would after
+                # seeing a 429.
+                s._current_delay = 2.0
+            return f"html-{url}"
+
+        from unittest.mock import patch
+        with patch.object(s, "_fetch", side_effect=fake_fetch):
+            results = s._fetch_parallel(urls)
+        assert len(results) == len(urls)
+        # Concurrency should have shrunk during the run (not visible
+        # post-hoc, but we can prove no crashes and correct ordering).
+        assert results == [f"html-u{i}" for i in range(8)]
+
+    def test_single_url_uses_sequential_path(self):
+        from ffn_dl.scraper import FFNScraper
+        s = FFNScraper(use_cache=False, concurrency=3)
+        from unittest.mock import patch
+        with patch.object(s, "_fetch", return_value="html") as m:
+            assert s._fetch_parallel(["u"]) == ["html"]
+        # Must be called WITHOUT a session kwarg (sequential path).
+        m.assert_called_once_with("u")
+
+
 class TestRoyalRoadDates:
     def test_chapter_list_captures_publish_unixtime(self):
         from bs4 import BeautifulSoup

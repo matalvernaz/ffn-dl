@@ -20,7 +20,9 @@ class FicWadScraper(BaseScraper):
 
     def __init__(self, **kwargs):
         # FicWad has no Cloudflare; AIMD starts at 0 and only backs off
-        # if we actually get a 429/503.
+        # if we actually get a 429/503. Fetch chapters in parallel by
+        # default — AIMD halves this on any rate-limit response.
+        kwargs.setdefault("concurrency", 3)
         super().__init__(**kwargs)
 
     @staticmethod
@@ -309,30 +311,34 @@ class FicWadScraper(BaseScraper):
         if skip_chapters >= num_chapters:
             return story  # nothing new
 
+        plan = []
+        fetch_urls = []
         for i, ch_info in enumerate(chapter_list, 1):
             if i <= skip_chapters:
                 continue
             if not chapter_in_spec(i, chapters):
                 continue
-
             ch_id = ch_info["id"]
             ch_title = ch_info["title"]
-
             cached = self._load_chapter_cache(story_id, i)
             if cached is not None:
+                plan.append(("cache", i, ch_title, cached))
+            else:
+                plan.append(("fetch", i, ch_title, None))
+                fetch_urls.append(f"{FICWAD_BASE}/story/{ch_id}")
+
+        fetched_htmls = self._fetch_parallel(fetch_urls) if fetch_urls else []
+        fetch_cursor = 0
+        for kind, i, ch_title, cached in plan:
+            if kind == "cache":
                 story.chapters.append(cached)
                 if progress_callback:
                     progress_callback(i, num_chapters, cached.title, True)
                 continue
-
-            if story.chapters:
-                self._delay()
-            ch_url = f"{FICWAD_BASE}/story/{ch_id}"
-            logger.debug("Fetching chapter %d/%d (id=%d)", i, num_chapters, ch_id)
-            ch_page = self._fetch(ch_url)
+            ch_page = fetched_htmls[fetch_cursor]
+            fetch_cursor += 1
             ch_soup = BeautifulSoup(ch_page, "lxml")
             html = self._parse_chapter_html(ch_soup)
-
             ch = Chapter(number=i, title=ch_title, html=html)
             self._save_chapter_cache(story_id, ch)
             story.chapters.append(ch)

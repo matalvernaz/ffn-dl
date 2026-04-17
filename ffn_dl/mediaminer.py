@@ -30,6 +30,9 @@ class MediaMinerScraper(BaseScraper):
     site_name = "mediaminer"
 
     def __init__(self, **kwargs):
+        # Fetch chapters in parallel by default; AIMD halves this on any
+        # rate-limit response from the server.
+        kwargs.setdefault("concurrency", 3)
         super().__init__(**kwargs)
 
     @staticmethod
@@ -330,31 +333,36 @@ class MediaMinerScraper(BaseScraper):
         )
 
         total = len(chapter_list)
+        plan = []
+        fetch_urls = []
         for i, ch_info in enumerate(chapter_list, 1):
             if i <= skip_chapters:
                 continue
             if not chapter_in_spec(i, chapters):
                 continue
-
             cached = self._load_chapter_cache(story_id, i)
             if cached is not None:
+                plan.append(("cache", i, ch_info["title"], cached))
+            else:
+                plan.append(("fetch", i, ch_info["title"], None))
+                fetch_urls.append(ch_info["url"])
+
+        fetched_htmls = self._fetch_parallel(fetch_urls) if fetch_urls else []
+        fetch_cursor = 0
+        for kind, i, title, cached in plan:
+            if kind == "cache":
                 story.chapters.append(cached)
                 if progress_callback:
                     progress_callback(i, total, cached.title, True)
                 continue
-
-            if story.chapters:
-                self._delay()
-            page = self._fetch(ch_info["url"])
+            page = fetched_htmls[fetch_cursor]
+            fetch_cursor += 1
             ch_soup = BeautifulSoup(page, "lxml")
             html_content = self._parse_chapter_html(ch_soup)
-
-            ch = Chapter(
-                number=i, title=ch_info["title"], html=html_content
-            )
+            ch = Chapter(number=i, title=title, html=html_content)
             self._save_chapter_cache(story_id, ch)
             story.chapters.append(ch)
             if progress_callback:
-                progress_callback(i, total, ch_info["title"], False)
+                progress_callback(i, total, title, False)
 
         return story
