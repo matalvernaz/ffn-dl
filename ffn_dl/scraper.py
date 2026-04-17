@@ -210,6 +210,15 @@ class BaseScraper:
     def download(self, url_or_id, progress_callback=None):
         raise NotImplementedError
 
+    def get_chapter_count(self, url_or_id):
+        """Return the current chapter count on the site in one cheap request.
+
+        Used by update-mode to decide whether to fetch anything else.
+        Subclasses must override with a site-specific implementation that
+        does not pull full chapter bodies.
+        """
+        raise NotImplementedError
+
 
 # ── FFN ───────────────────────────────────────────────────────────
 
@@ -396,6 +405,13 @@ class FFNScraper(BaseScraper):
                     story_urls.append(f"{FFN_BASE}/s/{story_id}")
 
         return author_name, story_urls
+
+    def get_chapter_count(self, url_or_id):
+        story_id = self.parse_story_id(url_or_id)
+        page = self._fetch(f"{FFN_BASE}/s/{story_id}/1")
+        soup = BeautifulSoup(page, "lxml")
+        meta = self._parse_metadata(soup)
+        return meta["num_chapters"]
 
     def download(self, url_or_id, progress_callback=None, skip_chapters=0):
         """Download a story. If skip_chapters > 0, only fetch metadata

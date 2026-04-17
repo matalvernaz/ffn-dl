@@ -191,6 +191,16 @@ class FicWadScraper(BaseScraper):
 
         return author_name, story_urls
 
+    def get_chapter_count(self, url_or_id):
+        story_id = self.parse_story_id(url_or_id)
+        page = self._fetch(f"{FICWAD_BASE}/story/{story_id}/1")
+        soup = BeautifulSoup(page, "lxml")
+        chapter_list = self._discover_chapters_from_dropdown(soup)
+        if chapter_list:
+            return len(chapter_list)
+        # Single-chapter work: fall back to presence of storytext on the page
+        return 1 if soup.find(id="storytext") else 0
+
     def download(self, url_or_id, progress_callback=None, skip_chapters=0):
         story_id = self.parse_story_id(url_or_id)
         story_url = f"{FICWAD_BASE}/story/{story_id}"

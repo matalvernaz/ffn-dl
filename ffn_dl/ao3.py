@@ -229,6 +229,32 @@ class AO3Scraper(BaseScraper):
 
         return chapters
 
+    @staticmethod
+    def _parse_chapter_count_from_stats(soup):
+        """Extract the 'posted/planned' chapter count from dl.stats."""
+        stats = soup.select_one("dl.stats")
+        if not stats:
+            return None
+        chapters_dd = stats.find("dd", class_="chapters")
+        if not chapters_dd:
+            return None
+        ratio = chapters_dd.get_text(strip=True)  # "4/4" or "5/?"
+        match = re.match(r"(\d+)", ratio)
+        return int(match.group(1)) if match else None
+
+    def get_chapter_count(self, url_or_id):
+        work_id = self.parse_story_id(url_or_id)
+        # Bare work URL (no view_full_work) loads only chapter 1 + stats —
+        # much cheaper than pulling the whole fic to check whether it grew.
+        html = self._fetch(f"{AO3_BASE}/works/{work_id}?view_adult=true")
+        soup = BeautifulSoup(html, "lxml")
+        count = self._parse_chapter_count_from_stats(soup)
+        if count is None:
+            raise ValueError(
+                f"Could not determine chapter count for AO3 work {work_id}."
+            )
+        return count
+
     def scrape_author_stories(self, url):
         """Fetch an AO3 user works page (all pages) and return
         (author_name, [story_urls]).
@@ -282,24 +308,41 @@ class AO3Scraper(BaseScraper):
 
     def download(self, url_or_id, progress_callback=None, skip_chapters=0):
         """Download an AO3 work. Skip_chapters is honoured after the
-        single-page fetch so update mode and caching still work."""
+        single-page fetch so update mode and caching still work.
+
+        Update-mode optimisation: if a cached meta block exists and the
+        caller claims they already have `skip_chapters` chapters, probe
+        the cheap landing page (chapter 1 + stats) first to get the
+        current chapter count. If it hasn't grown, return a Story with
+        no chapters (caller's "no new chapters" signal) without paying
+        for the full-work download.
+        """
         work_id = self.parse_story_id(url_or_id)
         work_url = f"{AO3_BASE}/works/{work_id}"
         full_url = f"{work_url}?view_adult=true&view_full_work=true"
 
-        # Try the chapter cache first — if all chapters cached and
-        # metadata cached, we can skip the fetch.
         cached_meta = self._load_meta_cache(work_id)
-        fetched_soup = None
 
-        if cached_meta is None or skip_chapters == 0:
-            logger.info("Fetching AO3 work %s...", work_id)
-            html = self._fetch(full_url)
-            fetched_soup = BeautifulSoup(html, "lxml")
-            meta = self._parse_metadata(fetched_soup)
-        else:
-            meta = cached_meta
+        # Cheap probe in update mode
+        if skip_chapters > 0 and cached_meta is not None:
+            bare_html = self._fetch(f"{work_url}?view_adult=true")
+            bare_soup = BeautifulSoup(bare_html, "lxml")
+            current_count = self._parse_chapter_count_from_stats(bare_soup)
+            if current_count is not None and current_count <= skip_chapters:
+                return Story(
+                    id=work_id,
+                    title=cached_meta["title"],
+                    author=cached_meta["author"],
+                    summary=cached_meta["summary"],
+                    url=work_url,
+                    author_url=cached_meta.get("author_url", ""),
+                    metadata=cached_meta.get("extra", {}),
+                )
 
+        logger.info("Fetching AO3 work %s...", work_id)
+        html = self._fetch(full_url)
+        fetched_soup = BeautifulSoup(html, "lxml")
+        meta = self._parse_metadata(fetched_soup)
         self._save_meta_cache(work_id, meta)
 
         story = Story(
@@ -312,18 +355,12 @@ class AO3Scraper(BaseScraper):
             metadata=meta.get("extra", {}),
         )
 
-        if fetched_soup is None:
-            # Update mode without cache refresh: re-fetch to check for new chapters
-            html = self._fetch(full_url)
-            fetched_soup = BeautifulSoup(html, "lxml")
-
         chapters = self._parse_chapters(fetched_soup, meta["title"])
         total = len(chapters)
 
         for ch in chapters:
             if ch.number <= skip_chapters:
                 continue
-            # Cache each chapter so update mode stays cheap next time
             self._save_chapter_cache(work_id, ch)
             story.chapters.append(ch)
             if progress_callback:
