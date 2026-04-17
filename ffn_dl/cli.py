@@ -268,6 +268,17 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
             )
         print(f"\nSaved to: {path}")
 
+        if getattr(args, "send_to_kindle", None):
+            try:
+                from .mailer import SMTPConfigError, send_file
+
+                send_file(args.send_to_kindle, path)
+                print(f"Emailed to: {args.send_to_kindle}")
+            except SMTPConfigError as exc:
+                print(f"Could not send: {exc}", file=sys.stderr)
+            except Exception as exc:
+                print(f"Email failed: {exc}", file=sys.stderr)
+
         if args.clean_cache:
             scraper.clean_cache(story_id)
 
@@ -841,6 +852,16 @@ def main(argv=None):
             "Remove paragraphs that start with 'A/N', \"Author's Note\", etc. "
             "Heuristic — catches the common FFN pattern; AO3's structured "
             "notes are already excluded at scrape time."
+        ),
+    )
+    parser.add_argument(
+        "--send-to-kindle",
+        metavar="EMAIL",
+        help=(
+            "After each successful download, email the exported file to "
+            "EMAIL. Configure SMTP via SMTP_HOST / SMTP_USER / SMTP_PASSWORD "
+            "(and optional SMTP_PORT / SMTP_FROM). EMAIL must be on Amazon's "
+            "approved personal-document list for Kindle delivery."
         ),
     )
     parser.add_argument(
