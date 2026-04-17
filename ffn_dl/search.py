@@ -1,4 +1,4 @@
-"""Search fanfiction.net and Archive of Our Own."""
+"""Search fanfiction.net, Archive of Our Own, and Royal Road."""
 
 import logging
 import re
@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 FFN_BASE = "https://www.fanfiction.net"
 AO3_BASE = "https://archiveofourown.org"
+RR_BASE = "https://www.royalroad.com"
 SEARCH_PATH = "/search/"
 MAX_RESULTS = 25
 
@@ -460,3 +461,140 @@ def search_ao3(query, **filters):
             "The site may be temporarily unavailable."
         )
     return _parse_ao3_results(resp.text)
+
+
+# ── Royal Road search ─────────────────────────────────────────────
+
+RR_STATUS = {
+    "any": None,
+    "ongoing": "ONGOING",
+    "hiatus": "HIATUS",
+    "completed": "COMPLETED",
+    "complete": "COMPLETED",
+    "dropped": "DROPPED",
+    "stub": "STUB",
+}
+
+RR_TYPE = {
+    "any": None,
+    "original": "ORIGINAL",
+    "fanfiction": "FANFICTION",
+}
+
+RR_ORDER_BY = {
+    "relevance": "relevance",
+    "popularity": "popularity",
+    "last update": "last_update",
+    "pages": "pages",
+    "rating": "rating",
+    "title": "title",
+}
+
+
+def _build_rr_search_url(query, filters):
+    params = {}
+    if query:
+        params["title"] = query
+    status = (filters.get("status") or "").strip().lower()
+    if status and status in RR_STATUS and RR_STATUS[status]:
+        params["status"] = RR_STATUS[status]
+    type_ = (filters.get("type") or "").strip().lower()
+    if type_ and type_ in RR_TYPE and RR_TYPE[type_]:
+        params["type"] = RR_TYPE[type_]
+    order = (filters.get("order_by") or "").strip().lower()
+    if order and order in RR_ORDER_BY and RR_ORDER_BY[order] != "relevance":
+        params["orderBy"] = RR_ORDER_BY[order]
+    if filters.get("tags"):
+        # Comma-separated: "magic,dungeons" → tagsAdd=magic&tagsAdd=dungeons
+        tag_list = [t.strip() for t in str(filters["tags"]).split(",") if t.strip()]
+        # urlencode supports duplicate keys via doseq
+        return (
+            RR_BASE + "/fictions/search?" +
+            urlencode(
+                list(params.items())
+                + [("tagsAdd", t) for t in tag_list]
+            )
+        )
+    return RR_BASE + "/fictions/search?" + urlencode(params)
+
+
+def _parse_rr_results(html):
+    soup = BeautifulSoup(html, "lxml")
+    results = []
+    for item in soup.find_all("div", class_="fiction-list-item")[:MAX_RESULTS]:
+        title_link = item.find("h2", class_="fiction-title")
+        if title_link:
+            title_link = title_link.find("a", href=re.compile(r"/fiction/\d+"))
+        if not title_link:
+            continue
+        href = title_link["href"]
+        url = RR_BASE + href if href.startswith("/") else href
+        title = title_link.get_text(strip=True)
+
+        # Author — not directly shown in search results, leave blank
+        author = ""
+
+        # Status labels (ONGOING/COMPLETED/etc.) and type (Original/Fanfiction)
+        status = "In-Progress"
+        rating = "?"
+        labels = [
+            lbl.get_text(strip=True).upper()
+            for lbl in item.find_all("span", class_="label")
+        ]
+        for lbl in labels:
+            if lbl == "COMPLETED":
+                status = "Complete"
+            elif lbl in ("HIATUS", "STUB", "DROPPED", "INACTIVE"):
+                status = lbl.title()
+
+        # Genre tags
+        tag_links = item.find_all("a", class_="fiction-tag")
+        genre_or_fandom = ", ".join(a.get_text(strip=True) for a in tag_links[:5])
+
+        # Stats — pages, chapters, followers
+        stats_text = item.get_text(" ", strip=True)
+        pages_m = re.search(r"(\d[\d,]*)\s+Pages", stats_text)
+        chapters_m = re.search(r"(\d[\d,]*)\s+Chapters", stats_text)
+        words = f"{pages_m.group(1)}p" if pages_m else "?"
+        chapters = chapters_m.group(1) if chapters_m else "?"
+
+        # Description — in a hidden #description-<id> div; show first N chars
+        desc_div = item.find("div", id=re.compile(r"^description-\d+"))
+        summary = desc_div.get_text(" ", strip=True) if desc_div else ""
+        if not summary:
+            desc_wrap = item.find("div", class_="fiction-description")
+            if desc_wrap:
+                summary = desc_wrap.get_text(" ", strip=True)
+
+        results.append({
+            "title": title,
+            "author": author,
+            "url": url,
+            "summary": summary,
+            "words": words,
+            "chapters": chapters,
+            "rating": rating,
+            "fandom": genre_or_fandom,
+            "status": status,
+        })
+
+    return results
+
+
+def search_royalroad(query, **filters):
+    """Search royalroad.com. Returns result dicts matching search_ffn shape.
+
+    Keyword filters:
+        status:   any / ongoing / hiatus / completed / dropped / stub
+        type:     any / original / fanfiction
+        order_by: relevance / popularity / last update / pages / rating / title
+        tags:     comma-separated tag list (e.g. "progression,magic")
+    """
+    url = _build_rr_search_url(query, filters)
+    session = curl_requests.Session(impersonate="chrome")
+    resp = session.get(url, timeout=30)
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Royal Road search failed (HTTP {resp.status_code})."
+        )
+    return _parse_rr_results(resp.text)

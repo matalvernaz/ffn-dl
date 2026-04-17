@@ -79,6 +79,22 @@ def _ao3_search_spec():
     }
 
 
+def _royalroad_search_spec():
+    from .search import RR_ORDER_BY, RR_STATUS, RR_TYPE, search_royalroad
+    return {
+        "label": "Search Royal Road",
+        "search_fn": search_royalroad,
+        "filters": [
+            ("S&tatus:", "status", list(RR_STATUS)),
+            ("&Type:", "type", list(RR_TYPE)),
+            ("Sor&t by:", "order_by", list(RR_ORDER_BY)),
+        ],
+        "text_filters": [
+            ("Ta&gs:", "tags"),
+        ],
+    }
+
+
 class MainFrame(wx.Frame):
     def __init__(self):
         super().__init__(
@@ -112,6 +128,7 @@ class MainFrame(wx.Frame):
         self._build_download_tab(self.notebook)
         self._build_search_tab(self.notebook, "ffn", _ffn_search_spec())
         self._build_search_tab(self.notebook, "ao3", _ao3_search_spec())
+        self._build_search_tab(self.notebook, "royalroad", _royalroad_search_spec())
 
         root_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, pad)
 
@@ -380,6 +397,7 @@ class MainFrame(wx.Frame):
         for site_key, pref_key in (
             ("ffn", _p.KEY_SEARCH_STATE_FFN),
             ("ao3", _p.KEY_SEARCH_STATE_AO3),
+            ("royalroad", _p.KEY_SEARCH_STATE_ROYALROAD),
         ):
             if site_key not in self._tabs:
                 continue
@@ -407,6 +425,7 @@ class MainFrame(wx.Frame):
         for site_key, pref_key in (
             ("ffn", _p.KEY_SEARCH_STATE_FFN),
             ("ao3", _p.KEY_SEARCH_STATE_AO3),
+            ("royalroad", _p.KEY_SEARCH_STATE_ROYALROAD),
         ):
             if site_key not in self._tabs:
                 continue

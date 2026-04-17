@@ -355,8 +355,8 @@ _LIT_URL_RE = re.compile(
 
 
 def _handle_search(args):
-    """Interactive search mode: search FFN or AO3, display results, download on pick."""
-    from .search import search_ao3, search_ffn
+    """Interactive search mode: search the chosen site, display results, download on pick."""
+    from .search import search_ao3, search_ffn, search_royalroad
 
     if args.site == "ao3":
         site_label = "archiveofourown.org"
@@ -373,6 +373,15 @@ def _handle_search(args):
             "single_chapter": args.single_chapter,
         }
         search_fn = search_ao3
+    elif args.site == "royalroad":
+        site_label = "royalroad.com"
+        filters = {
+            "status": args.status,
+            "type": getattr(args, "rr_type", None),
+            "order_by": getattr(args, "rr_order_by", None),
+            "tags": getattr(args, "rr_tags", None),
+        }
+        search_fn = search_royalroad
     else:
         site_label = "fanfiction.net"
         filters = {
@@ -911,11 +920,11 @@ def main(argv=None):
         "-s",
         "--search",
         metavar="QUERY",
-        help="Search for stories matching QUERY (see --site to pick FFN or AO3)",
+        help="Search for stories matching QUERY (see --site to pick FFN, AO3, or Royal Road)",
     )
     parser.add_argument(
         "--site",
-        choices=["ffn", "ao3"],
+        choices=["ffn", "ao3", "royalroad"],
         default="ffn",
         help="Which site to search (default: ffn)",
     )
@@ -923,6 +932,7 @@ def main(argv=None):
     # depend on --site; see the search module for the full tables.
     from .search import (
         FFN_GENRE, FFN_LANGUAGE, FFN_WORDS, AO3_RATING, AO3_SORT,
+        RR_ORDER_BY, RR_STATUS, RR_TYPE,
     )
     parser.add_argument(
         "--rating",
@@ -997,6 +1007,21 @@ def main(argv=None):
         "--single-chapter",
         action="store_true",
         help="AO3-only: one-shots only",
+    )
+    parser.add_argument(
+        "--rr-type",
+        metavar="T",
+        help="Royal Road-only story type: original / fanfiction / any",
+    )
+    parser.add_argument(
+        "--rr-order-by",
+        metavar="SORT",
+        help=f"Royal Road-only sort: {', '.join(list(RR_ORDER_BY)[:5])}, ...",
+    )
+    parser.add_argument(
+        "--rr-tags",
+        metavar="TAGS",
+        help="Royal Road-only: comma-separated tag list (e.g. 'progression,magic')",
     )
     parser.add_argument(
         "-w",
