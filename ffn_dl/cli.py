@@ -37,10 +37,21 @@ def _is_author_url(url):
     )
 
 
+def _is_series_url(url):
+    """Return True if the URL points to an AO3 series."""
+    return AO3Scraper.is_series_url(url)
+
+
 def _scrape_author_stories(url, args):
     """Scrape an author page and return (author_name, [story_urls])."""
     scraper = _build_scraper(url, args)
     return scraper.scrape_author_stories(url)
+
+
+def _scrape_series_works(url, args):
+    """Scrape an AO3 series and return (series_name, [work_urls])."""
+    scraper = _build_scraper(url, args)
+    return scraper.scrape_series_works(url)
 
 
 def _build_scraper(url, args):
@@ -828,7 +839,7 @@ def main(argv=None):
                 print(f"Error: {exc}", file=sys.stderr)
                 sys.exit(1)
 
-        # Expand any author URLs found in positional args
+        # Expand any author or series URLs found in positional args
         expanded = []
         for url in urls:
             if _is_author_url(url):
@@ -843,6 +854,18 @@ def main(argv=None):
                 print(f"Author: {author_name}")
                 print(f"Found {len(story_urls)} stories.")
                 expanded.extend(story_urls)
+            elif _is_series_url(url):
+                try:
+                    series_name, work_urls = _scrape_series_works(url, args)
+                except (RateLimitError, CloudflareBlockError, StoryNotFoundError) as exc:
+                    print(f"Error fetching series page {url}: {exc}", file=sys.stderr)
+                    sys.exit(1)
+                if not work_urls:
+                    print(f"No works found in series: {url}", file=sys.stderr)
+                    sys.exit(1)
+                print(f"Series: {series_name}")
+                print(f"Found {len(work_urls)} works.")
+                expanded.extend(work_urls)
             else:
                 expanded.append(url)
         urls = expanded

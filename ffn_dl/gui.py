@@ -779,10 +779,18 @@ class MainFrame(wx.Frame):
 
     def _run_download(self, url, skip_chapters=0, is_update=False):
         try:
+            from .ao3 import AO3Scraper
+
             scraper = self._scraper_for(url)
 
             if not is_update and scraper.is_author_url(url):
                 self._run_author_download(url, scraper)
+                return
+
+            if not is_update and AO3Scraper.is_series_url(url):
+                if not isinstance(scraper, AO3Scraper):
+                    scraper = AO3Scraper()
+                self._run_series_download(url, scraper)
                 return
 
             scraper.parse_story_id(url)
@@ -816,6 +824,16 @@ class MainFrame(wx.Frame):
         finally:
             self._set_busy(False)
 
+    def _run_series_download(self, url, scraper):
+        self._log(f"Fetching series: {url}")
+        series_name, work_urls = scraper.scrape_series_works(url)
+        if not work_urls:
+            self._log("No works found in this series.")
+            return
+        self._log(f"Series: {series_name}")
+        self._log(f"Found {len(work_urls)} works. Downloading in series order...")
+        self._batch_download(work_urls, scraper, summary_label="Series")
+
     def _run_author_download(self, url, scraper):
         self._log(f"Fetching author page: {url}")
         author_name, story_urls = scraper.scrape_author_stories(url)
@@ -824,6 +842,9 @@ class MainFrame(wx.Frame):
             return
         self._log(f"Author: {author_name}")
         self._log(f"Found {len(story_urls)} stories. Downloading all...")
+        self._batch_download(story_urls, scraper, summary_label="Author batch")
+
+    def _batch_download(self, story_urls, scraper, summary_label="Batch"):
 
         def progress(current, total, title, cached):
             tag = " (cached)" if cached else ""
@@ -843,7 +864,7 @@ class MainFrame(wx.Frame):
                 failed.append(story_url)
 
         self._log(
-            f"\nAuthor batch complete: {succeeded} succeeded, "
+            f"\n{summary_label} complete: {succeeded} succeeded, "
             f"{len(failed)} failed out of {len(story_urls)}."
         )
         for u in failed:

@@ -75,6 +75,13 @@ class AO3Scraper(BaseScraper):
         return bool(re.search(r"archiveofourown\.org/users/[\w.-]+", str(url)))
 
     @staticmethod
+    def is_series_url(url):
+        """Return True if the URL is an AO3 series page."""
+        return bool(
+            re.search(r"archiveofourown\.org/series/\d+", str(url))
+        )
+
+    @staticmethod
     def _parse_metadata(soup):
         """Extract title, author, summary, and stats from a work page."""
         title_tag = soup.find("h2", class_="title")
@@ -254,6 +261,48 @@ class AO3Scraper(BaseScraper):
                 f"Could not determine chapter count for AO3 work {work_id}."
             )
         return count
+
+    def scrape_series_works(self, url):
+        """Fetch an AO3 series page and return (series_name, [work_urls]).
+
+        Works are returned in the order the author set for the series
+        — AO3 renders them in that order in the works list, and we
+        preserve page order when collecting the links.
+        """
+        match = re.search(r"archiveofourown\.org/series/(\d+)", url)
+        if not match:
+            raise ValueError(f"Not an AO3 series URL: {url}")
+        series_id = match.group(1)
+        html = self._fetch(f"{AO3_BASE}/series/{series_id}")
+        soup = BeautifulSoup(html, "lxml")
+
+        series_name = "Unknown Series"
+        h2 = soup.find("h2", class_="heading")
+        if h2:
+            name = h2.get_text(strip=True)
+            if name:
+                series_name = name
+
+        seen = set()
+        work_urls = []
+        # The series page lists works as h4.heading blocks whose first
+        # link points at /works/<id>. Pulling links from inside h4
+        # headings skips the "Bookmarks" / "Comments" links elsewhere
+        # on the page that also point at /works/.
+        for heading in soup.find_all("h4", class_="heading"):
+            link = heading.find("a", href=re.compile(r"^/works/\d+"))
+            if not link:
+                continue
+            wid_m = re.search(r"/works/(\d+)", link["href"])
+            if not wid_m:
+                continue
+            wid = wid_m.group(1)
+            if wid in seen:
+                continue
+            seen.add(wid)
+            work_urls.append(f"{AO3_BASE}/works/{wid}")
+
+        return series_name, work_urls
 
     def scrape_author_stories(self, url):
         """Fetch an AO3 user works page (all pages) and return
