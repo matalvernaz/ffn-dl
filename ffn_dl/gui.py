@@ -560,8 +560,12 @@ class MainFrame(wx.Frame):
 
     @staticmethod
     def _snapshot_search_state(tab):
+        # `query` is intentionally NOT persisted — a stored search
+        # string reappearing across sessions is more annoying than
+        # useful. Filters, text filters, and checkboxes DO persist
+        # because re-setting language / sort / genre / tag picks on
+        # every launch is painful.
         return {
-            "query": tab["query_ctrl"].GetValue(),
             "filters": {
                 key: ctrl.GetStringSelection()
                 for key, ctrl in tab["filter_ctrls"].items()
@@ -580,9 +584,8 @@ class MainFrame(wx.Frame):
     def _apply_search_state(tab, state):
         if not isinstance(state, dict):
             return
-        query = state.get("query")
-        if isinstance(query, str):
-            tab["query_ctrl"].SetValue(query)
+        # Ignore any legacy "query" that older versions wrote — the
+        # field is no longer part of the persisted schema.
         for key, value in (state.get("filters") or {}).items():
             ctrl = tab["filter_ctrls"].get(key)
             if ctrl and isinstance(value, str) and value:
@@ -776,6 +779,30 @@ class MainFrame(wx.Frame):
             wx.OK,
             parent=self,
         )
+        # Prefs snapshot at _perform_update is stale by now — the user
+        # may have toggled filters or edited fields while the download
+        # ran. Save again so the post-restart app sees the latest state.
+        try:
+            self._save_prefs()
+        except Exception:
+            pass
+        # Force wx.Config's in-memory buffer to disk before we spawn
+        # the new process. Without this, the child can open wx.Config
+        # before the parent has flushed, reading stale values.
+        try:
+            self.prefs.flush()
+        except Exception:
+            pass
+        # Stop log/clip timers and hide the frame so the new process
+        # doesn't see a second visible window during its early startup.
+        try:
+            if hasattr(self, "_log_timer"):
+                self._log_timer.Stop()
+            if hasattr(self, "_clip_timer"):
+                self._clip_timer.Stop()
+            self.Hide()
+        except Exception:
+            pass
         self_update.restart()
 
     # ── Download ─────────────────────────────────────────────

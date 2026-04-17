@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.8.1 — 2026-04-17
+
+### Fixes
+
+- **Search query no longer persists across sessions.** Whatever was
+  typed into the search box used to come back on next launch — more
+  annoying than useful. Filters, tag picks, and checkboxes still
+  persist (those are painful to re-set), but the query field starts
+  empty every launch.
+- **Auto-update restart no longer races the new process.** On Windows
+  the old `restart()` did `subprocess.Popen + sys.exit(0)` with no
+  detach flags, so the child inherited the parent's console + process
+  group and its PyInstaller `_MEIPASS` extraction could race the
+  parent's cleanup of the same temp dir. Symptom: app reopened but
+  search (and any other curl_cffi network call) silently did nothing
+  on the first post-update launch. The child is now spawned DETACHED
+  with a new process group, breaking away from any Job object the
+  installer might have placed us in. On POSIX we use `os.execv`
+  instead (same PID, no second process, no race). wx.Config is also
+  flushed explicitly before the spawn so the child can't read stale
+  registry values that the parent hadn't yet written out.
+- **Prefs re-saved immediately before update restart.** The previous
+  code saved prefs at the start of the download, so any filter tweaks
+  the user made while the progress dialog was open were lost.
+
 ## 1.8.0 — 2026-04-17
 
 ### Search filters

@@ -50,3 +50,16 @@ class Prefs:
     def set_bool(self, key: str, value: bool) -> None:
         self._cfg.WriteBool(key, bool(value))
         self._cfg.Flush()
+
+    def flush(self) -> None:
+        """Force any in-memory wx.Config buffer to disk/registry now.
+
+        Every `set`/`set_bool` already flushes, but we call this
+        explicitly before spawning a child process in the auto-update
+        restart path so the child can't race ahead and read stale
+        values that we just wrote.
+        """
+        try:
+            self._cfg.Flush()
+        except Exception:
+            pass

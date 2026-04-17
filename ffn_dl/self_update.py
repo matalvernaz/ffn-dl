@@ -180,7 +180,53 @@ def download_and_replace(update_info, progress_cb=None) -> Path:
 
 
 def restart() -> None:
-    """Relaunch the current executable with the original args and exit."""
+    """Relaunch the current executable with the original args and exit.
+
+    On Windows the child is spawned DETACHED so it doesn't inherit the
+    parent's console, handles, or process group. PyInstaller onefile
+    builds extract to a random ``_MEI<rand>`` temp dir at startup and
+    the bootloader cleans that dir on exit — if the child's extraction
+    races with the parent's cleanup (both touching %TEMP% at once),
+    DLLs and data files can end up half-written. Detaching the child
+    plus letting the parent finish its `sys.exit` keeps the two
+    processes' teardown / startup from stepping on each other, which
+    otherwise shows up as "app restarted but network/search is broken"
+    on the first post-update launch.
+
+    On POSIX we use os.execv, which replaces the current process image
+    in place — same PID, no race, nothing to detach.
+    """
     args = [sys.executable] + sys.argv[1:]
-    subprocess.Popen(args, close_fds=True)
-    sys.exit(0)
+
+    if sys.platform.startswith("win"):
+        # DETACHED_PROCESS (0x8) — no console inheritance.
+        # CREATE_NEW_PROCESS_GROUP (0x200) — Ctrl-C in a dying parent
+        # console can't propagate to the child.
+        # CREATE_BREAKAWAY_FROM_JOB (0x1000000) — if the parent is in a
+        # Job object (installer, AV sandbox) the child escapes the
+        # lifetime tie that would otherwise kill it with us.
+        creationflags = 0x8 | 0x200 | 0x1000000
+        try:
+            subprocess.Popen(
+                args,
+                close_fds=True,
+                creationflags=creationflags,
+            )
+        except OSError:
+            # Job-breakaway isn't always permitted (some installers
+            # run inside a Job with JOB_OBJECT_LIMIT_BREAKAWAY_OK
+            # disabled). Retry without the breakaway flag — we still
+            # get detach + new-group, which is the important part.
+            subprocess.Popen(
+                args,
+                close_fds=True,
+                creationflags=0x8 | 0x200,
+            )
+        sys.exit(0)
+
+    # POSIX: replace the running image with the new exe. Same PID, no
+    # second process, no race. The `flush` call matches what the
+    # wxPython shutdown would normally do via its atexit hooks.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, args)
