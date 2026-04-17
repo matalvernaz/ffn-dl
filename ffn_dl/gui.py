@@ -19,6 +19,7 @@ _FFN_URL_RE = re.compile(
     r"|ficwad\.com/story/\d+"
     r"|(?:archiveofourown\.org|ao3\.org)/works/\d+"
     r"|royalroad\.com/fiction/\d+"
+    r"|mediaminer\.org/fanfic/(?:view_st\.php/\d+|s/[^?#\s]+?/\d+)"
     r")"
 )
 
@@ -884,6 +885,7 @@ class MainFrame(wx.Frame):
     def _scraper_for(self, url):
         from .ao3 import AO3Scraper
         from .ficwad import FicWadScraper
+        from .mediaminer import MediaMinerScraper
         from .royalroad import RoyalRoadScraper
         from .scraper import FFNScraper
 
@@ -894,6 +896,8 @@ class MainFrame(wx.Frame):
             return AO3Scraper()
         if "royalroad.com" in text:
             return RoyalRoadScraper()
+        if "mediaminer.org" in text:
+            return MediaMinerScraper()
         return FFNScraper()
 
     def _export_story(self, story):

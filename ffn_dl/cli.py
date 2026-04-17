@@ -9,6 +9,7 @@ from pathlib import Path
 from .ao3 import AO3LockedError, AO3Scraper
 from .exporters import DEFAULT_TEMPLATE, EXPORTERS
 from .ficwad import FicWadScraper
+from .mediaminer import MediaMinerScraper
 from .models import parse_chapter_spec
 from .royalroad import RoyalRoadScraper
 from .scraper import (
@@ -29,6 +30,8 @@ def _detect_site(url):
         return AO3Scraper
     if "royalroad.com" in text:
         return RoyalRoadScraper
+    if "mediaminer.org" in text:
+        return MediaMinerScraper
     return FFNScraper
 
 
@@ -39,6 +42,7 @@ def _is_author_url(url):
         or FicWadScraper.is_author_url(url)
         or AO3Scraper.is_author_url(url)
         or RoyalRoadScraper.is_author_url(url)
+        or MediaMinerScraper.is_author_url(url)
     )
 
 
@@ -336,6 +340,10 @@ _AO3_URL_RE = re.compile(
 )
 _RR_URL_RE = re.compile(
     r"https?://(?:www\.)?royalroad\.com/fiction/\d+", re.I
+)
+_MM_URL_RE = re.compile(
+    r"https?://(?:www\.)?mediaminer\.org/fanfic/"
+    r"(?:view_st\.php/\d+|s/[^?#\s]+?/\d+)", re.I
 )
 
 
@@ -657,7 +665,8 @@ def _handle_watch(args):
 
             # Check if clipboard contains a supported URL
             url = None
-            for pattern in (_FFN_URL_RE, _FICWAD_URL_RE, _AO3_URL_RE, _RR_URL_RE):
+            for pattern in (_FFN_URL_RE, _FICWAD_URL_RE, _AO3_URL_RE,
+                            _RR_URL_RE, _MM_URL_RE):
                 match = pattern.search(clip)
                 if match:
                     url = match.group(0)
@@ -688,7 +697,7 @@ def main(argv=None):
         description="Download fanfiction from fanfiction.net and ficwad.com",
         epilog=(
             "Supported sites: fanfiction.net, ficwad.com, "
-            "archiveofourown.org, royalroad.com\n"
+            "archiveofourown.org, royalroad.com, mediaminer.org\n"
             "Name template placeholders: "
             "{title} {author} {id} {words} {status} {rating} {language} {chapters}"
         ),
