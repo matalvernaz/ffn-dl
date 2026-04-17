@@ -4,6 +4,7 @@ Uses native Win32 controls via wxPython so NVDA, JAWS, and other
 screen readers can read every widget natively.
 """
 
+import json
 import re
 import sys
 import threading
@@ -361,6 +362,21 @@ class MainFrame(wx.Frame):
 
         self.hr_stars_ctrl.SetValue(self.prefs.get_bool(_p.KEY_HR_AS_STARS))
 
+        for site_key, pref_key in (
+            ("ffn", _p.KEY_SEARCH_STATE_FFN),
+            ("ao3", _p.KEY_SEARCH_STATE_AO3),
+        ):
+            if site_key not in self._tabs:
+                continue
+            raw = self.prefs.get(pref_key)
+            if not raw:
+                continue
+            try:
+                state = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            self._apply_search_state(self._tabs[site_key], state)
+
     def _save_prefs(self):
         from . import prefs as _p
 
@@ -371,6 +387,53 @@ class MainFrame(wx.Frame):
         )
         self.prefs.set(_p.KEY_OUTPUT_DIR, self.output_ctrl.GetValue())
         self.prefs.set_bool(_p.KEY_HR_AS_STARS, self.hr_stars_ctrl.GetValue())
+
+        for site_key, pref_key in (
+            ("ffn", _p.KEY_SEARCH_STATE_FFN),
+            ("ao3", _p.KEY_SEARCH_STATE_AO3),
+        ):
+            if site_key not in self._tabs:
+                continue
+            state = self._snapshot_search_state(self._tabs[site_key])
+            self.prefs.set(pref_key, json.dumps(state))
+
+    @staticmethod
+    def _snapshot_search_state(tab):
+        return {
+            "query": tab["query_ctrl"].GetValue(),
+            "filters": {
+                key: ctrl.GetStringSelection()
+                for key, ctrl in tab["filter_ctrls"].items()
+            },
+            "text": {
+                key: ctrl.GetValue()
+                for key, ctrl in tab["text_ctrls"].items()
+            },
+            "checks": {
+                key: bool(ctrl.GetValue())
+                for key, ctrl in tab["checkbox_ctrls"].items()
+            },
+        }
+
+    @staticmethod
+    def _apply_search_state(tab, state):
+        if not isinstance(state, dict):
+            return
+        query = state.get("query")
+        if isinstance(query, str):
+            tab["query_ctrl"].SetValue(query)
+        for key, value in (state.get("filters") or {}).items():
+            ctrl = tab["filter_ctrls"].get(key)
+            if ctrl and isinstance(value, str) and value:
+                ctrl.SetStringSelection(value)
+        for key, value in (state.get("text") or {}).items():
+            ctrl = tab["text_ctrls"].get(key)
+            if ctrl and isinstance(value, str):
+                ctrl.SetValue(value)
+        for key, value in (state.get("checks") or {}).items():
+            ctrl = tab["checkbox_ctrls"].get(key)
+            if ctrl is not None:
+                ctrl.SetValue(bool(value))
 
     def _on_close(self, event):
         try:
