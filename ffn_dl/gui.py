@@ -54,6 +54,7 @@ def _ffn_search_spec():
             ("&Language:", "language", list(FFN_LANGUAGE)),
             ("S&tatus:", "status", list(FFN_STATUS)),
             ("&Genre:", "genre", list(FFN_GENRE)),
+            ("Genre &2:", "genre2", list(FFN_GENRE)),
             ("&Words:", "min_words", list(FFN_WORDS)),
             ("&Crossover:", "crossover", list(FFN_CROSSOVER)),
             ("&Match in:", "match", list(FFN_MATCH)),
@@ -63,21 +64,26 @@ def _ffn_search_spec():
 
 
 def _ao3_search_spec():
-    from .search import AO3_COMPLETE, AO3_CROSSOVER, AO3_RATING, AO3_SORT, search_ao3
+    from .search import (
+        AO3_CATEGORY, AO3_COMPLETE, AO3_CROSSOVER, AO3_LANGUAGES,
+        AO3_RATING, AO3_SORT, search_ao3,
+    )
     return {
         "label": "Search AO3",
         "search_fn": search_ao3,
         "filters": [
             ("&Rating:", "rating", list(AO3_RATING)),
+            ("Cate&gory:", "category", list(AO3_CATEGORY)),
             ("S&tatus:", "complete", list(AO3_COMPLETE)),
             ("&Crossover:", "crossover", list(AO3_CROSSOVER)),
+            ("Lan&guage:", "language", list(AO3_LANGUAGES)),
             ("Sor&t by:", "sort", list(AO3_SORT)),
         ],
         "text_filters": [
             ("&Fandom:", "fandom"),
             ("&Character:", "character"),
             ("&Relationship:", "relationship"),
-            ("Lang. &code:", "language"),
+            ("Free&form tag:", "freeform"),
             ("&Word count:", "word_count"),
         ],
         "checkboxes": [
@@ -88,7 +94,8 @@ def _ao3_search_spec():
 
 def _royalroad_search_spec():
     from .search import (
-        RR_LISTS, RR_ORDER_BY, RR_STATUS, RR_TYPE, search_royalroad,
+        RR_GENRES, RR_LISTS, RR_ORDER_BY, RR_STATUS, RR_TAGS, RR_TYPE,
+        RR_WARNINGS, search_royalroad,
     )
     return {
         "label": "Search Royal Road",
@@ -99,17 +106,31 @@ def _royalroad_search_spec():
             ("&Type:", "type", list(RR_TYPE)),
             ("Sor&t by:", "order_by", list(RR_ORDER_BY)),
         ],
+        "multi_pickers": [
+            ("&Genres:", "genres", "Pick Royal Road genres", list(RR_GENRES)),
+            ("Ta&gs:", "tags_picked", "Pick Royal Road tags", list(RR_TAGS)),
+            (
+                "War&nings:", "warnings",
+                "Pick content warnings to require", list(RR_WARNINGS),
+            ),
+        ],
         "text_filters": [
-            ("Ta&gs:", "tags"),
+            ("Min &words:", "min_words"),
+            ("Ma&x words:", "max_words"),
+            ("Min &pages:", "min_pages"),
+            ("Min &rating:", "min_rating"),
         ],
     }
 
 
 def _literotica_search_spec():
-    from .search import search_literotica
+    from .search import LIT_CATEGORIES, search_literotica
     return {
         "label": "Search Literotica",
         "search_fn": search_literotica,
+        "filters": [
+            ("Categor&y:", "category", list(LIT_CATEGORIES)),
+        ],
         "text_filters": [
             ("&Page:", "page"),
         ],
@@ -325,6 +346,31 @@ class MainFrame(wx.Frame):
                 tgrid.Add(ctrl, 0, wx.RIGHT, 12)
                 state["text_ctrls"][key] = ctrl
             sizer.Add(tgrid, 0, wx.EXPAND | wx.ALL, pad)
+
+        # Multi-pickers (checkable list dialogs for tags/genres/warnings)
+        # — each entry contributes a read-only TextCtrl showing the
+        # current picks plus a "Pick..." button that opens MultiPickerDialog.
+        # The TextCtrl is registered in `text_ctrls` so existing collect
+        # / snapshot / restore logic handles persistence unchanged.
+        if spec.get("multi_pickers"):
+            for mp_label, mp_key, mp_title, mp_options in spec["multi_pickers"]:
+                row = wx.BoxSizer(wx.HORIZONTAL)
+                row.Add(
+                    wx.StaticText(panel, label=mp_label),
+                    0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+                )
+                ctrl = wx.TextCtrl(panel, size=(320, -1))
+                ctrl.SetName(mp_label.replace("&", "").rstrip(":"))
+                row.Add(ctrl, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+                btn = wx.Button(panel, label="Pic&k...")
+                btn.Bind(
+                    wx.EVT_BUTTON,
+                    lambda evt, c=ctrl, t=mp_title, o=mp_options:
+                        self._open_multi_picker(c, t, o),
+                )
+                row.Add(btn, 0)
+                sizer.Add(row, 0, wx.EXPAND | wx.ALL, pad)
+                state["text_ctrls"][mp_key] = ctrl
 
         # Checkboxes
         if spec.get("checkboxes"):
@@ -846,6 +892,21 @@ class MainFrame(wx.Frame):
         ).start()
 
     # ── Search ───────────────────────────────────────────────
+
+    def _open_multi_picker(self, ctrl, title, options):
+        """Open the multi-pick dialog, seed it with the comma-separated
+        labels already in `ctrl`, and write the picked labels back on OK.
+        `options` is the ordered label list to show.
+        """
+        current = [
+            s.strip() for s in ctrl.GetValue().split(",") if s.strip()
+        ]
+        dlg = MultiPickerDialog(self, title, list(options), initial=current)
+        try:
+            if dlg.ShowModal() == wx.ID_OK:
+                ctrl.SetValue(", ".join(dlg.picked_labels()))
+        finally:
+            dlg.Destroy()
 
     def _collect_filters(self, tab):
         filters = {}
@@ -1957,6 +2018,139 @@ class StoryPickerDialog(wx.Dialog):
         self.EndModal(wx.ID_OK)
 
     def picked_urls(self):
+        return list(self._picked)
+
+
+class MultiPickerDialog(wx.Dialog):
+    """Tick-list picker for categorical filters (Royal Road genres, tags,
+    content warnings, etc.).
+
+    Same NVDA trick as StoryPickerDialog — every row label is rewritten
+    with a literal `[x] ` / `[ ] ` prefix on toggle so the check state
+    is part of the readable item text. The dialog returns the ordered
+    list of picked *labels* (not slugs); callers can resolve labels to
+    whatever canonical form they store.
+    """
+
+    def __init__(self, parent, title, options, initial=()):
+        super().__init__(
+            parent, title=title,
+            size=(420, 520),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        # `options` is the ordered list of labels; `initial` the subset
+        # that should start ticked. We compare case-insensitively so a
+        # saved "litrpg" still ticks "LitRPG" on the next launch.
+        self._labels = list(options)
+        initial_lower = {str(x).strip().lower() for x in initial}
+        self._initial_checks = [
+            lbl.lower() in initial_lower for lbl in self._labels
+        ]
+        self._picked = []
+        self._build_ui()
+
+    def _build_ui(self):
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        controls = wx.BoxSizer(wx.HORIZONTAL)
+        controls.Add(
+            wx.StaticText(panel, label="Fi&lter:"),
+            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+        )
+        self.filter_ctrl = wx.TextCtrl(panel)
+        self.filter_ctrl.SetName("Filter options")
+        self.filter_ctrl.Bind(wx.EVT_TEXT, self._on_filter_text)
+        controls.Add(self.filter_ctrl, 1, wx.RIGHT, 8)
+        select_all = wx.Button(panel, label="&Select All")
+        select_all.Bind(wx.EVT_BUTTON, lambda e: self._set_visible_all(True))
+        controls.Add(select_all, 0, wx.RIGHT, 4)
+        select_none = wx.Button(panel, label="Select &None")
+        select_none.Bind(wx.EVT_BUTTON, lambda e: self._set_visible_all(False))
+        controls.Add(select_none, 0)
+        sizer.Add(controls, 0, wx.EXPAND | wx.ALL, 8)
+
+        self.list_ctrl = wx.CheckListBox(panel, choices=[])
+        self.list_ctrl.SetName("Options")
+        self.list_ctrl.Bind(wx.EVT_CHECKLISTBOX, self._on_item_toggled)
+        sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+
+        hint = wx.StaticText(
+            panel,
+            label=(
+                "Arrow keys to move, space to tick or untick. "
+                "Type in the filter field to narrow the list."
+            ),
+        )
+        sizer.Add(hint, 0, wx.ALL, 8)
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        btn_row.AddStretchSpacer(1)
+        ok_btn = wx.Button(panel, id=wx.ID_OK, label="&OK")
+        ok_btn.SetDefault()
+        ok_btn.Bind(wx.EVT_BUTTON, self._on_ok)
+        btn_row.Add(ok_btn, 0, wx.RIGHT, 8)
+        cancel_btn = wx.Button(panel, id=wx.ID_CANCEL, label="&Cancel")
+        btn_row.Add(cancel_btn, 0)
+        sizer.Add(btn_row, 0, wx.EXPAND | wx.ALL, 8)
+
+        panel.SetSizer(sizer)
+
+        # _checks tracks the authoritative checked state for every label
+        # (index parallel to self._labels). _visible_map maps the list
+        # control's visible rows → indices into self._labels.
+        self._checks = list(self._initial_checks)
+        self._visible_map = list(range(len(self._labels)))
+        self._refresh()
+
+    def _label_text(self, idx, checked):
+        prefix = "[x] " if checked else "[ ] "
+        return prefix + self._labels[idx]
+
+    def _refresh(self):
+        self.list_ctrl.Set([
+            self._label_text(i, self._checks[i])
+            for i in self._visible_map
+        ])
+        self.list_ctrl.SetCheckedItems([
+            row for row, i in enumerate(self._visible_map)
+            if self._checks[i]
+        ])
+
+    def _on_filter_text(self, event):
+        needle = self.filter_ctrl.GetValue().strip().lower()
+        if not needle:
+            self._visible_map = list(range(len(self._labels)))
+        else:
+            self._visible_map = [
+                i for i, lbl in enumerate(self._labels)
+                if needle in lbl.lower()
+            ]
+        self._refresh()
+        event.Skip()
+
+    def _on_item_toggled(self, event):
+        row = event.GetSelection()
+        if 0 <= row < len(self._visible_map):
+            i = self._visible_map[row]
+            self._checks[i] = self.list_ctrl.IsChecked(row)
+            self.list_ctrl.SetString(
+                row, self._label_text(i, self._checks[i]),
+            )
+        event.Skip()
+
+    def _set_visible_all(self, checked):
+        for row, i in enumerate(self._visible_map):
+            self._checks[i] = checked
+        self._refresh()
+
+    def _on_ok(self, event):
+        self._picked = [
+            self._labels[i] for i, ok in enumerate(self._checks) if ok
+        ]
+        self.EndModal(wx.ID_OK)
+
+    def picked_labels(self):
         return list(self._picked)
 
 

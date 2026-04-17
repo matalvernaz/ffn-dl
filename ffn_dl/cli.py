@@ -440,11 +440,13 @@ def _handle_search(args):
             "language": args.language,
             "complete": args.status,
             "crossover": args.crossover,
+            "category": getattr(args, "ao3_category", None),
             "sort": args.sort,
             "fandom": args.fandom,
             "word_count": args.word_count,
             "character": args.character,
             "relationship": args.relationship,
+            "freeform": getattr(args, "ao3_freeform", None),
             "single_chapter": args.single_chapter,
         }
         search_fn = search_ao3
@@ -455,12 +457,21 @@ def _handle_search(args):
             "type": getattr(args, "rr_type", None),
             "order_by": getattr(args, "rr_order_by", None),
             "tags": getattr(args, "rr_tags", None),
+            "genres": getattr(args, "rr_genres", None),
+            "warnings": getattr(args, "rr_warnings", None),
+            "min_words": getattr(args, "rr_min_words", None),
+            "max_words": getattr(args, "rr_max_words", None),
+            "min_pages": getattr(args, "rr_min_pages", None),
+            "max_pages": getattr(args, "rr_max_pages", None),
+            "min_rating": getattr(args, "rr_min_rating", None),
             "list": getattr(args, "rr_list", None),
         }
         search_fn = search_royalroad
     elif args.site == "literotica":
         site_label = "literotica.com (tag browse)"
-        filters = {}
+        filters = {
+            "category": getattr(args, "lit_category", None),
+        }
         search_fn = search_literotica
         if getattr(args, "lit_page", None):
             args.start_page = max(args.start_page, int(args.lit_page))
@@ -471,6 +482,7 @@ def _handle_search(args):
             "language": args.language,
             "status": args.status,
             "genre": args.genre,
+            "genre2": getattr(args, "genre2", None),
             "min_words": args.min_words,
             "crossover": args.crossover,
             "match": args.match,
@@ -1127,6 +1139,11 @@ def main(argv=None):
         help=f"FFN-only: {', '.join(list(FFN_GENRE)[1:8])}, ... (see search.FFN_GENRE)",
     )
     parser.add_argument(
+        "--genre2",
+        metavar="G",
+        help="FFN-only: second genre (AND filter). Same values as --genre.",
+    )
+    parser.add_argument(
         "--min-words",
         metavar="N",
         help=f"FFN-only word-count bucket: {', '.join(list(FFN_WORDS)[1:])}",
@@ -1170,6 +1187,16 @@ def main(argv=None):
         help="AO3-only: filter by relationship tag(s)",
     )
     parser.add_argument(
+        "--ao3-category",
+        metavar="CAT",
+        help="AO3-only relationship category: gen, f/m, m/m, f/f, multi, other",
+    )
+    parser.add_argument(
+        "--ao3-freeform",
+        metavar="TAG",
+        help="AO3-only: additional free-form tag(s) (comma-separated)",
+    )
+    parser.add_argument(
         "--single-chapter",
         action="store_true",
         help="AO3-only: one-shots only",
@@ -1187,7 +1214,57 @@ def main(argv=None):
     parser.add_argument(
         "--rr-tags",
         metavar="TAGS",
-        help="Royal Road-only: comma-separated tag list (e.g. 'progression,magic')",
+        help="Royal Road-only: comma-separated raw tag slugs (e.g. 'progression,magic')",
+    )
+    parser.add_argument(
+        "--rr-genres",
+        metavar="GENRES",
+        help=(
+            "Royal Road-only: comma-separated genre labels (e.g. "
+            "'Fantasy,Sci-fi'). See search.RR_GENRES for the full list."
+        ),
+    )
+    parser.add_argument(
+        "--rr-warnings",
+        metavar="WARN",
+        help=(
+            "Royal Road-only: comma-separated content warnings required "
+            "(e.g. 'Profanity,Gore'). See search.RR_WARNINGS."
+        ),
+    )
+    parser.add_argument(
+        "--rr-min-words",
+        metavar="N",
+        help="Royal Road-only: minimum word count",
+    )
+    parser.add_argument(
+        "--rr-max-words",
+        metavar="N",
+        help="Royal Road-only: maximum word count",
+    )
+    parser.add_argument(
+        "--rr-min-pages",
+        metavar="N",
+        help="Royal Road-only: minimum page count",
+    )
+    parser.add_argument(
+        "--rr-max-pages",
+        metavar="N",
+        help="Royal Road-only: maximum page count",
+    )
+    parser.add_argument(
+        "--rr-min-rating",
+        metavar="R",
+        help="Royal Road-only: minimum average rating (0.0-5.0)",
+    )
+    parser.add_argument(
+        "--lit-category",
+        metavar="CAT",
+        help=(
+            "Literotica-only: browse one of Literotica's top-level "
+            "categories instead of a query tag (e.g. 'Loving Wives', "
+            "'Sci-Fi & Fantasy'). See search.LIT_CATEGORIES."
+        ),
     )
     parser.add_argument(
         "--rr-list",
@@ -1243,9 +1320,14 @@ def main(argv=None):
     )
 
     # --- Search mode ---
-    # RR list browse mode doesn't need a free-text query, so allow
-    # --rr-list to stand in for --search.
-    if args.search or getattr(args, "rr_list", None):
+    # RR list browse and Literotica category browse don't need a
+    # free-text query, so allow --rr-list / --lit-category to stand in
+    # for --search.
+    if (
+        args.search
+        or getattr(args, "rr_list", None)
+        or getattr(args, "lit_category", None)
+    ):
         if not args.search:
             args.search = ""
         _handle_search(args)

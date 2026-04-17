@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.8.0 — 2026-04-17
+
+### Search filters
+
+- **Royal Road gets genres, tags, warnings, and numeric bounds as
+  first-class filters**. Previously the only RR discovery surface was
+  the free-text "Tags" box, which required knowing RR's tag slugs
+  (`progression`, `litrpg`, `xianxia`, …). Three new multi-pick
+  dialogs (Genres / Tags / Warnings) expose RR's full canonical list
+  behind the Search Royal Road tab's `Pick…` buttons, with a type-to-
+  filter field so you can jump straight to "LitRPG" or "Portal
+  Fantasy / Isekai" without scrolling. Also added min/max word-count,
+  min/max page-count, and minimum rating text filters.
+- **AO3 category and language dropdowns**. Previously category
+  (Gen / F/M / M/M / F/F / Multi / Other) wasn't exposed at all, and
+  language was a free-text ISO-code field. Both are now proper choice
+  dropdowns — language accepts either a pretty label ("French") or a
+  raw code ("fr") for languages not in the canonical list.
+- **FFN second-genre filter**. FFN's search form has two genre
+  dropdowns that AND together; only the first was wired up.
+  Genre 2 now lets you narrow to e.g. "Romance" AND "Angst".
+- **Literotica category browsing**. A Category dropdown now lists
+  all 29 of Literotica's top-level categories (Loving Wives, Sci-Fi
+  & Fantasy, Romance, …) and browses that category without needing
+  to know its tag slug. Unknown labels still fall back to slug-
+  normalization so anything typable works.
+
+New multi-pick dialog (`MultiPickerDialog`) follows the same NVDA
+compatibility pattern as the story picker: literal `[x] ` / `[ ] `
+prefixes on every row so check state is readable, and a filter field
+on top for keyboard-only narrowing.
+
+### CLI
+
+New flags: `--genre2`, `--ao3-category`, `--ao3-freeform`,
+`--rr-genres`, `--rr-warnings`, `--rr-min-words`, `--rr-max-words`,
+`--rr-min-pages`, `--rr-max-pages`, `--rr-min-rating`,
+`--lit-category`. `--lit-category` can stand in for `--search` the
+same way `--rr-list` already does — you can browse "Loving Wives"
+with no query.
+
 ## 1.7.2 — 2026-04-17
 
 ### Audiobook

@@ -146,6 +146,9 @@ def _build_search_url(query, filters, page=1):
         ("languageid", "language", FFN_LANGUAGE),
         ("statusid", "status", FFN_STATUS),
         ("genreid", "genre", FFN_GENRE),
+        # FFN's search form has a second genre dropdown (AND filter);
+        # same value table as the first.
+        ("genreid2", "genre2", FFN_GENRE),
         ("words", "min_words", FFN_WORDS),
         ("formatid", "crossover", FFN_CROSSOVER),
         ("match", "match", FFN_MATCH),
@@ -272,6 +275,7 @@ def search_ffn(query, *, page=1, **filters):
         language: english / spanish / french / ... (see FFN_LANGUAGE)
         status: all / in-progress / complete
         genre: romance / humor / adventure / angst / ... (see FFN_GENRE)
+        genre2: same values as `genre`; adds a second AND-filtered genre.
         min_words: <1k / <5k / 5k+ / 30k+ / 50k+ / 150k+ / 300k+
         crossover: any / only / exclude
         match: any / title / summary  (where the keywords must appear)
@@ -323,6 +327,55 @@ AO3_SORT = {
     "bookmarks": "bookmarks_count",
 }
 
+# AO3 category IDs (work_search[category_ids][]). These are global
+# tag IDs assigned by AO3 to each of the six top-level relationship
+# categories; values sourced from AO3's search form source.
+AO3_CATEGORY = {
+    "any": None,
+    "gen": 21,
+    "f/m": 22,
+    "m/m": 23,
+    "f/f": 116,
+    "multi": 2246,
+    "other": 24,
+}
+
+# AO3 accepts either the short language code (ISO-ish — "en", "zh") or
+# the numeric language_id in `work_search[language_id]`. Short codes are
+# stable across AO3's DB rebuilds, so we use those. The pretty-label
+# lookup here just saves users from memorizing codes; anything unknown
+# is passed through so raw codes still work for languages not listed.
+AO3_LANGUAGES = {
+    "any": None,
+    "english": "en",
+    "spanish": "es",
+    "french": "fr",
+    "german": "de",
+    "italian": "it",
+    "portuguese": "pt",
+    "russian": "ru",
+    "chinese": "zh",
+    "japanese": "ja",
+    "korean": "ko",
+    "polish": "pl",
+    "dutch": "nl",
+    "swedish": "sv",
+    "norwegian": "no",
+    "danish": "da",
+    "finnish": "fi",
+    "turkish": "tr",
+    "arabic": "ar",
+    "hebrew": "he",
+    "indonesian": "id",
+    "vietnamese": "vi",
+    "czech": "cs",
+    "hungarian": "hu",
+    "greek": "el",
+    "ukrainian": "uk",
+    "thai": "th",
+    "latin": "la",
+}
+
 
 def _build_ao3_search_url(query, filters, page=1):
     params = {}
@@ -356,6 +409,12 @@ def _build_ao3_search_url(query, filters, page=1):
     if crossover is not None:
         params["work_search[crossover]"] = crossover
 
+    category = resolve(filters.get("category"), AO3_CATEGORY, "category")
+    if category is not None:
+        # AO3 expects category_ids as an array param — urlencode handles
+        # the [] suffix when we feed it a list under the same key.
+        params["work_search[category_ids][]"] = category
+
     sort = resolve(filters.get("sort"), AO3_SORT, "sort")
     if sort is not None:
         params["work_search[sort_column]"] = sort
@@ -363,9 +422,20 @@ def _build_ao3_search_url(query, filters, page=1):
     if filters.get("single_chapter"):
         params["work_search[single_chapter]"] = 1
 
+    # Language: accept a pretty label from AO3_LANGUAGES, or a raw ISO
+    # code / numeric ID passed through verbatim.
+    lang_raw = filters.get("language")
+    if lang_raw:
+        lang_str = str(lang_raw).strip()
+        matched = None
+        for label, code in AO3_LANGUAGES.items():
+            if label.lower() == lang_str.lower():
+                matched = code
+                break
+        params["work_search[language_id]"] = matched if matched else lang_str
+
     # Free-text AO3 fields pass straight through
     for key, param in [
-        ("language", "work_search[language_id]"),
         ("fandom", "work_search[fandom_names]"),
         ("word_count", "work_search[word_count]"),
         ("character", "work_search[character_names]"),
@@ -483,11 +553,12 @@ def search_ao3(query, *, page=1, **filters):
 
     Keyword filters (all optional):
         rating: all / not rated / general / teen / mature / explicit
+        category: any / gen / f/m / m/m / f/f / multi / other
         complete: any / complete / in-progress
         crossover: any / only / exclude
         sort: best match / date updated / kudos / hits / ... (see AO3_SORT)
         single_chapter: truthy → one-shots only
-        language: ISO code (e.g. "en", "fr")
+        language: label ("english", "french") or raw ISO code ("en", "fr")
         fandom: fandom name(s) (AO3 accepts loose matching)
         word_count: range expression e.g. "<5000", ">10000", "1000-5000"
         character, relationship, freeform, title, creator: AO3 free-text fields
@@ -548,23 +619,171 @@ RR_LISTS = {
     "rising stars": "rising-stars",
 }
 
+# Royal Road genres and content tags. On RR these are the same field
+# under the hood (tagsAdd=<slug>) — "genres" is just the first 15 RR
+# assigns top-billing to. Split here for UX: users recognize "Fantasy"
+# as a genre and "LitRPG" as a tag.
+# Key = human-readable label; value = RR's slug for the tagsAdd param.
+RR_GENRES = {
+    "Action": "action",
+    "Adventure": "adventure",
+    "Comedy": "comedy",
+    "Contemporary": "contemporary",
+    "Drama": "drama",
+    "Fantasy": "fantasy",
+    "Historical": "historical",
+    "Horror": "horror",
+    "Mystery": "mystery",
+    "Psychological": "psychological",
+    "Romance": "romance",
+    "Satire": "satire",
+    "Sci-fi": "sci_fi",
+    "Short Story": "one_shot",
+    "Tragedy": "tragedy",
+}
+
+RR_TAGS = {
+    "Anti-Hero Lead": "anti-hero_lead",
+    "Artificial Intelligence": "artificial_intelligence",
+    "Attractive Lead": "attractive_lead",
+    "Cyberpunk": "cyberpunk",
+    "Dungeon": "dungeon",
+    "Dystopia": "dystopia",
+    "Female Lead": "female_lead",
+    "First Contact": "first_contact",
+    "GameLit": "gamelit",
+    "Gender Bender": "gender_bender",
+    "Genetically Engineered": "genetically_engineered",
+    "Grimdark": "grimdark",
+    "Hard Sci-fi": "hard_sci-fi",
+    "Harem": "harem",
+    "Hero": "hero",
+    "High Fantasy": "high_fantasy",
+    "LitRPG": "litrpg",
+    "Low Fantasy": "low_fantasy",
+    "Magic": "magic",
+    "Male Lead": "male_lead",
+    "Martial Arts": "martial_arts",
+    "Military": "military",
+    "Multiple Lead Characters": "multiple_lead",
+    "Mythos": "mythos",
+    "Non-Human Lead": "non-human_lead",
+    "Portal Fantasy / Isekai": "summoned_hero",
+    "Post Apocalyptic": "post_apocalyptic",
+    "Progression": "progression",
+    "Reader Interactive": "reader_interactive",
+    "Reincarnation": "reincarnation",
+    "Ruling Class": "ruling_class",
+    "School Life": "school_life",
+    "Secret Identity": "secret_identity",
+    "Slice of Life": "slice_of_life",
+    "Soft Sci-fi": "soft_sci-fi",
+    "Space Opera": "space_opera",
+    "Sports": "sports",
+    "Steampunk": "steampunk",
+    "Strategy": "strategy",
+    "Strong Lead": "strong_lead",
+    "Super Heroes": "super_heroes",
+    "Supernatural": "supernatural",
+    "Technologically Engineered": "technologically_engineered",
+    "Time Loop": "loop",
+    "Time Travel": "time_travel",
+    "Urban Fantasy": "urban_fantasy",
+    "Villainous Lead": "villainous_lead",
+    "Virtual Reality": "virtual_reality",
+    "War and Military": "war_and_military",
+    "Wuxia": "wuxia",
+    "Xianxia": "xianxia",
+}
+
+# Content warnings — RR submits these as warningsAdd params (separate
+# bucket from tagsAdd, though the UI looks identical).
+RR_WARNINGS = {
+    "Profanity": "profanity",
+    "Sexual Content": "sexuality",
+    "Gore": "gore",
+    "Traumatising Content": "traumatising",
+    "AI-Assisted Content": "ai_assisted",
+    "AI-Generated Content": "ai_generated",
+}
+
+
+def _rr_slug_list(raw, lookup=None):
+    """Split a comma/semicolon list into slugs, translating labels via
+    `lookup` (label → slug) when possible. Unknown entries pass through
+    verbatim so power users can hand-write RR's raw slugs.
+    """
+    if not raw:
+        return []
+    out = []
+    for piece in re.split(r"[,;]", str(raw)):
+        s = piece.strip()
+        if not s:
+            continue
+        if lookup:
+            # Case-insensitive label lookup
+            matched = None
+            for label, slug in lookup.items():
+                if label.lower() == s.lower():
+                    matched = slug
+                    break
+            out.append(matched if matched else s)
+        else:
+            out.append(s)
+    return out
+
+
+def _rr_positive_int(value, name):
+    """Coerce a user-supplied min/max filter value to int, or None when
+    blank. Rejects negatives and non-numeric input with ValueError.
+    """
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        n = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a whole number, got {value!r}")
+    if n < 0:
+        raise ValueError(f"{name} must be >= 0, got {n}")
+    return n
+
+
+def _collect_rr_tag_slugs(filters):
+    """Gather tagsAdd slugs from the three filter surfaces — genres,
+    tags, and the legacy free-text `tags` field — in a single list.
+    De-dupes so a user who selects "Fantasy" in genres and then also
+    types "fantasy" in tags doesn't send it twice.
+    """
+    seen = []
+    for source, lookup in (
+        ("genres", RR_GENRES),
+        ("tags_picked", RR_TAGS),
+        ("tags", None),
+    ):
+        for slug in _rr_slug_list(filters.get(source), lookup):
+            if slug and slug not in seen:
+                seen.append(slug)
+    return seen
+
 
 def _build_rr_search_url(query, filters, page=1):
     list_key = (filters.get("list") or "").strip().lower()
     list_slug = RR_LISTS.get(list_key)
+    tag_slugs = _collect_rr_tag_slugs(filters)
+    warning_slugs = _rr_slug_list(filters.get("warnings"), RR_WARNINGS)
+
     if list_slug:
-        # List endpoints ignore `title=`. Keep tagsAdd working so users
-        # can browse e.g. "Rising Stars tagged progression".
+        # List endpoints ignore `title=`. Keep tagsAdd / warningsAdd
+        # working so users can browse e.g. "Rising Stars tagged
+        # progression with gore warnings filtered in".
         params = {}
         if page and page > 1:
             params["page"] = int(page)
-        tag_list = []
-        if filters.get("tags"):
-            tag_list = [
-                t.strip() for t in str(filters["tags"]).split(",")
-                if t.strip()
-            ]
-        query_parts = list(params.items()) + [("tagsAdd", t) for t in tag_list]
+        query_parts = (
+            list(params.items())
+            + [("tagsAdd", t) for t in tag_slugs]
+            + [("warningsAdd", w) for w in warning_slugs]
+        )
         suffix = "?" + urlencode(query_parts) if query_parts else ""
         return RR_BASE + f"/fictions/{list_slug}" + suffix
 
@@ -582,13 +801,35 @@ def _build_rr_search_url(query, filters, page=1):
     order = (filters.get("order_by") or "").strip().lower()
     if order and order in RR_ORDER_BY and RR_ORDER_BY[order] != "relevance":
         params["orderBy"] = RR_ORDER_BY[order]
-    if filters.get("tags"):
-        tag_list = [t.strip() for t in str(filters["tags"]).split(",") if t.strip()]
+
+    for key, param in (
+        ("min_words", "minWords"),
+        ("max_words", "maxWords"),
+        ("min_pages", "minPages"),
+        ("max_pages", "maxPages"),
+    ):
+        n = _rr_positive_int(filters.get(key), key)
+        if n is not None:
+            params[param] = n
+
+    # Rating is 0.0–5.0 on RR; pass through as-is when non-empty.
+    rating_raw = filters.get("min_rating")
+    if rating_raw is not None and str(rating_raw).strip() != "":
+        try:
+            rating = float(str(rating_raw).strip())
+        except (TypeError, ValueError):
+            raise ValueError(f"min_rating must be a number, got {rating_raw!r}")
+        if rating < 0 or rating > 5:
+            raise ValueError(f"min_rating must be between 0 and 5, got {rating}")
+        params["minRating"] = rating
+
+    if tag_slugs or warning_slugs:
         return (
             RR_BASE + "/fictions/search?" +
             urlencode(
                 list(params.items())
-                + [("tagsAdd", t) for t in tag_list]
+                + [("tagsAdd", t) for t in tag_slugs]
+                + [("warningsAdd", w) for w in warning_slugs]
             )
         )
     return RR_BASE + "/fictions/search?" + urlencode(params)
@@ -710,7 +951,16 @@ def search_royalroad(query, *, page=1, **filters):
         status:   any / ongoing / hiatus / completed / dropped / stub
         type:     any / original / fanfiction
         order_by: relevance / popularity / last update / pages / rating / title
-        tags:     comma-separated tag list (e.g. "progression,magic")
+        genres:   comma-separated RR genre labels (see RR_GENRES, e.g.
+                  "Fantasy,Sci-fi"). Accepts raw slugs too.
+        tags_picked: comma-separated RR tag labels (see RR_TAGS, e.g.
+                  "LitRPG,Progression"). Accepts raw slugs too.
+        tags:     legacy free-text tag list (raw slugs, e.g. "progression,magic")
+        warnings: comma-separated warning labels (see RR_WARNINGS) —
+                  selects fictions that carry each listed warning.
+        min_words / max_words: word-count bounds (integer).
+        min_pages / max_pages: page-count bounds (integer).
+        min_rating: minimum average rating 0.0-5.0.
         list:     search (default) / best rated / trending / active popular /
                   weekly popular / monthly popular / latest updates /
                   new releases / complete / rising stars
@@ -718,7 +968,8 @@ def search_royalroad(query, *, page=1, **filters):
     `page` (keyword-only) selects a specific results page. When `list` is
     set to one of the non-search values, the free-text query is ignored
     and the corresponding RR discovery page is browsed instead; `tags`
-    still filters, but `status`/`type`/`order_by` do not apply.
+    and `warnings` still filter, but `status`/`type`/`order_by` and the
+    min/max numeric filters do not apply to list-browse endpoints.
     """
     url = _build_rr_search_url(query, filters, page=page)
     session = curl_requests.Session(impersonate="chrome")
@@ -1032,18 +1283,74 @@ def collapse_literotica_series(results):
     return collapsed
 
 
+LIT_CATEGORIES = {
+    "any": None,
+    # Literotica's top-level category slugs also exist as tag slugs on
+    # tags.literotica.com, so we reuse the tag-browse URL rather than
+    # fetching /c/<slug> (which is paginated differently and doesn't
+    # expose schema.org microdata per card).
+    "Anal": "anal",
+    "BDSM": "bdsm",
+    "Celebrities & Fan Fiction": "celeb",
+    "Chain Stories": "chain-story",
+    "Erotic Couplings": "erotic-couplings",
+    "Erotic Horror": "erotic-horror",
+    "Exhibitionist & Voyeur": "exhibitionist",
+    "Fetish": "fetish",
+    "First Time": "first-time",
+    "Gay Male": "gay-male",
+    "Group Sex": "group-sex",
+    "How To": "how-to",
+    "Humor & Satire": "humor",
+    "Illustrated": "illustrated",
+    "Incest/Taboo": "incest",
+    "Interracial Love": "interracial",
+    "Lesbian Sex": "lesbian",
+    "Letters & Transcripts": "letters",
+    "Loving Wives": "loving-wives",
+    "Mature": "mature",
+    "Mind Control": "mind-control",
+    "Non-consent/Reluctance": "non-consent",
+    "Non-English": "non-english",
+    "Novels and Novellas": "novel",
+    "Reviews & Essays": "reviews-essays",
+    "Romance": "romance",
+    "Sci-Fi & Fantasy": "sci-fi-fantasy",
+    "Toys & Masturbation": "toys",
+    "Transgender & Crossdressers": "transgender",
+}
+
+
 def search_literotica(query, *, page=1, **filters):
-    """Search Literotica by tag. `query` is converted to a tag slug
-    (lowercased, whitespace → hyphens) and looked up on
+    """Search Literotica by tag or category. `query` is converted to a
+    tag slug (lowercased, whitespace → hyphens) and looked up on
     tags.literotica.com — the server-rendered alternative to
     Literotica's JS-only keyword search.
+
+    Keyword filters (optional):
+        category: picks one of Literotica's top-level categories from
+                  LIT_CATEGORIES. When set, the category slug is used
+                  instead of the query — browsing e.g. "Loving Wives"
+                  standalone instead of searching for a user-typed tag.
 
     Unknown tags return no results; the response is still a 200 page,
     just without story cards.
 
     `page` (keyword-only) selects a specific results page.
     """
-    slug = _literotica_tag_slug(query)
+    cat_raw = filters.get("category") if filters else None
+    slug = None
+    if cat_raw:
+        cat_str = str(cat_raw).strip()
+        for label, cat_slug in LIT_CATEGORIES.items():
+            if cat_slug and label.lower() == cat_str.lower():
+                slug = cat_slug
+                break
+        if slug is None and cat_str.lower() not in ("", "any"):
+            # Pass-through for users who type a raw slug.
+            slug = _literotica_tag_slug(cat_str) or None
+    if slug is None:
+        slug = _literotica_tag_slug(query)
     if not slug:
         return []
     url = f"{LIT_TAGS_BASE}/{slug}"

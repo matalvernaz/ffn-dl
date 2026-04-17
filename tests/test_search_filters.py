@@ -390,3 +390,168 @@ class TestCollapseLiteroticaSeries:
         collapsed = collapse_literotica_series(results)
         assert len(collapsed) == 1
         assert collapsed[0].get("is_series") is True
+
+
+class TestExpandedRRFilters:
+    def test_genres_label_resolves_to_tagsadd(self):
+        from ffn_dl.search import _build_rr_search_url
+        url = _build_rr_search_url(
+            "dungeon", {"genres": "Fantasy, Sci-fi"},
+        )
+        assert "tagsAdd=fantasy" in url
+        assert "tagsAdd=sci_fi" in url
+
+    def test_tags_picked_label_resolves_to_tagsadd(self):
+        from ffn_dl.search import _build_rr_search_url
+        url = _build_rr_search_url(
+            "dungeon", {"tags_picked": "LitRPG, Progression"},
+        )
+        assert "tagsAdd=litrpg" in url
+        assert "tagsAdd=progression" in url
+
+    def test_warnings_label_resolves_to_warningsadd(self):
+        from ffn_dl.search import _build_rr_search_url
+        url = _build_rr_search_url(
+            "dungeon", {"warnings": "Gore, Profanity"},
+        )
+        assert "warningsAdd=gore" in url
+        assert "warningsAdd=profanity" in url
+
+    def test_raw_slug_passthrough(self):
+        from ffn_dl.search import _build_rr_search_url
+        url = _build_rr_search_url(
+            "dungeon", {"tags_picked": "raw_unknown_slug"},
+        )
+        # Unknown labels are passed through verbatim — power users
+        # hand-typing RR slugs shouldn't be blocked by the canonical list.
+        assert "tagsAdd=raw_unknown_slug" in url
+
+    def test_duplicate_slugs_deduped_across_sources(self):
+        from ffn_dl.search import _build_rr_search_url
+        url = _build_rr_search_url(
+            "dungeon",
+            {"genres": "Fantasy", "tags_picked": "Fantasy", "tags": "fantasy"},
+        )
+        # Fantasy appears once across genres/tags_picked/free-text.
+        assert url.count("tagsAdd=fantasy") == 1
+
+    def test_numeric_bounds_pass_through(self):
+        from ffn_dl.search import _build_rr_search_url
+        url = _build_rr_search_url(
+            "dungeon",
+            {
+                "min_words": "50000",
+                "max_words": "500000",
+                "min_pages": "200",
+                "min_rating": "4.2",
+            },
+        )
+        assert "minWords=50000" in url
+        assert "maxWords=500000" in url
+        assert "minPages=200" in url
+        assert "minRating=4.2" in url
+
+    def test_min_rating_out_of_range_raises(self):
+        import pytest
+        from ffn_dl.search import _build_rr_search_url
+        with pytest.raises(ValueError):
+            _build_rr_search_url("x", {"min_rating": "9.0"})
+
+    def test_min_words_non_numeric_raises(self):
+        import pytest
+        from ffn_dl.search import _build_rr_search_url
+        with pytest.raises(ValueError):
+            _build_rr_search_url("x", {"min_words": "lots"})
+
+    def test_list_browse_keeps_new_tags_and_warnings(self):
+        from ffn_dl.search import _build_rr_search_url
+        url = _build_rr_search_url(
+            "", {
+                "list": "rising stars",
+                "genres": "Fantasy",
+                "warnings": "Gore",
+            },
+        )
+        assert "/fictions/rising-stars?" in url
+        assert "tagsAdd=fantasy" in url
+        assert "warningsAdd=gore" in url
+
+
+class TestAO3CategoryAndLanguage:
+    def test_category_resolves(self):
+        from ffn_dl.search import _build_ao3_search_url
+        url = _build_ao3_search_url("foo", {"category": "m/m"})
+        # m/m is id 23 — urlencode escapes the [] in the param name.
+        assert "category_ids" in url
+        assert "=23" in url
+
+    def test_language_label_resolves_to_code(self):
+        from ffn_dl.search import _build_ao3_search_url
+        url = _build_ao3_search_url("foo", {"language": "French"})
+        assert "language_id" in url
+        assert "fr" in url
+
+    def test_language_raw_code_passes_through(self):
+        from ffn_dl.search import _build_ao3_search_url
+        url = _build_ao3_search_url("foo", {"language": "ja"})
+        assert "ja" in url
+
+
+class TestFFNGenre2:
+    def test_second_genre_adds_genreid2(self):
+        from ffn_dl.search import _build_search_url
+        url = _build_search_url(
+            "foo", {"genre": "romance", "genre2": "angst"},
+        )
+        assert "genreid=2" in url
+        assert "genreid2=10" in url
+
+
+class TestLiteroticaCategory:
+    def test_category_overrides_query(self, monkeypatch):
+        # We don't want to hit the network; stub the session.get.
+        import ffn_dl.search as S
+
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+            text = "<html></html>"
+
+        class FakeSession:
+            def get(self, url, timeout=30, allow_redirects=True):
+                captured["url"] = url
+                return FakeResp()
+
+        class FakeRequests:
+            @staticmethod
+            def Session(impersonate="chrome"):
+                return FakeSession()
+
+        monkeypatch.setattr(S, "curl_requests", FakeRequests)
+        S.search_literotica("ignored", category="Loving Wives")
+        assert "loving-wives" in captured["url"]
+
+    def test_category_unknown_label_falls_back_to_slug(self, monkeypatch):
+        import ffn_dl.search as S
+
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+            text = "<html></html>"
+
+        class FakeSession:
+            def get(self, url, timeout=30, allow_redirects=True):
+                captured["url"] = url
+                return FakeResp()
+
+        class FakeRequests:
+            @staticmethod
+            def Session(impersonate="chrome"):
+                return FakeSession()
+
+        monkeypatch.setattr(S, "curl_requests", FakeRequests)
+        S.search_literotica("", category="Cuckold Husband")
+        # Unknown → slugified ("cuckold-husband").
+        assert "cuckold-husband" in captured["url"]
