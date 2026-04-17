@@ -20,6 +20,7 @@ _FFN_URL_RE = re.compile(
     r"|(?:archiveofourown\.org|ao3\.org)/works/\d+"
     r"|royalroad\.com/fiction/\d+"
     r"|mediaminer\.org/fanfic/(?:view_st\.php/\d+|s/[^?#\s]+?/\d+)"
+    r"|literotica\.com/s/[a-z0-9-]+"
     r")"
 )
 
@@ -885,6 +886,7 @@ class MainFrame(wx.Frame):
     def _scraper_for(self, url):
         from .ao3 import AO3Scraper
         from .ficwad import FicWadScraper
+        from .literotica import LiteroticaScraper
         from .mediaminer import MediaMinerScraper
         from .royalroad import RoyalRoadScraper
         from .scraper import FFNScraper
@@ -898,6 +900,8 @@ class MainFrame(wx.Frame):
             return RoyalRoadScraper()
         if "mediaminer.org" in text:
             return MediaMinerScraper()
+        if "literotica.com" in text:
+            return LiteroticaScraper()
         return FFNScraper()
 
     def _export_story(self, story):
@@ -928,6 +932,7 @@ class MainFrame(wx.Frame):
     def _run_download(self, url, skip_chapters=0, is_update=False):
         try:
             from .ao3 import AO3Scraper
+            from .literotica import LiteroticaScraper
 
             scraper = self._scraper_for(url)
 
@@ -935,9 +940,15 @@ class MainFrame(wx.Frame):
                 self._run_author_download(url, scraper)
                 return
 
-            if not is_update and AO3Scraper.is_series_url(url):
-                if not isinstance(scraper, AO3Scraper):
+            if not is_update and (
+                AO3Scraper.is_series_url(url)
+                or LiteroticaScraper.is_series_url(url)
+            ):
+                # Ensure scraper matches the series host
+                if AO3Scraper.is_series_url(url) and not isinstance(scraper, AO3Scraper):
                     scraper = AO3Scraper()
+                elif LiteroticaScraper.is_series_url(url) and not isinstance(scraper, LiteroticaScraper):
+                    scraper = LiteroticaScraper()
                 self._run_series_download(url, scraper)
                 return
 

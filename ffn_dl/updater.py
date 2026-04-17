@@ -124,6 +124,7 @@ def extract_source_url(filepath):
         r"|(?:archiveofourown\.org|ao3\.org)/works/\d+"
         r"|royalroad\.com/fiction/\d+"
         r"|mediaminer\.org/fanfic/(?:view_st\.php/\d+|s/[^?#\s]+?/\d+)"
+        r"|literotica\.com/s/[a-z0-9-]+"
         r")",
         text,
     )

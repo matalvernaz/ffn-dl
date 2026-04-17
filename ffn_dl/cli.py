@@ -9,6 +9,7 @@ from pathlib import Path
 from .ao3 import AO3LockedError, AO3Scraper
 from .exporters import DEFAULT_TEMPLATE, EXPORTERS
 from .ficwad import FicWadScraper
+from .literotica import LiteroticaScraper
 from .mediaminer import MediaMinerScraper
 from .models import parse_chapter_spec
 from .royalroad import RoyalRoadScraper
@@ -32,6 +33,8 @@ def _detect_site(url):
         return RoyalRoadScraper
     if "mediaminer.org" in text:
         return MediaMinerScraper
+    if "literotica.com" in text:
+        return LiteroticaScraper
     return FFNScraper
 
 
@@ -43,12 +46,13 @@ def _is_author_url(url):
         or AO3Scraper.is_author_url(url)
         or RoyalRoadScraper.is_author_url(url)
         or MediaMinerScraper.is_author_url(url)
+        or LiteroticaScraper.is_author_url(url)
     )
 
 
 def _is_series_url(url):
-    """Return True if the URL points to an AO3 series."""
-    return AO3Scraper.is_series_url(url)
+    """Return True if the URL points to a series (AO3 or Literotica)."""
+    return AO3Scraper.is_series_url(url) or LiteroticaScraper.is_series_url(url)
 
 
 def _scrape_author_stories(url, args):
@@ -130,11 +134,10 @@ def _merge_stories(series_name, series_url, stories):
 
 
 def _handle_merge_series(series_urls, args, output_dir):
-    """Download each AO3 series URL, merge its works, and export as one file."""
-    from .ao3 import AO3Scraper
-    scraper = AO3Scraper()
+    """Download each series URL (AO3 or Literotica), merge its works, export as one file."""
     all_ok = True
     for series_url in series_urls:
+        scraper = _build_scraper(series_url, args)
         try:
             series_name, work_urls = scraper.scrape_series_works(series_url)
         except (RateLimitError, CloudflareBlockError, StoryNotFoundError) as exc:
@@ -154,8 +157,9 @@ def _handle_merge_series(series_urls, args, output_dir):
             def progress(current, total, title, cached):
                 tag = " (cached)" if cached else ""
                 print(f"      [{current}/{total}] {title}{tag}")
+            work_scraper = _build_scraper(work_url, args)
             try:
-                story = scraper.download(work_url, progress_callback=progress)
+                story = work_scraper.download(work_url, progress_callback=progress)
                 stories.append(story)
             except Exception as exc:
                 print(f"    Error: {exc}", file=sys.stderr)
@@ -344,6 +348,9 @@ _RR_URL_RE = re.compile(
 _MM_URL_RE = re.compile(
     r"https?://(?:www\.)?mediaminer\.org/fanfic/"
     r"(?:view_st\.php/\d+|s/[^?#\s]+?/\d+)", re.I
+)
+_LIT_URL_RE = re.compile(
+    r"https?://(?:www\.)?literotica\.com/s/[a-z0-9-]+", re.I
 )
 
 
@@ -666,7 +673,7 @@ def _handle_watch(args):
             # Check if clipboard contains a supported URL
             url = None
             for pattern in (_FFN_URL_RE, _FICWAD_URL_RE, _AO3_URL_RE,
-                            _RR_URL_RE, _MM_URL_RE):
+                            _RR_URL_RE, _MM_URL_RE, _LIT_URL_RE):
                 match = pattern.search(clip)
                 if match:
                     url = match.group(0)
@@ -697,7 +704,8 @@ def main(argv=None):
         description="Download fanfiction from fanfiction.net and ficwad.com",
         epilog=(
             "Supported sites: fanfiction.net, ficwad.com, "
-            "archiveofourown.org, royalroad.com, mediaminer.org\n"
+            "archiveofourown.org, royalroad.com, mediaminer.org, "
+            "literotica.com\n"
             "Name template placeholders: "
             "{title} {author} {id} {words} {status} {rating} {language} {chapters}"
         ),
