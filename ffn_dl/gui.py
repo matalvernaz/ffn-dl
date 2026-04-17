@@ -14,68 +14,110 @@ _FFN_URL_RE = re.compile(
     r"https?://(?:www\.)?(?:fanfiction\.net/s/\d+|ficwad\.com/story/\d+)"
 )
 
+_SEARCH_COLUMNS = [
+    ("Title", 260),
+    ("Author", 120),
+    ("Fandom", 160),
+    ("Words", 70),
+    ("Ch", 40),
+    ("Rating", 60),
+    ("Status", 90),
+]
+
 
 class MainFrame(wx.Frame):
     def __init__(self):
         super().__init__(
             None,
             title="ffn-dl - Fanfiction Downloader",
-            size=(620, 560),
+            size=(760, 680),
             style=wx.DEFAULT_FRAME_STYLE,
         )
         self._downloading = False
         self._watching = False
         self._watch_seen = set()
         self._last_clip = ""
+        self._search_results = []
         self._build_ui()
         self.Centre()
 
     def _build_ui(self):
-        panel = wx.Panel(self)
+        root = wx.Panel(self)
+        root_sizer = wx.BoxSizer(wx.VERTICAL)
+        pad = 6
+
+        # ── Notebook with Download / Search tabs ─────────────
+        self.notebook = wx.Notebook(root)
+        self.notebook.SetName("Mode tabs")
+
+        self._build_download_tab(self.notebook)
+        self._build_search_tab(self.notebook)
+
+        root_sizer.Add(self.notebook, 0, wx.EXPAND | wx.ALL, pad)
+
+        # ── Shared options (format / filename / output folder) ─
+        opts = wx.BoxSizer(wx.HORIZONTAL)
+
+        opts.Add(wx.StaticText(root, label="&Format:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.format_ctrl = wx.Choice(root, choices=["epub", "html", "txt", "audio"])
+        self.format_ctrl.SetSelection(0)
+        self.format_ctrl.SetName("Format")
+        opts.Add(self.format_ctrl, 0, wx.RIGHT, 16)
+
+        opts.Add(wx.StaticText(root, label="File&name template:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.name_ctrl = wx.TextCtrl(root, value="{title} - {author}", size=(200, -1))
+        self.name_ctrl.SetName("Filename template")
+        opts.Add(self.name_ctrl, 1)
+
+        root_sizer.Add(opts, 0, wx.EXPAND | wx.ALL, pad)
+
+        out_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        out_sizer.Add(wx.StaticText(root, label="&Save to:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        default_dir = str(Path.home() / "Downloads")
+        self.output_ctrl = wx.TextCtrl(root, value=default_dir)
+        self.output_ctrl.SetName("Save to folder")
+        out_sizer.Add(self.output_ctrl, 1, wx.RIGHT, 4)
+
+        browse_btn = wx.Button(root, label="&Browse...")
+        browse_btn.Bind(wx.EVT_BUTTON, self._on_browse)
+        out_sizer.Add(browse_btn, 0)
+
+        root_sizer.Add(out_sizer, 0, wx.EXPAND | wx.ALL, pad)
+
+        # ── Status log ───────────────────────────────────────
+        root_sizer.Add(wx.StaticText(root, label="S&tatus:"), 0, wx.LEFT | wx.TOP, pad)
+        self.log_ctrl = wx.TextCtrl(
+            root,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
+        )
+        self.log_ctrl.SetName("Status log")
+        root_sizer.Add(self.log_ctrl, 1, wx.EXPAND | wx.ALL, pad)
+
+        root.SetSizer(root_sizer)
+
+        # Accelerators
+        accel = wx.AcceleratorTable([
+            (wx.ACCEL_CTRL, ord("D"), self.dl_btn.GetId()),
+            (wx.ACCEL_CTRL, ord("U"), self.update_btn.GetId()),
+            (wx.ACCEL_CTRL, ord("W"), self.watch_btn.GetId()),
+        ])
+        self.SetAcceleratorTable(accel)
+
+        # Timer for clipboard polling (2 second interval)
+        self._clip_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_clip_timer, self._clip_timer)
+
+    def _build_download_tab(self, notebook):
+        panel = wx.Panel(notebook)
         sizer = wx.BoxSizer(wx.VERTICAL)
         pad = 6
 
-        # ── URL ──────────────────────────────────────────────
         sizer.Add(wx.StaticText(panel, label="Story &URL or ID:"), 0, wx.LEFT | wx.TOP, pad)
         self.url_ctrl = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
         self.url_ctrl.SetName("Story URL or ID")
         self.url_ctrl.Bind(wx.EVT_TEXT_ENTER, self._on_download)
         sizer.Add(self.url_ctrl, 0, wx.EXPAND | wx.ALL, pad)
 
-        # ── Options row ──────────────────────────────────────
-        opts = wx.BoxSizer(wx.HORIZONTAL)
-
-        opts.Add(wx.StaticText(panel, label="&Format:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        self.format_ctrl = wx.Choice(
-            panel, choices=["epub", "html", "txt", "audio"]
-        )
-        self.format_ctrl.SetSelection(0)
-        self.format_ctrl.SetName("Format")
-        opts.Add(self.format_ctrl, 0, wx.RIGHT, 16)
-
-        opts.Add(wx.StaticText(panel, label="File&name template:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        self.name_ctrl = wx.TextCtrl(panel, value="{title} - {author}", size=(200, -1))
-        self.name_ctrl.SetName("Filename template")
-        opts.Add(self.name_ctrl, 1)
-
-        sizer.Add(opts, 0, wx.EXPAND | wx.ALL, pad)
-
-        # ── Output folder ────────────────────────────────────
-        out_sizer = wx.BoxSizer(wx.HORIZONTAL)
-
-        out_sizer.Add(wx.StaticText(panel, label="&Save to:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        default_dir = str(Path.home() / "Downloads")
-        self.output_ctrl = wx.TextCtrl(panel, value=default_dir)
-        self.output_ctrl.SetName("Save to folder")
-        out_sizer.Add(self.output_ctrl, 1, wx.RIGHT, 4)
-
-        browse_btn = wx.Button(panel, label="&Browse...")
-        browse_btn.Bind(wx.EVT_BUTTON, self._on_browse)
-        out_sizer.Add(browse_btn, 0)
-
-        sizer.Add(out_sizer, 0, wx.EXPAND | wx.ALL, pad)
-
-        # ── Buttons ──────────────────────────────────────────
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
         self.dl_btn = wx.Button(panel, label="&Download")
@@ -93,29 +135,61 @@ class MainFrame(wx.Frame):
         btn_sizer.Add(self.watch_btn, 0)
 
         sizer.Add(btn_sizer, 0, wx.ALL, pad)
-
-        # ── Status log ───────────────────────────────────────
-        sizer.Add(wx.StaticText(panel, label="S&tatus:"), 0, wx.LEFT | wx.TOP, pad)
-        self.log_ctrl = wx.TextCtrl(
-            panel,
-            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
-        )
-        self.log_ctrl.SetName("Status log")
-        sizer.Add(self.log_ctrl, 1, wx.EXPAND | wx.ALL, pad)
+        sizer.AddStretchSpacer(1)
 
         panel.SetSizer(sizer)
+        notebook.AddPage(panel, "Download")
 
-        # Accelerators
-        accel = wx.AcceleratorTable([
-            (wx.ACCEL_CTRL, ord("D"), self.dl_btn.GetId()),
-            (wx.ACCEL_CTRL, ord("U"), self.update_btn.GetId()),
-            (wx.ACCEL_CTRL, ord("W"), self.watch_btn.GetId()),
-        ])
-        self.SetAcceleratorTable(accel)
+    def _build_search_tab(self, notebook):
+        panel = wx.Panel(notebook)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        pad = 6
 
-        # Timer for clipboard polling (2 second interval)
-        self._clip_timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, self._on_clip_timer, self._clip_timer)
+        # Query row
+        q_row = wx.BoxSizer(wx.HORIZONTAL)
+        q_row.Add(wx.StaticText(panel, label="&Query:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.search_ctrl = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
+        self.search_ctrl.SetName("Search query")
+        self.search_ctrl.Bind(wx.EVT_TEXT_ENTER, self._on_search)
+        q_row.Add(self.search_ctrl, 1, wx.RIGHT, 4)
+
+        self.search_btn = wx.Button(panel, label="S&earch")
+        self.search_btn.Bind(wx.EVT_BUTTON, self._on_search)
+        q_row.Add(self.search_btn, 0)
+
+        sizer.Add(q_row, 0, wx.EXPAND | wx.ALL, pad)
+
+        # Results list
+        sizer.Add(wx.StaticText(panel, label="&Results:"), 0, wx.LEFT | wx.TOP, pad)
+        self.results_ctrl = wx.ListCtrl(
+            panel,
+            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SUNKEN,
+        )
+        self.results_ctrl.SetName("Search results")
+        for i, (label, width) in enumerate(_SEARCH_COLUMNS):
+            self.results_ctrl.InsertColumn(i, label, width=width)
+        self.results_ctrl.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_result_select)
+        self.results_ctrl.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_result_activate)
+        sizer.Add(self.results_ctrl, 1, wx.EXPAND | wx.ALL, pad)
+
+        # Summary
+        sizer.Add(wx.StaticText(panel, label="S&ummary:"), 0, wx.LEFT | wx.TOP, pad)
+        self.summary_ctrl = wx.TextCtrl(
+            panel,
+            style=wx.TE_MULTILINE | wx.TE_READONLY,
+            size=(-1, 80),
+        )
+        self.summary_ctrl.SetName("Story summary")
+        sizer.Add(self.summary_ctrl, 0, wx.EXPAND | wx.ALL, pad)
+
+        # Download selected
+        self.search_dl_btn = wx.Button(panel, label="Do&wnload Selected")
+        self.search_dl_btn.Bind(wx.EVT_BUTTON, self._on_search_download)
+        self.search_dl_btn.Disable()
+        sizer.Add(self.search_dl_btn, 0, wx.ALL, pad)
+
+        panel.SetSizer(sizer)
+        notebook.AddPage(panel, "Search")
 
     # ── Helpers ───────────────────────────────────────────────
 
@@ -127,6 +201,10 @@ class MainFrame(wx.Frame):
             self._downloading = busy
             self.dl_btn.Enable(not busy)
             self.update_btn.Enable(not busy)
+            self.search_btn.Enable(not busy)
+            # Search-download button only re-enables if something is selected
+            has_selection = self.results_ctrl.GetFirstSelected() != -1
+            self.search_dl_btn.Enable(not busy and has_selection)
         wx.CallAfter(_update)
 
     # ── Browse ───────────────────────────────────────────────
@@ -191,6 +269,88 @@ class MainFrame(wx.Frame):
             target=self._run_download, args=(url,),
             kwargs={"skip_chapters": existing, "is_update": True},
             daemon=True,
+        ).start()
+
+    # ── Search ───────────────────────────────────────────────
+
+    def _on_search(self, event):
+        query = self.search_ctrl.GetValue().strip()
+        if not query:
+            self._log("Error: Please enter a search query.")
+            return
+        if self._downloading:
+            return
+        self._set_busy(True)
+        self.results_ctrl.DeleteAllItems()
+        self.summary_ctrl.SetValue("")
+        self._search_results = []
+        self._log(f"Searching fanfiction.net for: {query}")
+        threading.Thread(
+            target=self._run_search, args=(query,), daemon=True,
+        ).start()
+
+    def _run_search(self, query):
+        try:
+            from .search import search_ffn
+            results = search_ffn(query)
+        except Exception as e:
+            self._log(f"Search error: {e}")
+            self._set_busy(False)
+            return
+
+        wx.CallAfter(self._populate_results, results)
+        self._set_busy(False)
+
+    def _populate_results(self, results):
+        self._search_results = results
+        self.results_ctrl.DeleteAllItems()
+        if not results:
+            self._log("No results found.")
+            return
+
+        for r in results:
+            row = self.results_ctrl.InsertItem(
+                self.results_ctrl.GetItemCount(), r["title"]
+            )
+            self.results_ctrl.SetItem(row, 1, r["author"])
+            self.results_ctrl.SetItem(row, 2, r["fandom"])
+            self.results_ctrl.SetItem(row, 3, str(r["words"]))
+            self.results_ctrl.SetItem(row, 4, str(r["chapters"]))
+            self.results_ctrl.SetItem(row, 5, r["rating"])
+            self.results_ctrl.SetItem(row, 6, r["status"])
+
+        self._log(f"Found {len(results)} results.")
+        # Move focus to the results list so keyboard users land on the list
+        self.results_ctrl.SetFocus()
+        self.results_ctrl.Focus(0)
+        self.results_ctrl.Select(0)
+
+    def _on_result_select(self, event):
+        idx = event.GetIndex()
+        if 0 <= idx < len(self._search_results):
+            r = self._search_results[idx]
+            self.summary_ctrl.SetValue(r.get("summary", "") or "(no summary)")
+            self.search_dl_btn.Enable(not self._downloading)
+        event.Skip()
+
+    def _on_result_activate(self, event):
+        # Enter / double-click on a result → download it
+        self._on_search_download(event)
+
+    def _on_search_download(self, event):
+        idx = self.results_ctrl.GetFirstSelected()
+        if idx < 0 or idx >= len(self._search_results):
+            return
+        url = self._search_results[idx]["url"]
+        if not url:
+            self._log("Error: selected result has no URL.")
+            return
+        if self._downloading:
+            return
+        self._set_busy(True)
+        self._log(f"Starting download: {url}")
+        threading.Thread(
+            target=self._run_download, args=(url,), daemon=True
         ).start()
 
     # ── Clipboard watch ──────────────────────────────────────
