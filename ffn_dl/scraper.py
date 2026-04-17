@@ -378,25 +378,29 @@ class FFNScraper(BaseScraper):
     def scrape_author_stories(self, url):
         """Fetch an FFN author page and return (author_name, [story_urls]).
 
-        The author page lists all stories as links matching /s/{id}/...
+        FFN author pages have separate sections: #st_inside (the author's
+        own stories), #fs_inside (favourite stories), and #fa (favourite
+        authors). Scope the search to the own-stories section so we don't
+        accidentally download the author's favourites — a recurring
+        complaint in the downloader community.
         """
         html = self._fetch(url)
         soup = BeautifulSoup(html, "lxml")
 
-        # Author name from the page title or the span#content_wrapper_inner
         author_name = "Unknown Author"
-        # FFN author pages have the author name in a span inside the content area
         title_tag = soup.find("title")
         if title_tag:
-            # Title format: "AuthorName | FanFiction"
             title_text = title_tag.get_text(strip=True)
             if "|" in title_text:
                 author_name = title_text.split("|")[0].strip()
 
-        # Find all story links — they match /s/{id}
+        # Preferred: scope to the own-stories container.
+        own_container = soup.find("div", id="st_inside")
+        container = own_container or soup
+
         seen_ids = set()
         story_urls = []
-        for a_tag in soup.find_all("a", href=re.compile(r"^/s/\d+")):
+        for a_tag in container.find_all("a", href=re.compile(r"^/s/\d+")):
             match = re.search(r"/s/(\d+)", a_tag["href"])
             if match:
                 story_id = match.group(1)

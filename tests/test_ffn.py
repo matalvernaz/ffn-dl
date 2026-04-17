@@ -1,5 +1,7 @@
 """FFN scraper — URL parsing, metadata, search, author URL variants."""
 
+from unittest import mock
+
 from bs4 import BeautifulSoup
 
 from ffn_dl.scraper import FFNScraper
@@ -41,6 +43,53 @@ class TestMetadataParsing:
         assert meta["num_chapters"] >= 1
         # Every chapter dropdown entry must produce a title entry
         assert len(meta["chapter_titles"]) == meta["num_chapters"]
+
+
+class TestAuthorPageScoping:
+    def test_own_stories_excludes_favourites(self):
+        """Regression: FFN author pages list own stories in #st_inside
+        and favourites in #fs_inside. scrape_author_stories must not
+        pick up favourites."""
+        html = """
+        <html><body>
+          <title>SomeAuthor | FanFiction</title>
+          <div id="st_inside">
+            <a href="/s/111/1/Mine-1">Mine 1</a>
+            <a href="/s/222/1/Mine-2">Mine 2</a>
+          </div>
+          <div id="fs_inside">
+            <a href="/s/999/1/Fav-1">Fav 1</a>
+            <a href="/s/888/1/Fav-2">Fav 2</a>
+          </div>
+          <div id="fa"><a href="/u/42">Other Author</a></div>
+        </body></html>
+        """
+        scraper = FFNScraper(use_cache=False)
+        with mock.patch.object(scraper, "_fetch", return_value=html):
+            name, stories = scraper.scrape_author_stories(
+                "https://www.fanfiction.net/u/1"
+            )
+        ids = [u.rsplit("/", 1)[-1] for u in stories]
+        assert ids == ["111", "222"]
+        assert "999" not in ids
+        assert "888" not in ids
+
+    def test_falls_back_to_full_page_when_container_missing(self):
+        """Older or malformed author pages without #st_inside still work
+        — we don't want to silently return zero stories."""
+        html = """
+        <html><body>
+          <title>Old Author | FanFiction</title>
+          <a href="/s/777/1/Only-Story">Only</a>
+        </body></html>
+        """
+        scraper = FFNScraper(use_cache=False)
+        with mock.patch.object(scraper, "_fetch", return_value=html):
+            name, stories = scraper.scrape_author_stories(
+                "https://www.fanfiction.net/u/2"
+            )
+        assert len(stories) == 1
+        assert stories[0].endswith("/s/777")
 
 
 class TestSearchParsing:
