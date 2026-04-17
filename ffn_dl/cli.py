@@ -356,7 +356,7 @@ _LIT_URL_RE = re.compile(
 
 def _handle_search(args):
     """Interactive search mode: search the chosen site, display results, download on pick."""
-    from .search import search_ao3, search_ffn, search_royalroad
+    from .search import search_ao3, search_ffn, search_literotica, search_royalroad
 
     if args.site == "ao3":
         site_label = "archiveofourown.org"
@@ -382,6 +382,10 @@ def _handle_search(args):
             "tags": getattr(args, "rr_tags", None),
         }
         search_fn = search_royalroad
+    elif args.site == "literotica":
+        site_label = "literotica.com (tag browse)"
+        filters = {"page": getattr(args, "lit_page", None)}
+        search_fn = search_literotica
     else:
         site_label = "fanfiction.net"
         filters = {
@@ -920,13 +924,17 @@ def main(argv=None):
         "-s",
         "--search",
         metavar="QUERY",
-        help="Search for stories matching QUERY (see --site to pick FFN, AO3, or Royal Road)",
+        help="Search for stories matching QUERY (see --site to pick FFN, AO3, Royal Road, or Literotica)",
     )
     parser.add_argument(
         "--site",
-        choices=["ffn", "ao3", "royalroad"],
+        choices=["ffn", "ao3", "royalroad", "literotica"],
         default="ffn",
-        help="Which site to search (default: ffn)",
+        help=(
+            "Which site to search (default: ffn). Literotica's public "
+            "search is JS-only, so --site literotica browses "
+            "tags.literotica.com/<tag> instead."
+        ),
     )
     # Search filters (only apply when --search is used). Values accepted
     # depend on --site; see the search module for the full tables.
@@ -1022,6 +1030,12 @@ def main(argv=None):
         "--rr-tags",
         metavar="TAGS",
         help="Royal Road-only: comma-separated tag list (e.g. 'progression,magic')",
+    )
+    parser.add_argument(
+        "--lit-page",
+        type=int,
+        metavar="N",
+        help="Literotica-only: which page of tag results to fetch (default 1)",
     )
     parser.add_argument(
         "-w",

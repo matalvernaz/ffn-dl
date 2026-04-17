@@ -95,6 +95,17 @@ def _royalroad_search_spec():
     }
 
 
+def _literotica_search_spec():
+    from .search import search_literotica
+    return {
+        "label": "Search Literotica",
+        "search_fn": search_literotica,
+        "text_filters": [
+            ("&Page:", "page"),
+        ],
+    }
+
+
 class MainFrame(wx.Frame):
     def __init__(self):
         super().__init__(
@@ -129,6 +140,7 @@ class MainFrame(wx.Frame):
         self._build_search_tab(self.notebook, "ffn", _ffn_search_spec())
         self._build_search_tab(self.notebook, "ao3", _ao3_search_spec())
         self._build_search_tab(self.notebook, "royalroad", _royalroad_search_spec())
+        self._build_search_tab(self.notebook, "literotica", _literotica_search_spec())
 
         root_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, pad)
 
@@ -398,6 +410,7 @@ class MainFrame(wx.Frame):
             ("ffn", _p.KEY_SEARCH_STATE_FFN),
             ("ao3", _p.KEY_SEARCH_STATE_AO3),
             ("royalroad", _p.KEY_SEARCH_STATE_ROYALROAD),
+            ("literotica", _p.KEY_SEARCH_STATE_LITEROTICA),
         ):
             if site_key not in self._tabs:
                 continue
@@ -426,6 +439,7 @@ class MainFrame(wx.Frame):
             ("ffn", _p.KEY_SEARCH_STATE_FFN),
             ("ao3", _p.KEY_SEARCH_STATE_AO3),
             ("royalroad", _p.KEY_SEARCH_STATE_ROYALROAD),
+            ("literotica", _p.KEY_SEARCH_STATE_LITEROTICA),
         ):
             if site_key not in self._tabs:
                 continue

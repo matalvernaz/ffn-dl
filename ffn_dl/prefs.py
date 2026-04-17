@@ -16,6 +16,7 @@ KEY_STRIP_NOTES = "strip_notes"
 KEY_SEARCH_STATE_FFN = "search_state_ffn"
 KEY_SEARCH_STATE_AO3 = "search_state_ao3"
 KEY_SEARCH_STATE_ROYALROAD = "search_state_royalroad"
+KEY_SEARCH_STATE_LITEROTICA = "search_state_literotica"
 
 DEFAULTS = {
     KEY_NAME_TEMPLATE: "{title} - {author}",

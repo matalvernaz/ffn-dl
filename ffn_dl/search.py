@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 FFN_BASE = "https://www.fanfiction.net"
 AO3_BASE = "https://archiveofourown.org"
 RR_BASE = "https://www.royalroad.com"
+LIT_BASE = "https://www.literotica.com"
+LIT_TAGS_BASE = "https://tags.literotica.com"
 SEARCH_PATH = "/search/"
 MAX_RESULTS = 25
 
@@ -598,3 +600,104 @@ def search_royalroad(query, **filters):
             f"Royal Road search failed (HTTP {resp.status_code})."
         )
     return _parse_rr_results(resp.text)
+
+
+# ── Literotica search ─────────────────────────────────────────────
+# Literotica's keyword search is JS-rendered against an auth-gated API.
+# The public tag-browse subdomain (tags.literotica.com/<tag>) is
+# server-rendered with schema.org microdata on every story card, so we
+# treat "search" as tag-browsing: the user's query becomes a tag slug
+# (lowercased, spaces → hyphens). That covers most what-you'd-actually-
+# type-into-a-search-box use cases on Literotica.
+
+
+def _literotica_tag_slug(query: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9 -]+", "", query).strip().lower()
+    return re.sub(r"\s+", "-", s)
+
+
+def _parse_literotica_results(html):
+    soup = BeautifulSoup(html, "lxml")
+    results = []
+    for card in soup.find_all(
+        "div", attrs={"property": "itemListElement"}
+    )[:MAX_RESULTS]:
+        url = card.get("resource") or ""
+        title = ""
+        h_tag = card.find(["h4", "h3"])
+        if h_tag:
+            title = h_tag.get_text(strip=True)
+        if not title:
+            # Fallback to <meta property=name>
+            mn = card.find("meta", attrs={"property": "name"})
+            if mn:
+                title = mn.get("content", "")
+
+        author = ""
+        author_link = card.find(
+            "a", attrs={"property": re.compile(r"author")}
+        )
+        if author_link:
+            mn = author_link.find("meta", attrs={"property": "name"})
+            if mn:
+                author = mn.get("content", "")
+            else:
+                author = author_link.get_text(" ", strip=True).replace("by ", "").strip()
+
+        summary = ""
+        headline = card.find("p", attrs={"property": "headline"})
+        if headline:
+            summary = headline.get_text(" ", strip=True)
+
+        # Category (Novels / Loving Wives / etc.) stands in for "fandom"
+        fandom = ""
+        cat_link = card.find("a", href=re.compile(r"literotica\.com/c/"))
+        if cat_link:
+            fandom = cat_link.get_text(" ", strip=True)
+            # Strip trailing date
+            fandom = re.sub(r"\d{2}/\d{2}/\d{4}\s*$", "", fandom).strip()
+
+        rating = "?"
+        rating_span = card.find("span", attrs={"property": "ratingValue"})
+        if rating_span:
+            rating = rating_span.get_text(strip=True)
+
+        results.append({
+            "title": title,
+            "author": author,
+            "url": url,
+            "summary": summary,
+            "words": "?",
+            "chapters": "?",
+            "rating": rating,
+            "fandom": fandom,
+            "status": "",
+        })
+    return results
+
+
+def search_literotica(query, **filters):
+    """Search Literotica by tag. `query` is converted to a tag slug
+    (lowercased, whitespace → hyphens) and looked up on
+    tags.literotica.com — the server-rendered alternative to
+    Literotica's JS-only keyword search.
+
+    Unknown tags return no results; the response is still a 200 page,
+    just without story cards.
+
+    Supported filter: `page` (integer, default 1).
+    """
+    slug = _literotica_tag_slug(query)
+    if not slug:
+        return []
+    url = f"{LIT_TAGS_BASE}/{slug}"
+    page = filters.get("page")
+    if page:
+        url += f"?page={int(page)}"
+    session = curl_requests.Session(impersonate="chrome")
+    resp = session.get(url, timeout=30, allow_redirects=True)
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Literotica search failed (HTTP {resp.status_code})."
+        )
+    return _parse_literotica_results(resp.text)
