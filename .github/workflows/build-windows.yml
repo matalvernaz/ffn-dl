@@ -40,11 +40,19 @@ jobs:
             --hidden-import ffn_dl.cli \
             --hidden-import ffn_dl.scraper \
             --hidden-import ffn_dl.ficwad \
+            --hidden-import ffn_dl.ao3 \
+            --hidden-import ffn_dl.royalroad \
+            --hidden-import ffn_dl.mediaminer \
+            --hidden-import ffn_dl.literotica \
             --hidden-import ffn_dl.exporters \
             --hidden-import ffn_dl.updater \
             --hidden-import ffn_dl.models \
             --hidden-import ffn_dl.tts \
             --hidden-import ffn_dl.gui \
+            --hidden-import ffn_dl.mailer \
+            --hidden-import ffn_dl.prefs \
+            --hidden-import ffn_dl.self_update \
+            --hidden-import ffn_dl.search \
             --hidden-import edge_tts \
             --hidden-import ebooklib \
             --hidden-import curl_cffi \

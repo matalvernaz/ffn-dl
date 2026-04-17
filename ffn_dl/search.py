@@ -693,7 +693,13 @@ def search_literotica(query, **filters):
     url = f"{LIT_TAGS_BASE}/{slug}"
     page = filters.get("page")
     if page:
-        url += f"?page={int(page)}"
+        try:
+            page_n = int(str(page).strip())
+            if page_n > 1:
+                url += f"?page={page_n}"
+        except ValueError:
+            # Silently ignore a non-numeric page value rather than crash
+            pass
     session = curl_requests.Session(impersonate="chrome")
     resp = session.get(url, timeout=30, allow_redirects=True)
     if resp.status_code != 200:

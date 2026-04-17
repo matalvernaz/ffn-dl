@@ -43,7 +43,9 @@ class MediaMinerScraper(BaseScraper):
         if match:
             return int(match.group(1))
         # /fanfic/s/<cat>/<slug>/<sid>
-        match = re.search(r"mediaminer\.org/fanfic/s/[^?#]+?/(\d+)(?:/|$)", text)
+        match = re.search(
+            r"mediaminer\.org/fanfic/s/[^?#]+?/(\d+)(?:[/?#]|$)", text
+        )
         if match:
             return int(match.group(1))
         raise ValueError(
