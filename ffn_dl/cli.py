@@ -49,6 +49,8 @@ def _build_scraper(url, args):
         d_min = args.delay_min if args.delay_min is not None else 1.0
         d_max = args.delay_max if args.delay_max is not None else 5.0
         kwargs["delay_range"] = (d_min, d_max)
+    if args.chunk_size is not None:
+        kwargs["chunk_size"] = args.chunk_size
     return scraper_cls(**kwargs)
 
 
@@ -388,6 +390,17 @@ def main(argv=None):
         type=int,
         default=5,
         help="Maximum retries per request on rate-limit or error (default: 5)",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Pause ~60s after every N chapter fetches "
+            "(default: 20 on FFN, disabled on FicWad). "
+            "Use 0 to disable."
+        ),
     )
     parser.add_argument(
         "--no-cache",

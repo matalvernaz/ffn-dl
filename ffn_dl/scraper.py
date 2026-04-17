@@ -47,6 +47,8 @@ class BaseScraper:
         timeout=30,
         cache_dir=None,
         use_cache=True,
+        chunk_size=0,
+        chunk_delay_range=(60.0, 75.0),
     ):
         self.delay_range = delay_range
         self.max_retries = max_retries
@@ -57,6 +59,9 @@ class BaseScraper:
             if use_cache
             else None
         )
+        self.chunk_size = chunk_size
+        self.chunk_delay_range = chunk_delay_range
+        self._fetch_count = 0
         self._browser = "chrome"
         self.session = curl_requests.Session(impersonate=self._browser)
 
@@ -135,6 +140,15 @@ class BaseScraper:
         raise RateLimitError(f"Failed after {self.max_retries} retries: {url}")
 
     def _delay(self):
+        self._fetch_count += 1
+        if self.chunk_size and self._fetch_count % self.chunk_size == 0:
+            wait = random.uniform(*self.chunk_delay_range)
+            logger.info(
+                "Pausing %.0fs after %d chapters to stay under rate limits...",
+                wait, self.chunk_size,
+            )
+            time.sleep(wait)
+            return
         time.sleep(random.uniform(*self.delay_range))
 
     # ── Cache ─────────────────────────────────────────────────────
@@ -206,6 +220,13 @@ class FFNScraper(BaseScraper):
     """Scraper for fanfiction.net."""
 
     site_name = "ffn"
+
+    def __init__(self, **kwargs):
+        # FFN rate-limits aggressively on bulk chapter fetches. FicLab's
+        # long-running heuristic of ~20 chapters followed by a ~60s pause
+        # avoids tripping captchas on multi-hundred-chapter fics.
+        kwargs.setdefault("chunk_size", 20)
+        super().__init__(**kwargs)
 
     def _check_for_blocks(self, html):
         super()._check_for_blocks(html)
