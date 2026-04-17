@@ -191,6 +191,51 @@ class FicWadScraper(BaseScraper):
 
         return author_name, story_urls
 
+    def scrape_author_works(self, url):
+        """Return (author_name, [work_dict]) from a FicWad author page.
+
+        FicWad author-page anchors carry the story title as link text, so
+        the picker can display something readable without a second fetch.
+        Other fields (words, chapters, rating) would require visiting each
+        story and are left blank.
+        """
+        html = self._fetch(url)
+        soup = BeautifulSoup(html, "lxml")
+
+        author_name = "Unknown Author"
+        title_tag = soup.find("title")
+        if title_tag:
+            title_text = title_tag.get_text(strip=True)
+            if " - " in title_text:
+                part = title_text.split(" - ")[0].strip()
+                part = re.sub(r"^Stories\s+by\s+", "", part, flags=re.IGNORECASE)
+                if part:
+                    author_name = part
+
+        seen_ids = set()
+        works = []
+        for a_tag in soup.find_all("a", href=re.compile(r"/story/\d+")):
+            match = re.search(r"/story/(\d+)", a_tag["href"])
+            if not match:
+                continue
+            story_id = match.group(1)
+            if story_id in seen_ids:
+                continue
+            seen_ids.add(story_id)
+            works.append({
+                "title": a_tag.get_text(strip=True) or f"Story {story_id}",
+                "url": f"{FICWAD_BASE}/story/{story_id}",
+                "author": "",
+                "words": "",
+                "chapters": "",
+                "rating": "",
+                "fandom": "",
+                "status": "",
+                "updated": "",
+                "section": "own",
+            })
+        return author_name, works
+
     def get_chapter_count(self, url_or_id):
         story_id = self.parse_story_id(url_or_id)
         page = self._fetch(f"{FICWAD_BASE}/story/{story_id}/1")

@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Search
+
+- **Load more / pagination**: every `search_*` function now takes a
+  `page` argument and the hard 25-result cap is gone. The CLI gains
+  `--limit` and `--start-page`; the GUI has a **Load More** button per
+  search tab and an `m` prompt in interactive CLI search.
+- **FFN sort**: `--sort updated/published/reviews/favorites/follows`
+  for CLI and a matching dropdown in the GUI FFN tab.
+- **AO3 series collapse**: results that belong to a single AO3 series
+  now show up as a series row tagged `[Series · N part(s)]`, hiding
+  the individual work. Downloading the row merges the full series
+  into one file. A **Show Parts...** dialog in the GUI lets you pull
+  up the parts and grab just one.
+
+### Author & bookmark picker
+
+- **Multi-select GUI picker**: pasting an author URL (FFN, FicWad,
+  AO3, Royal Road, MediaMiner, Literotica) or an AO3 bookmarks URL
+  (`/users/NAME/bookmarks`) now opens a dialog with one checkbox per
+  story. Pick any subset instead of auto-downloading everything.
+- **Sort in the picker**: title, word count, chapter count, last
+  updated, and section (own vs. favorites).
+- **FFN favorites**: the picker includes the author's favorite
+  stories alongside their own, tagged `[Favorite]`. Filter to "Own
+  only", "Favorites only", or "All".
+
+### GUI performance
+
+- Status log now batches writes through a 100ms timer and drops the
+  `TE_RICH2` style. Long downloads that used to visibly hang while
+  logging progress line-by-line now stream smoothly.
+- Status log is capped at 5000 lines (oldest trimmed), so long
+  sessions don't accumulate unbounded text.
+- Search results ListCtrl populates inside `Freeze`/`Thaw` to
+  eliminate row-by-row redraw flicker.
+
 ## 1.2.0 — 2026-04-17
 
 ### New sites

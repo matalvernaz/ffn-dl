@@ -189,6 +189,47 @@ class LiteroticaScraper(BaseScraper):
 
         return author_name, story_urls
 
+    def scrape_author_works(self, url):
+        """Return (author_name, [work_dict]) from a Literotica author page."""
+        m = _AUTHOR_RE.search(str(url))
+        if not m:
+            raise ValueError(f"Not a Literotica author URL: {url}")
+        slug = m.group(1)
+        works_url = f"{LIT_BASE}/authors/{slug}/works/stories"
+        html = self._fetch(works_url)
+        soup = BeautifulSoup(html, "lxml")
+
+        author_name = slug
+        h1 = soup.find("h1")
+        if h1:
+            text = h1.get_text(strip=True)
+            if text and len(text) < 60:
+                author_name = text
+
+        seen = set()
+        works = []
+        for a in soup.find_all("a", href=_SLUG_RE):
+            m2 = _SLUG_RE.search(a["href"])
+            if not m2:
+                continue
+            story_slug = m2.group(1)
+            if story_slug in seen:
+                continue
+            seen.add(story_slug)
+            works.append({
+                "title": a.get_text(strip=True) or story_slug,
+                "url": f"{LIT_BASE}/s/{story_slug}",
+                "author": author_name,
+                "words": "",
+                "chapters": "",
+                "rating": "",
+                "fandom": "",
+                "status": "",
+                "updated": "",
+                "section": "own",
+            })
+        return author_name, works
+
     def scrape_series_works(self, url):
         """Return (series_name, [story_urls]) for a Literotica series page."""
         m = _SERIES_RE.search(str(url))

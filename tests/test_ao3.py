@@ -44,6 +44,20 @@ class TestURLParsing:
             "https://archiveofourown.org/works/1234"
         )
 
+    def test_is_bookmarks_url_matches_users_bookmarks(self):
+        assert AO3Scraper.is_bookmarks_url(
+            "https://archiveofourown.org/users/someone/bookmarks"
+        )
+        assert AO3Scraper.is_bookmarks_url(
+            "https://archiveofourown.org/users/someone/bookmarks?page=2"
+        )
+        assert not AO3Scraper.is_bookmarks_url(
+            "https://archiveofourown.org/users/someone/works"
+        )
+        assert not AO3Scraper.is_bookmarks_url(
+            "https://archiveofourown.org/works/1234"
+        )
+
 
 class TestMetadataParsing:
     def test_parses_work_metadata(self, ao3_work_full_html):

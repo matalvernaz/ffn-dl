@@ -92,6 +92,56 @@ class TestAuthorPageScoping:
         assert stories[0].endswith("/s/777")
 
 
+class TestAuthorWorks:
+    def test_lifts_data_attributes_from_rows(self):
+        html = """
+        <html><body>
+          <title>Writer | FanFiction</title>
+          <div id="st_inside">
+            <div class="z-list mystories"
+                 data-storyid="1" data-title="First Tale"
+                 data-wordcount="5000" data-chapters="3" data-statusid="2"
+                 data-category="Harry Potter"
+                 data-dateupdate="1700000000">
+              <a class="stitle" href="/s/1/1">First Tale</a>
+              <div class="z-padtop2">Harry Potter - Rated: T - English</div>
+            </div>
+          </div>
+          <div id="fs_inside">
+            <div class="z-list"
+                 data-storyid="99" data-title="Fave Tale"
+                 data-wordcount="1200" data-chapters="1" data-statusid="1">
+              <a class="stitle" href="/s/99/1">Fave Tale</a>
+              <a href="/u/42">Another Writer</a>
+              <div class="z-padtop2">Pokémon - Rated: K</div>
+            </div>
+          </div>
+        </body></html>
+        """
+        scraper = FFNScraper(use_cache=False)
+        with mock.patch.object(scraper, "_fetch", return_value=html):
+            name, works = scraper.scrape_author_works(
+                "https://www.fanfiction.net/u/1", include_favorites=True,
+            )
+        assert name == "Writer"
+        assert len(works) == 2
+
+        own = next(w for w in works if w["section"] == "own")
+        assert own["title"] == "First Tale"
+        assert own["url"].endswith("/s/1")
+        assert own["words"] == "5000"
+        assert own["chapters"] == "3"
+        assert own["status"] == "Complete"
+        assert own["fandom"] == "Harry Potter"
+        assert own["rating"] == "T"
+        assert own["updated"]  # ISO date set
+
+        fav = next(w for w in works if w["section"] == "favorites")
+        assert fav["title"] == "Fave Tale"
+        assert fav["status"] == "In-Progress"
+        assert fav["author"] == "Another Writer"
+
+
 class TestSearchParsing:
     def test_results_extract_expected_shape(self, ffn_search_html):
         results = _parse_results(ffn_search_html)

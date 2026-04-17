@@ -355,6 +355,87 @@ class AO3Scraper(BaseScraper):
 
         return author_name, story_urls
 
+    def scrape_author_works(self, url):
+        """Return (author_name, [work_dict]) from an AO3 user's works page.
+
+        AO3 works-list blurbs match the shape emitted by the search
+        parser, so we reuse `_parse_ao3_results` — that gives us title,
+        summary, word count, chapter count, rating, status, fandom, and
+        series membership for each work, with no extra HTTP calls.
+        """
+        from .search import _parse_ao3_results
+
+        match = re.search(r"archiveofourown\.org/users/([\w.-]+)", url)
+        if not match:
+            raise ValueError(f"Not an AO3 user URL: {url}")
+        user = match.group(1)
+        return self._scrape_ao3_work_list(
+            f"{AO3_BASE}/users/{user}/works", fallback_name=user,
+        )
+
+    def scrape_bookmark_works(self, url):
+        """Return (owner_name, [work_dict]) from an AO3 user's public
+        bookmarks page. Same blurb shape as works — reuse the parser.
+        """
+        match = re.search(r"archiveofourown\.org/users/([\w.-]+)", url)
+        if not match:
+            raise ValueError(f"Not an AO3 bookmarks URL: {url}")
+        user = match.group(1)
+        return self._scrape_ao3_work_list(
+            f"{AO3_BASE}/users/{user}/bookmarks", fallback_name=user,
+        )
+
+    def _scrape_ao3_work_list(self, base_url, *, fallback_name):
+        from .search import _parse_ao3_results
+
+        author_name = fallback_name
+        works = []
+        seen = set()
+        page = 1
+
+        while True:
+            page_url = f"{base_url}?page={page}"
+            html = self._fetch(page_url)
+            if page == 1:
+                soup = BeautifulSoup(html, "lxml")
+                h2 = soup.find("h2", class_="heading")
+                if h2:
+                    heading = h2.get_text(strip=True)
+                    m = re.search(r"(?:Works|Bookmarks) by (.+)$", heading)
+                    if m:
+                        author_name = m.group(1).strip()
+            page_results = _parse_ao3_results(html)
+            new_on_page = 0
+            for r in page_results:
+                m = re.search(r"/works/(\d+)", r.get("url", ""))
+                if not m:
+                    continue
+                wid = m.group(1)
+                if wid in seen:
+                    continue
+                seen.add(wid)
+                r["section"] = "own" if "/works" in base_url else "bookmarks"
+                r["updated"] = ""
+                works.append(r)
+                new_on_page += 1
+            soup = BeautifulSoup(html, "lxml")
+            next_link = soup.find("a", attrs={"rel": "next"})
+            if not next_link or new_on_page == 0:
+                break
+            page += 1
+            self._delay()
+
+        return author_name, works
+
+    @staticmethod
+    def is_bookmarks_url(url):
+        return bool(
+            re.search(
+                r"(?:archiveofourown\.org|ao3\.org)/users/[\w.-]+/bookmarks",
+                str(url),
+            )
+        )
+
     def download(self, url_or_id, progress_callback=None, skip_chapters=0, chapters=None):
         """Download an AO3 work. Skip_chapters is honoured after the
         single-page fetch so update mode and caching still work.

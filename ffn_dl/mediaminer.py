@@ -248,6 +248,44 @@ class MediaMinerScraper(BaseScraper):
                 story_urls.append(f"{MM_BASE}/fanfic/view_st.php/{sid}")
         return author_name, story_urls
 
+    def scrape_author_works(self, url):
+        """Return (author_name, [work_dict]) from a MediaMiner user page.
+
+        MediaMiner's listings don't carry much per-row metadata; we take
+        the title from the link text and leave word/chapter counts blank.
+        """
+        name, urls = self.scrape_author_stories(url)
+        html = self._fetch(str(url))
+        soup = BeautifulSoup(html, "lxml")
+        titles_by_id = {}
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            m1 = re.search(r"/fanfic/view_st\.php/(\d+)", href)
+            m2 = re.search(r"/fanfic/s/[^?#]+?/(\d+)(?:/|$)", href)
+            sid = (m1.group(1) if m1 else None) or (m2.group(1) if m2 else None)
+            if not sid or sid in titles_by_id:
+                continue
+            text = a.get_text(strip=True)
+            if text:
+                titles_by_id[sid] = text
+        works = []
+        for u in urls:
+            sid_m = re.search(r"view_st\.php/(\d+)", u)
+            sid = sid_m.group(1) if sid_m else ""
+            works.append({
+                "title": titles_by_id.get(sid, f"Story {sid}"),
+                "url": u,
+                "author": name,
+                "words": "",
+                "chapters": "",
+                "rating": "",
+                "fandom": "",
+                "status": "",
+                "updated": "",
+                "section": "own",
+            })
+        return name, works
+
     def download(self, url_or_id, progress_callback=None, skip_chapters=0, chapters=None):
         story_id = self.parse_story_id(url_or_id)
         story_url = f"{MM_BASE}/fanfic/view_st.php/{story_id}"

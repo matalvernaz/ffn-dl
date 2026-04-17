@@ -261,6 +261,70 @@ class BaseScraper:
 
 FFN_BASE = "https://www.fanfiction.net"
 
+_FFN_RATING_ID_TO_LABEL = {
+    "1": "K", "2": "K+", "3": "T", "4": "M",
+}
+
+
+def _ffn_row_to_work(row, story_id, section):
+    """Build a detailed work dict from an FFN author-page z-list row.
+
+    The row carries data-* attributes we can lift without reparsing the
+    meta text. Author name falls back to empty for own-stories rows —
+    callers know the author from the page — and to the /u/ link text
+    for favorites.
+    """
+    import datetime as _dt
+
+    def _parse_epoch(val):
+        if not val:
+            return ""
+        try:
+            return _dt.datetime.fromtimestamp(
+                int(val), tz=_dt.timezone.utc,
+            ).strftime("%Y-%m-%d")
+        except (TypeError, ValueError):
+            return ""
+
+    status_id = row.get("data-statusid") or ""
+    status = "Complete" if status_id == "2" else "In-Progress"
+
+    stitle = row.find("a", class_="stitle")
+    title = row.get("data-title") or (
+        stitle.get_text(" ", strip=True) if stitle else ""
+    )
+
+    author = ""
+    if section == "favorites":
+        u_tag = row.find("a", href=re.compile(r"^/u/\d+"))
+        if u_tag:
+            author = u_tag.get_text(strip=True)
+
+    meta_text = ""
+    meta_div = row.find("div", class_="z-padtop2")
+    if meta_div:
+        meta_text = meta_div.get_text(" ", strip=True)
+    rating = ""
+    if meta_text:
+        m = re.search(r"Rated:\s*(\S+)", meta_text)
+        if m:
+            rating = m.group(1)
+    if not rating:
+        rating = _FFN_RATING_ID_TO_LABEL.get(row.get("data-ratingid", ""), "")
+
+    return {
+        "title": title,
+        "url": f"{FFN_BASE}/s/{story_id}",
+        "author": author,
+        "words": row.get("data-wordcount", "") or "",
+        "chapters": row.get("data-chapters", "") or "1",
+        "rating": rating,
+        "fandom": row.get("data-category", "") or "",
+        "status": status,
+        "updated": _parse_epoch(row.get("data-dateupdate")),
+        "section": section,
+    }
+
 
 class FFNScraper(BaseScraper):
     """Scraper for fanfiction.net."""
@@ -446,6 +510,45 @@ class FFNScraper(BaseScraper):
                     story_urls.append(f"{FFN_BASE}/s/{story_id}")
 
         return author_name, story_urls
+
+    def scrape_author_works(self, url, *, include_favorites=False):
+        """Fetch an FFN author page and return (author_name, [work_dict]).
+
+        Each dict has keys: title, url, author, words, chapters, rating,
+        fandom, status, updated (YYYY-MM-DD from data-dateupdate), section
+        ("own" or "favorites"). FFN's author-page rows carry these as
+        data-* attributes — no extra HTTP calls.
+
+        When include_favorites is True, rows from #fs_inside are appended
+        after the author's own stories, tagged with section="favorites".
+        """
+        html = self._fetch(url)
+        soup = BeautifulSoup(html, "lxml")
+
+        author_name = "Unknown Author"
+        title_tag = soup.find("title")
+        if title_tag:
+            title_text = title_tag.get_text(strip=True)
+            if "|" in title_text:
+                author_name = title_text.split("|")[0].strip()
+
+        sections = [("st_inside", "own")]
+        if include_favorites:
+            sections.append(("fs_inside", "favorites"))
+
+        works = []
+        seen_ids = set()
+        for container_id, section in sections:
+            container = soup.find("div", id=container_id)
+            if not container:
+                continue
+            for row in container.find_all("div", class_="z-list"):
+                story_id = row.get("data-storyid")
+                if not story_id or story_id in seen_ids:
+                    continue
+                seen_ids.add(story_id)
+                works.append(_ffn_row_to_work(row, story_id, section))
+        return author_name, works
 
     def get_chapter_count(self, url_or_id):
         story_id = self.parse_story_id(url_or_id)

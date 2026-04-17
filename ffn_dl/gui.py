@@ -1209,8 +1209,14 @@ class MainFrame(wx.Frame):
 
             scraper = self._scraper_for(url)
 
+            if not is_update and AO3Scraper.is_bookmarks_url(url):
+                self._run_picker_download(
+                    url, AO3Scraper(), kind="bookmarks",
+                )
+                return
+
             if not is_update and scraper.is_author_url(url):
-                self._run_author_download(url, scraper)
+                self._run_picker_download(url, scraper, kind="author")
                 return
 
             if not is_update and (
@@ -1275,6 +1281,100 @@ class MainFrame(wx.Frame):
         self._log(f"Author: {author_name}")
         self._log(f"Found {len(story_urls)} stories. Downloading all...")
         self._batch_download(story_urls, scraper, summary_label="Author batch")
+
+    def _run_picker_download(self, url, scraper, *, kind):
+        """Fetch a work list (author page or AO3 bookmarks) and open the
+        picker so the user can choose which works to download before we
+        start pulling chapters.
+        """
+        from .ao3 import AO3Scraper
+        from .scraper import FFNScraper
+
+        label = "bookmarks" if kind == "bookmarks" else "author page"
+        self._log(f"Fetching {label}: {url}")
+        try:
+            if kind == "bookmarks":
+                owner, works = scraper.scrape_bookmark_works(url)
+                title = f"Bookmarks: {owner}"
+            elif isinstance(scraper, FFNScraper):
+                owner, works = scraper.scrape_author_works(
+                    url, include_favorites=True,
+                )
+                title = f"Stories by {owner}"
+            elif hasattr(scraper, "scrape_author_works"):
+                owner, works = scraper.scrape_author_works(url)
+                title = f"Stories by {owner}"
+            else:
+                owner, story_urls = scraper.scrape_author_stories(url)
+                works = [
+                    {"title": u, "url": u, "author": owner, "section": "own"}
+                    for u in story_urls
+                ]
+                title = f"Stories by {owner}"
+        except Exception as exc:
+            self._log(f"Failed to list {label}: {exc}")
+            return
+
+        if not works:
+            self._log(f"No entries found on this {label}.")
+            return
+        self._log(f"Loaded {len(works)} entries. Showing picker...")
+
+        def _handle_selection(selected_urls):
+            if not selected_urls:
+                self._log("(No selections — nothing downloaded.)")
+                return
+            self._log(f"Downloading {len(selected_urls)} selected...")
+            self._set_busy(True)
+            threading.Thread(
+                target=self._run_picked_batch,
+                args=(selected_urls, kind),
+                daemon=True,
+            ).start()
+
+        wx.CallAfter(self._open_picker, title, works, _handle_selection)
+
+    def _open_picker(self, title, works, on_ok):
+        dlg = StoryPickerDialog(self, title, works)
+        result = dlg.ShowModal()
+        picked_urls = dlg.picked_urls() if result == wx.ID_OK else []
+        dlg.Destroy()
+        on_ok(picked_urls)
+
+    def _run_picked_batch(self, urls, kind):
+        try:
+            # Each url may target a different scraper (e.g. bookmarks can
+            # include works outside the owner's own, but on AO3 they're
+            # still AO3 works). Use per-URL scraper resolution.
+            succeeded = 0
+            failed = []
+            for i, story_url in enumerate(urls, 1):
+                self._log(f"\n[{i}/{len(urls)}] {story_url}")
+                scraper = self._scraper_for(story_url)
+
+                def progress(current, total, t, cached):
+                    tag = " (cached)" if cached else ""
+                    self._log(f"    [{current}/{total}] {t}{tag}")
+
+                try:
+                    story = scraper.download(
+                        story_url, progress_callback=progress,
+                    )
+                    path = self._export_story(story)
+                    self._log(f"  Saved: {path}")
+                    succeeded += 1
+                except Exception as exc:
+                    self._log(f"  Error: {exc}")
+                    failed.append(story_url)
+            label = "Bookmarks batch" if kind == "bookmarks" else "Author batch"
+            self._log(
+                f"\n{label} complete: {succeeded} succeeded, "
+                f"{len(failed)} failed out of {len(urls)}."
+            )
+            for u in failed:
+                self._log(f"  Failed: {u}")
+        finally:
+            self._set_busy(False)
 
     def _batch_download(self, story_urls, scraper, summary_label="Batch"):
 
@@ -1483,6 +1583,230 @@ class VoicePreviewDialog(wx.Dialog):
         if self._tmp_dir and self._tmp_dir.exists():
             _shutil.rmtree(self._tmp_dir, ignore_errors=True)
         event.Skip()
+
+
+class StoryPickerDialog(wx.Dialog):
+    """Multi-select picker for an author's works or a bookmarks list.
+
+    Uses a CheckListBox with per-item formatted labels — that gives NVDA
+    a single readable string per row, plus native space-to-toggle.
+    """
+
+    _SORT_OPTIONS = [
+        ("Default order", None),
+        ("Title (A-Z)", "title_asc"),
+        ("Title (Z-A)", "title_desc"),
+        ("Word count (most first)", "words_desc"),
+        ("Word count (least first)", "words_asc"),
+        ("Chapter count (most first)", "chapters_desc"),
+        ("Last updated (newest first)", "updated_desc"),
+        ("Last updated (oldest first)", "updated_asc"),
+        ("Section (own first)", "section"),
+    ]
+
+    def __init__(self, parent, title, works):
+        super().__init__(
+            parent, title=title,
+            size=(720, 560),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._works = list(works)
+        self._order = list(range(len(self._works)))
+        self._sort_key = None
+        self._section_filter = "all"
+        self._picked = []
+        self._build_ui()
+
+    def _build_ui(self):
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        controls = wx.BoxSizer(wx.HORIZONTAL)
+        controls.Add(
+            wx.StaticText(panel, label="Sor&t by:"),
+            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+        )
+        self.sort_ctrl = wx.Choice(
+            panel, choices=[label for label, _ in self._SORT_OPTIONS],
+        )
+        self.sort_ctrl.SetSelection(0)
+        self.sort_ctrl.SetName("Sort order")
+        self.sort_ctrl.Bind(wx.EVT_CHOICE, self._on_sort_change)
+        controls.Add(self.sort_ctrl, 0, wx.RIGHT, 16)
+
+        has_sections = any(
+            w.get("section") in ("favorites", "bookmarks")
+            for w in self._works
+        )
+        if has_sections:
+            controls.Add(
+                wx.StaticText(panel, label="Sho&w:"),
+                0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+            )
+            self.filter_ctrl = wx.Choice(
+                panel, choices=["All", "Own only", "Favorites only"],
+            )
+            self.filter_ctrl.SetSelection(0)
+            self.filter_ctrl.SetName("Section filter")
+            self.filter_ctrl.Bind(wx.EVT_CHOICE, self._on_filter_change)
+            controls.Add(self.filter_ctrl, 0, wx.RIGHT, 16)
+        else:
+            self.filter_ctrl = None
+
+        select_all = wx.Button(panel, label="&Select All")
+        select_all.Bind(wx.EVT_BUTTON, lambda e: self._set_all(True))
+        controls.Add(select_all, 0, wx.RIGHT, 4)
+        select_none = wx.Button(panel, label="Select &None")
+        select_none.Bind(wx.EVT_BUTTON, lambda e: self._set_all(False))
+        controls.Add(select_none, 0)
+
+        sizer.Add(controls, 0, wx.EXPAND | wx.ALL, 8)
+
+        self.list_ctrl = wx.CheckListBox(panel, choices=[])
+        self.list_ctrl.SetName("Stories to download")
+        sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+
+        hint = wx.StaticText(
+            panel,
+            label=(
+                "Use the arrow keys to move, space to tick or untick, "
+                "and press Download to fetch every ticked story."
+            ),
+        )
+        sizer.Add(hint, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        btn_row.AddStretchSpacer(1)
+        dl_btn = wx.Button(panel, id=wx.ID_OK, label="&Download Selected")
+        dl_btn.SetDefault()
+        dl_btn.Bind(wx.EVT_BUTTON, self._on_ok)
+        btn_row.Add(dl_btn, 0, wx.RIGHT, 8)
+        cancel_btn = wx.Button(panel, id=wx.ID_CANCEL, label="&Cancel")
+        btn_row.Add(cancel_btn, 0)
+        sizer.Add(btn_row, 0, wx.EXPAND | wx.ALL, 8)
+
+        panel.SetSizer(sizer)
+        self._refresh()
+
+    @staticmethod
+    def _as_int(value):
+        if value is None:
+            return 0
+        s = str(value).replace(",", "").strip()
+        m = re.match(r"\d+", s)
+        return int(m.group(0)) if m else 0
+
+    def _label(self, w):
+        parts = [w.get("title", "") or "(untitled)"]
+        meta = []
+        if w.get("author"):
+            meta.append(f"by {w['author']}")
+        if w.get("words"):
+            meta.append(f"{w['words']} words")
+        if w.get("chapters"):
+            meta.append(f"{w['chapters']} ch")
+        if w.get("rating"):
+            meta.append(f"Rated {w['rating']}")
+        if w.get("status"):
+            meta.append(w["status"])
+        if w.get("updated"):
+            meta.append(f"upd {w['updated']}")
+        if w.get("section") == "favorites":
+            meta.append("[Favorite]")
+        elif w.get("section") == "bookmarks":
+            meta.append("[Bookmark]")
+        if meta:
+            parts.append(" — " + " · ".join(meta))
+        return "".join(parts)
+
+    def _visible_indices(self):
+        idxs = []
+        for i in self._order:
+            w = self._works[i]
+            if self._section_filter == "own" and w.get("section") != "own":
+                continue
+            if self._section_filter == "favorites" and w.get("section") not in (
+                "favorites", "bookmarks",
+            ):
+                continue
+            idxs.append(i)
+        return idxs
+
+    def _refresh(self):
+        idxs = self._visible_indices()
+        labels = [self._label(self._works[i]) for i in idxs]
+        # Preserve ticks across re-sort/filter by URL
+        ticked_urls = {
+            self._works[self._visible_map[j]]["url"]
+            for j in self.list_ctrl.GetCheckedItems()
+        } if getattr(self, "_visible_map", None) else set()
+        self.list_ctrl.Set(labels)
+        self._visible_map = idxs
+        restored = []
+        for j, i in enumerate(idxs):
+            if self._works[i].get("url") in ticked_urls:
+                restored.append(j)
+        if restored:
+            self.list_ctrl.SetCheckedItems(restored)
+
+    def _on_sort_change(self, event):
+        idx = self.sort_ctrl.GetSelection()
+        _, key = self._SORT_OPTIONS[idx] if 0 <= idx < len(self._SORT_OPTIONS) else (None, None)
+        self._sort_key = key
+        self._apply_sort()
+        self._refresh()
+
+    def _on_filter_change(self, event):
+        sel = self.filter_ctrl.GetSelection()
+        self._section_filter = {0: "all", 1: "own", 2: "favorites"}.get(sel, "all")
+        self._refresh()
+
+    def _apply_sort(self):
+        works = self._works
+        default = list(range(len(works)))
+
+        def words(i):
+            return self._as_int(works[i].get("words"))
+
+        def chapters(i):
+            return self._as_int(works[i].get("chapters"))
+
+        key = self._sort_key
+        if key is None:
+            self._order = default
+        elif key == "title_asc":
+            self._order = sorted(default, key=lambda i: (works[i].get("title") or "").lower())
+        elif key == "title_desc":
+            self._order = sorted(default, key=lambda i: (works[i].get("title") or "").lower(), reverse=True)
+        elif key == "words_desc":
+            self._order = sorted(default, key=words, reverse=True)
+        elif key == "words_asc":
+            self._order = sorted(default, key=words)
+        elif key == "chapters_desc":
+            self._order = sorted(default, key=chapters, reverse=True)
+        elif key == "updated_desc":
+            self._order = sorted(default, key=lambda i: works[i].get("updated") or "", reverse=True)
+        elif key == "updated_asc":
+            self._order = sorted(default, key=lambda i: works[i].get("updated") or "")
+        elif key == "section":
+            self._order = sorted(default, key=lambda i: (works[i].get("section") != "own", (works[i].get("title") or "").lower()))
+
+    def _set_all(self, checked):
+        indices = list(range(self.list_ctrl.GetCount()))
+        if checked:
+            self.list_ctrl.SetCheckedItems(indices)
+        else:
+            self.list_ctrl.SetCheckedItems([])
+
+    def _on_ok(self, event):
+        ticked = self.list_ctrl.GetCheckedItems()
+        self._picked = [
+            self._works[self._visible_map[j]]["url"] for j in ticked
+        ]
+        self.EndModal(wx.ID_OK)
+
+    def picked_urls(self):
+        return list(self._picked)
 
 
 class SeriesPartsDialog(wx.Dialog):

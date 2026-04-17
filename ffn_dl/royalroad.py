@@ -205,6 +205,44 @@ class RoyalRoadScraper(BaseScraper):
 
         return author_name, story_urls
 
+    def scrape_author_works(self, url):
+        """Return (author_name, [work_dict]) from a RR profile page."""
+        html = self._fetch(url)
+        soup = BeautifulSoup(html, "lxml")
+
+        author_name = "Unknown Author"
+        title = soup.find("title")
+        if title:
+            t = title.get_text(strip=True)
+            if " |" in t:
+                author_name = t.split(" |")[0].strip()
+
+        seen = set()
+        works = []
+        for a in soup.find_all(
+            "a", href=re.compile(r"^/fiction/\d+(?:/[^/]+)?/?$")
+        ):
+            match = re.search(r"/fiction/(\d+)", a["href"])
+            if not match:
+                continue
+            fid = match.group(1)
+            if fid in seen:
+                continue
+            seen.add(fid)
+            works.append({
+                "title": a.get_text(strip=True) or f"Fiction {fid}",
+                "url": f"{RR_BASE}/fiction/{fid}",
+                "author": author_name,
+                "words": "",
+                "chapters": "",
+                "rating": "",
+                "fandom": "",
+                "status": "",
+                "updated": "",
+                "section": "own",
+            })
+        return author_name, works
+
     def download(self, url_or_id, progress_callback=None, skip_chapters=0, chapters=None):
         from .models import chapter_in_spec
 
