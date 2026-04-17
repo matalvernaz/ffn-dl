@@ -889,11 +889,21 @@ def _parse_rr_results(html):
         tag_links = item.find_all("a", class_="fiction-tag")
         genre_or_fandom = ", ".join(a.get_text(strip=True) for a in tag_links[:5])
 
-        # Stats — pages, chapters, followers
+        # Stats — pages, chapters, followers. RR search cards DON'T
+        # expose a raw word count anywhere — only "N Pages". Convert at
+        # RR's house conversion of ~275 words per page so the "Words"
+        # column actually resembles a word count instead of looking
+        # like a tiny 4-digit story. A leading "~" signals the
+        # estimate; the fiction page itself (fetched on download) has
+        # the authoritative count.
         stats_text = item.get_text(" ", strip=True)
         pages_m = re.search(r"(\d[\d,]*)\s+Pages", stats_text)
         chapters_m = re.search(r"(\d[\d,]*)\s+Chapters", stats_text)
-        words = f"{pages_m.group(1)}p" if pages_m else "?"
+        if pages_m:
+            pages = int(pages_m.group(1).replace(",", ""))
+            words = f"~{pages * 275:,}"
+        else:
+            words = "?"
         chapters = chapters_m.group(1) if chapters_m else "?"
 
         # Description — in a hidden #description-<id> div; show first N chars

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.8.5 — 2026-04-17
+
+### Fix
+
+- **Royal Road "Words" column now shows an estimated word count
+  instead of raw pages**. RR search cards don't expose a word count
+  at all — only a page count — so the previous code showed
+  "2,534p" in the Words column, which was read as if it were a
+  tiny 4-digit word count. Converted at RR's house ratio of 275
+  words per page and displayed with a leading "~" to mark it as
+  an estimate (e.g. "~696,850"). The fiction page itself has the
+  authoritative number and is picked up at download time.
+
 ## 1.8.4 — 2026-04-17
 
 ### Diagnostics
