@@ -1213,6 +1213,79 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
 
 FFMPEG = _find_tool("ffmpeg")
 FFPROBE = _find_tool("ffprobe")
+FFPLAY = _find_tool("ffplay")
+
+
+# ── Voice preview ─────────────────────────────────────────────────
+
+def detect_voices(story, map_path=None):
+    """Run the character + voice pipeline on a Story without synthesising.
+
+    Returns a list of {"name", "gender", "voice"} dicts in frequency order
+    (most-mentioned speakers first). Existing mappings in map_path are
+    preserved; newly-seen characters are assigned a voice and written back
+    on save.
+    """
+    mapper = VoiceMapper(map_path)
+
+    full_text = ""
+    all_segments = []
+    for ch in story.chapters:
+        text = html_to_text(ch.html)
+        full_text += text + "\n"
+        all_segments.append(parse_segments(text))
+
+    raw_char_counts = Counter()
+    for segs in all_segments:
+        for seg in segs:
+            if seg.speaker:
+                raw_char_counts[seg.speaker] += 1
+
+    canonical_map, char_counts = consolidate_speakers(raw_char_counts)
+    characters = [name for name, count in char_counts.most_common() if count >= 2]
+    genders = detect_character_genders(full_text, characters)
+
+    results = []
+    for name in characters:
+        gender = genders.get(name, "neutral")
+        voice = mapper.assign(name, gender)
+        results.append({
+            "name": name,
+            "gender": gender,
+            "voice": voice,
+            "count": char_counts[name],
+        })
+
+    mapper.save()
+    return results, mapper
+
+
+async def _synth_sample_async(text, voice, output_path):
+    comm = edge_tts.Communicate(text, voice=voice)
+    await comm.save(str(output_path))
+
+
+def synthesize_sample(voice, text, output_path):
+    """Synthesize a short preview clip to output_path (MP3)."""
+    asyncio.run(_synth_sample_async(text, voice, str(output_path)))
+    return Path(output_path)
+
+
+def play_audio_file(path):
+    """Play an audio file in the background. Returns the Popen handle so
+    the caller can terminate it if the user starts another preview.
+    """
+    try:
+        return subprocess.Popen(
+            [FFPLAY, "-nodisp", "-autoexit", "-loglevel", "quiet", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffplay is required to play voice samples but was not found. "
+            "Install ffmpeg (which bundles ffplay)."
+        )
 
 
 def _check_ffmpeg():

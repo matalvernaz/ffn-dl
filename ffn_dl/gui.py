@@ -204,7 +204,12 @@ class MainFrame(wx.Frame):
         self.watch_btn = wx.ToggleButton(panel, label="&Watch Clipboard")
         self.watch_btn.SetName("Watch Clipboard toggle")
         self.watch_btn.Bind(wx.EVT_TOGGLEBUTTON, self._on_watch_toggle)
-        btn_sizer.Add(self.watch_btn, 0)
+        btn_sizer.Add(self.watch_btn, 0, wx.RIGHT, 8)
+
+        self.voices_btn = wx.Button(panel, label="Preview &Voices...")
+        self.voices_btn.SetName("Preview character voices")
+        self.voices_btn.Bind(wx.EVT_BUTTON, self._on_preview_voices)
+        btn_sizer.Add(self.voices_btn, 0)
 
         sizer.Add(btn_sizer, 0, wx.ALL, pad)
         sizer.AddStretchSpacer(1)
@@ -329,6 +334,7 @@ class MainFrame(wx.Frame):
             self._downloading = busy
             self.dl_btn.Enable(not busy)
             self.update_btn.Enable(not busy)
+            self.voices_btn.Enable(not busy)
             for tab in self._tabs.values():
                 tab["search_btn"].Enable(not busy)
                 has_selection = tab["results_ctrl"].GetFirstSelected() != -1
@@ -618,6 +624,68 @@ class MainFrame(wx.Frame):
         threading.Thread(
             target=self._run_download, args=(url,), daemon=True
         ).start()
+
+    def _on_preview_voices(self, event):
+        url = self.url_ctrl.GetValue().strip()
+        if not url:
+            self._log("Error: Enter a story URL or ID first.")
+            return
+        if self._downloading:
+            return
+        self._set_busy(True)
+        self._log(f"Preview: fetching metadata for {url}")
+        threading.Thread(
+            target=self._run_preview_voices, args=(url,), daemon=True,
+        ).start()
+
+    def _run_preview_voices(self, url):
+        try:
+            scraper = self._scraper_for(url)
+            scraper.parse_story_id(url)
+
+            def progress(current, total, title, cached):
+                tag = " (cached)" if cached else ""
+                self._log(f"  [{current}/{total}] {title}{tag}")
+
+            # One chapter is enough to get a speaker inventory for most
+            # fics. Users running preview on a 500-chapter fic shouldn't
+            # wait for a full fetch.
+            story = scraper.download(
+                url, progress_callback=progress, chapters=[(1, 1)],
+            )
+
+            from . import tts
+            output_dir = Path(self.output_ctrl.GetValue())
+            output_dir.mkdir(parents=True, exist_ok=True)
+            map_path = output_dir / f".ffn-voices-{story.id}.json"
+
+            voices, mapper = tts.detect_voices(story, map_path=map_path)
+            self._log(
+                f"Detected {len(voices)} character(s). "
+                f"Voice map: {map_path.name}"
+            )
+        except Exception as exc:
+            self._log(f"Preview failed: {exc}")
+            self._set_busy(False)
+            return
+
+        wx.CallAfter(self._open_voice_dialog, voices, mapper, tts.NARRATOR_VOICE)
+        self._set_busy(False)
+
+    def _open_voice_dialog(self, voices, mapper, narrator_voice):
+        if not voices:
+            wx.MessageBox(
+                "No speaking characters detected in chapter 1. The fic "
+                "may be first-person narration with no dialogue, or the "
+                "dialogue attribution heuristic couldn't find attributed "
+                "speakers.",
+                "Preview",
+                wx.OK | wx.ICON_INFORMATION, self,
+            )
+            return
+        dlg = VoicePreviewDialog(self, voices, mapper, narrator_voice)
+        dlg.ShowModal()
+        dlg.Destroy()
 
     def _on_update(self, event):
         if self._downloading:
@@ -945,6 +1013,188 @@ class MainFrame(wx.Frame):
         )
         for u in failed:
             self._log(f"  Failed: {u}")
+
+
+class VoicePreviewDialog(wx.Dialog):
+    """Show detected characters, their assigned voices, and let users play
+    a short sample or swap the voice before committing to an audiobook
+    generation run. Changes are persisted to the same voice-map JSON the
+    audiobook generator reads from, so saving and generating afterwards
+    uses the edited mapping.
+    """
+
+    SAMPLE_TEXT = (
+        "Hello. My name is {name}. I am a character in this story, "
+        "and this is how I will sound in the audiobook."
+    )
+
+    def __init__(self, parent, voices, mapper, narrator_voice):
+        super().__init__(
+            parent, title="Preview character voices",
+            size=(720, 500),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._voices = voices  # list of {name, gender, voice, count}
+        self._mapper = mapper
+        self._narrator_voice = narrator_voice
+        self._player = None
+        self._tmp_dir = None
+        self._build_ui()
+        self.Bind(wx.EVT_CLOSE, self._on_close)
+
+    def _build_ui(self):
+        from . import tts
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        sizer.Add(
+            wx.StaticText(
+                panel,
+                label=(
+                    "Select a character and click Play Sample to hear "
+                    "their assigned voice. Change Voice swaps to a "
+                    "different option for that character."
+                ),
+            ),
+            0, wx.ALL, 8,
+        )
+
+        self.list_ctrl = wx.ListCtrl(
+            panel,
+            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SUNKEN,
+        )
+        self.list_ctrl.SetName("Detected characters and their voices")
+        for i, (label, width) in enumerate([
+            ("Character", 180), ("Gender", 70), ("Lines", 60), ("Voice", 300),
+        ]):
+            self.list_ctrl.InsertColumn(i, label, width=width)
+        self._refresh_rows()
+        self.list_ctrl.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_play)
+        sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.play_btn = wx.Button(panel, label="&Play Sample")
+        self.play_btn.Bind(wx.EVT_BUTTON, self._on_play)
+        btn_row.Add(self.play_btn, 0, wx.RIGHT, 8)
+
+        self.change_btn = wx.Button(panel, label="&Change Voice...")
+        self.change_btn.Bind(wx.EVT_BUTTON, self._on_change_voice)
+        btn_row.Add(self.change_btn, 0, wx.RIGHT, 8)
+
+        self.narrator_btn = wx.Button(panel, label="Play &Narrator")
+        self.narrator_btn.Bind(wx.EVT_BUTTON, self._on_play_narrator)
+        btn_row.Add(self.narrator_btn, 0)
+
+        btn_row.AddStretchSpacer(1)
+        ok_btn = wx.Button(panel, id=wx.ID_OK, label="&OK")
+        ok_btn.SetDefault()
+        btn_row.Add(ok_btn, 0)
+
+        sizer.Add(btn_row, 0, wx.EXPAND | wx.ALL, 8)
+        panel.SetSizer(sizer)
+
+        # Pre-create a temp dir for sample files, reusing across plays
+        import tempfile
+        self._tmp_dir = Path(tempfile.mkdtemp(prefix="ffn-preview-"))
+
+    def _refresh_rows(self):
+        self.list_ctrl.DeleteAllItems()
+        for entry in self._voices:
+            row = self.list_ctrl.GetItemCount()
+            self.list_ctrl.InsertItem(row, entry["name"])
+            self.list_ctrl.SetItem(row, 1, entry["gender"])
+            self.list_ctrl.SetItem(row, 2, str(entry.get("count", "")))
+            self.list_ctrl.SetItem(row, 3, entry["voice"])
+        if self._voices:
+            self.list_ctrl.Focus(0)
+            self.list_ctrl.Select(0)
+
+    def _selected_index(self):
+        idx = self.list_ctrl.GetFirstSelected()
+        return idx if 0 <= idx < len(self._voices) else -1
+
+    def _stop_player(self):
+        if self._player and self._player.poll() is None:
+            try:
+                self._player.terminate()
+            except Exception:
+                pass
+        self._player = None
+
+    def _play_voice(self, voice, name):
+        from . import tts
+        import threading
+        self._stop_player()
+        sample = self.SAMPLE_TEXT.format(name=name)
+        safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", name)[:40] or "sample"
+        out_path = self._tmp_dir / f"{safe_name}-{voice}.mp3"
+
+        def worker():
+            try:
+                if not out_path.exists() or out_path.stat().st_size == 0:
+                    tts.synthesize_sample(voice, sample, out_path)
+                self._player = tts.play_audio_file(out_path)
+            except Exception as exc:
+                wx.CallAfter(
+                    wx.MessageBox,
+                    f"Could not play sample: {exc}",
+                    "Preview error", wx.OK | wx.ICON_ERROR, self,
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_play(self, event):
+        idx = self._selected_index()
+        if idx < 0:
+            return
+        entry = self._voices[idx]
+        self._play_voice(entry["voice"], entry["name"])
+
+    def _on_play_narrator(self, event):
+        self._play_voice(self._narrator_voice, "Narrator")
+
+    def _on_change_voice(self, event):
+        idx = self._selected_index()
+        if idx < 0:
+            return
+        entry = self._voices[idx]
+        from .tts import FEMALE_VOICES, MALE_VOICES, NEUTRAL_VOICES
+
+        if entry["gender"] == "female":
+            candidates = FEMALE_VOICES
+        elif entry["gender"] == "male":
+            candidates = MALE_VOICES
+        else:
+            candidates = NEUTRAL_VOICES
+
+        dlg = wx.SingleChoiceDialog(
+            self,
+            f"Pick a voice for {entry['name']}:",
+            "Change voice",
+            candidates,
+        )
+        try:
+            current = candidates.index(entry["voice"])
+            dlg.SetSelection(current)
+        except ValueError:
+            pass
+        if dlg.ShowModal() == wx.ID_OK:
+            new_voice = dlg.GetStringSelection()
+            if new_voice and new_voice != entry["voice"]:
+                entry["voice"] = new_voice
+                self._mapper.mapping[entry["name"]] = new_voice
+                self._mapper.save()
+                self._refresh_rows()
+                self.list_ctrl.Focus(idx)
+                self.list_ctrl.Select(idx)
+        dlg.Destroy()
+
+    def _on_close(self, event):
+        self._stop_player()
+        import shutil as _shutil
+        if self._tmp_dir and self._tmp_dir.exists():
+            _shutil.rmtree(self._tmp_dir, ignore_errors=True)
+        event.Skip()
 
 
 def main():
