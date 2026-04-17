@@ -1,3 +1,3 @@
-"""ffn-dl: Cross-platform fanfiction.net downloader."""
+"""ffn-dl: Cross-platform fanfiction downloader."""
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
