@@ -532,8 +532,42 @@ RR_ORDER_BY = {
     "title": "title",
 }
 
+# RR's curated discovery lists. When one of these is picked, the search
+# switches from /fictions/search?title=... to /fictions/<slug>, which
+# doesn't accept a free-text query but does accept tagsAdd.
+RR_LISTS = {
+    "search": None,
+    "best rated": "best-rated",
+    "trending": "trending",
+    "active popular": "active-popular",
+    "weekly popular": "weekly-popular",
+    "monthly popular": "monthly-popular",
+    "latest updates": "latest-updates",
+    "new releases": "new-releases",
+    "complete": "complete",
+    "rising stars": "rising-stars",
+}
+
 
 def _build_rr_search_url(query, filters, page=1):
+    list_key = (filters.get("list") or "").strip().lower()
+    list_slug = RR_LISTS.get(list_key)
+    if list_slug:
+        # List endpoints ignore `title=`. Keep tagsAdd working so users
+        # can browse e.g. "Rising Stars tagged progression".
+        params = {}
+        if page and page > 1:
+            params["page"] = int(page)
+        tag_list = []
+        if filters.get("tags"):
+            tag_list = [
+                t.strip() for t in str(filters["tags"]).split(",")
+                if t.strip()
+            ]
+        query_parts = list(params.items()) + [("tagsAdd", t) for t in tag_list]
+        suffix = "?" + urlencode(query_parts) if query_parts else ""
+        return RR_BASE + f"/fictions/{list_slug}" + suffix
+
     params = {}
     if query:
         params["title"] = query
@@ -549,9 +583,7 @@ def _build_rr_search_url(query, filters, page=1):
     if order and order in RR_ORDER_BY and RR_ORDER_BY[order] != "relevance":
         params["orderBy"] = RR_ORDER_BY[order]
     if filters.get("tags"):
-        # Comma-separated: "magic,dungeons" → tagsAdd=magic&tagsAdd=dungeons
         tag_list = [t.strip() for t in str(filters["tags"]).split(",") if t.strip()]
-        # urlencode supports duplicate keys via doseq
         return (
             RR_BASE + "/fictions/search?" +
             urlencode(
@@ -578,8 +610,17 @@ def _parse_rr_results(html):
         # Author — not directly shown in search results, leave blank
         author = ""
 
-        # Status labels (ONGOING/COMPLETED/etc.) and type (Original/Fanfiction)
+        # Status labels (ONGOING/COMPLETED/etc.) and type (Original/Fanfiction).
+        # STUB is orthogonal to completion state: the author stubbed the
+        # fiction (usually because it's been published elsewhere), but the
+        # work may still be ongoing or complete underneath. Track it as a
+        # flag and combine with whatever completion label is present. When
+        # the card only carries STUB with no completion label (common for
+        # stubbed works), flag the result for later enrichment from the
+        # fiction page — see search_royalroad().
         status = "In-Progress"
+        stubbed = False
+        completion_from_card = False
         rating = "?"
         labels = [
             lbl.get_text(strip=True).upper()
@@ -588,8 +629,20 @@ def _parse_rr_results(html):
         for lbl in labels:
             if lbl == "COMPLETED":
                 status = "Complete"
-            elif lbl in ("HIATUS", "STUB", "DROPPED", "INACTIVE"):
+                completion_from_card = True
+            elif lbl in ("HIATUS", "DROPPED", "INACTIVE"):
                 status = lbl.title()
+                completion_from_card = True
+            elif lbl == "ONGOING":
+                status = "In-Progress"
+                completion_from_card = True
+            elif lbl == "STUB":
+                stubbed = True
+        stubbed_unknown = stubbed and not completion_from_card
+        if stubbed and completion_from_card:
+            status = f"{status} (Stubbed)"
+        elif stubbed:
+            status = "Stubbed"
 
         # Genre tags
         tag_links = item.find_all("a", class_="fiction-tag")
@@ -620,9 +673,34 @@ def _parse_rr_results(html):
             "rating": rating,
             "fandom": genre_or_fandom,
             "status": status,
+            "_stubbed_unknown": stubbed_unknown,
         })
 
     return results
+
+
+def _fetch_rr_fiction_status(session, fiction_url):
+    """Pull the canonical completion label (Complete/In-Progress/Hiatus/…)
+    from a Royal Road fiction page. Used to fill in the status for
+    stubbed search results, whose cards don't carry completion info.
+    Returns None if the page can't be parsed.
+    """
+    try:
+        resp = session.get(fiction_url, timeout=30)
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
+    soup = BeautifulSoup(resp.text, "lxml")
+    for lbl in soup.find_all("span", class_="label"):
+        text = lbl.get_text(strip=True).upper()
+        if text == "COMPLETED":
+            return "Complete"
+        if text == "ONGOING":
+            return "In-Progress"
+        if text in ("HIATUS", "DROPPED", "INACTIVE"):
+            return text.title()
+    return None
 
 
 def search_royalroad(query, *, page=1, **filters):
@@ -633,8 +711,14 @@ def search_royalroad(query, *, page=1, **filters):
         type:     any / original / fanfiction
         order_by: relevance / popularity / last update / pages / rating / title
         tags:     comma-separated tag list (e.g. "progression,magic")
+        list:     search (default) / best rated / trending / active popular /
+                  weekly popular / monthly popular / latest updates /
+                  new releases / complete / rising stars
 
-    `page` (keyword-only) selects a specific results page.
+    `page` (keyword-only) selects a specific results page. When `list` is
+    set to one of the non-search values, the free-text query is ignored
+    and the corresponding RR discovery page is browsed instead; `tags`
+    still filters, but `status`/`type`/`order_by` do not apply.
     """
     url = _build_rr_search_url(query, filters, page=page)
     session = curl_requests.Session(impersonate="chrome")
@@ -643,7 +727,16 @@ def search_royalroad(query, *, page=1, **filters):
         raise RuntimeError(
             f"Royal Road search failed (HTTP {resp.status_code})."
         )
-    return _parse_rr_results(resp.text)
+    results = _parse_rr_results(resp.text)
+    # Enrich stubbed results whose cards don't carry a completion label.
+    # The fiction page reliably does, so one cheap GET per such row
+    # gives us "Complete (Stubbed)" instead of a bare "Stubbed".
+    for r in results:
+        if r.pop("_stubbed_unknown", False):
+            real = _fetch_rr_fiction_status(session, r["url"])
+            if real:
+                r["status"] = f"{real} (Stubbed)"
+    return results
 
 
 # ── Literotica search ─────────────────────────────────────────────

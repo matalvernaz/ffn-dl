@@ -270,6 +270,56 @@ class TestCollapseLiteroticaSeries:
         assert collapsed[0].get("is_series") is True
         assert len(collapsed[0]["series_parts"]) == 2
 
+    def test_rr_list_browse_ignores_query(self):
+        from ffn_dl.search import _build_rr_search_url
+        url = _build_rr_search_url("chickens", {"list": "rising stars"})
+        assert url.endswith("/fictions/rising-stars"), url
+
+    def test_rr_list_browse_preserves_tags_and_page(self):
+        from ffn_dl.search import _build_rr_search_url
+        url = _build_rr_search_url(
+            "", {"list": "best rated", "tags": "progression,magic"},
+            page=3,
+        )
+        assert "/fictions/best-rated?" in url
+        assert "page=3" in url
+        assert "tagsAdd=progression" in url
+        assert "tagsAdd=magic" in url
+
+    def test_rr_search_default_uses_search_endpoint(self):
+        from ffn_dl.search import _build_rr_search_url
+        url = _build_rr_search_url("dungeon", {})
+        assert "/fictions/search?" in url
+        assert "title=dungeon" in url
+
+    def test_rr_stub_with_completion_label_shows_combined(self):
+        from ffn_dl.search import _parse_rr_results
+        html = '''
+        <div class="fiction-list-item">
+          <h2 class="fiction-title"><a href="/fiction/1/x">X</a></h2>
+          <span class="label">Original</span>
+          <span class="label">COMPLETED</span>
+          <span class="label">STUB</span>
+        </div>
+        '''
+        results = _parse_rr_results(html)
+        assert len(results) == 1
+        assert results[0]["status"] == "Complete (Stubbed)"
+        assert results[0].get("_stubbed_unknown") is False
+
+    def test_rr_stub_without_completion_flagged_for_enrichment(self):
+        from ffn_dl.search import _parse_rr_results
+        html = '''
+        <div class="fiction-list-item">
+          <h2 class="fiction-title"><a href="/fiction/1/x">X</a></h2>
+          <span class="label">Original</span>
+          <span class="label">STUB</span>
+        </div>
+        '''
+        results = _parse_rr_results(html)
+        assert results[0]["status"] == "Stubbed"
+        assert results[0]["_stubbed_unknown"] is True
+
     def test_annual_year_slugs_not_treated_as_series(self):
         # /s/foo-2023 and /s/foo-2024 are common for annual one-shots.
         # Without a chapter marker in the title, they should NOT be

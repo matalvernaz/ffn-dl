@@ -87,11 +87,14 @@ def _ao3_search_spec():
 
 
 def _royalroad_search_spec():
-    from .search import RR_ORDER_BY, RR_STATUS, RR_TYPE, search_royalroad
+    from .search import (
+        RR_LISTS, RR_ORDER_BY, RR_STATUS, RR_TYPE, search_royalroad,
+    )
     return {
         "label": "Search Royal Road",
         "search_fn": search_royalroad,
         "filters": [
+            ("&Browse:", "list", list(RR_LISTS)),
             ("S&tatus:", "status", list(RR_STATUS)),
             ("&Type:", "type", list(RR_TYPE)),
             ("Sor&t by:", "order_by", list(RR_ORDER_BY)),
@@ -431,7 +434,7 @@ class MainFrame(wx.Frame):
                     not busy and has_selection and selected_is_series
                 )
                 tab["load_more_btn"].Enable(
-                    not busy and bool(tab.get("last_query"))
+                    not busy and tab.get("last_query") is not None
                 )
         wx.CallAfter(_update)
 
@@ -864,12 +867,19 @@ class MainFrame(wx.Frame):
     def _on_search(self, site_key):
         tab = self._tabs[site_key]
         query = tab["query_ctrl"].GetValue().strip()
-        if not query:
-            self._log("Error: Please enter a search query.")
-            return
         if self._downloading:
             return
         filters = self._collect_filters(tab)
+        # RR list browse (Rising Stars, Best Rated, etc.) doesn't need a
+        # free-text query; everything else still does.
+        list_browse = (
+            site_key == "royalroad"
+            and filters.get("list")
+            and filters["list"].strip().lower() != "search"
+        )
+        if not query and not list_browse:
+            self._log("Error: Please enter a search query.")
+            return
         self._set_busy(True)
         tab["results_ctrl"].DeleteAllItems()
         tab["summary_ctrl"].SetValue("")
@@ -895,7 +905,10 @@ class MainFrame(wx.Frame):
 
     def _on_load_more(self, site_key):
         tab = self._tabs[site_key]
-        if self._downloading or not tab.get("last_query"):
+        # last_query may be empty when the user is browsing an RR list
+        # (no free-text query); gate on whether a search has actually
+        # been run, via the presence of last_filters.
+        if self._downloading or tab.get("last_query") is None:
             return
         self._set_busy(True)
         next_page = tab.get("next_page", 2)

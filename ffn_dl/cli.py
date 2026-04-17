@@ -455,6 +455,7 @@ def _handle_search(args):
             "type": getattr(args, "rr_type", None),
             "order_by": getattr(args, "rr_order_by", None),
             "tags": getattr(args, "rr_tags", None),
+            "list": getattr(args, "rr_list", None),
         }
         search_fn = search_royalroad
     elif args.site == "literotica":
@@ -478,7 +479,8 @@ def _handle_search(args):
         search_fn = search_ffn
     filters = {k: v for k, v in filters.items() if v}
 
-    print(f"Searching {site_label} for: {args.search}")
+    query_desc = args.search if args.search else "(no query — list browse)"
+    print(f"Searching {site_label} for: {query_desc}")
     if filters:
         print("Filters: " + ", ".join(f"{k}={v}" for k, v in filters.items()))
     print()
@@ -1188,6 +1190,17 @@ def main(argv=None):
         help="Royal Road-only: comma-separated tag list (e.g. 'progression,magic')",
     )
     parser.add_argument(
+        "--rr-list",
+        metavar="LIST",
+        help=(
+            "Royal Road-only: browse one of RR's curated lists instead of "
+            "free-text search. Options: best rated / trending / active "
+            "popular / weekly popular / monthly popular / latest updates / "
+            "new releases / complete / rising stars. The query argument is "
+            "ignored when this is set."
+        ),
+    )
+    parser.add_argument(
         "--lit-page",
         type=int,
         metavar="N",
@@ -1230,7 +1243,11 @@ def main(argv=None):
     )
 
     # --- Search mode ---
-    if args.search:
+    # RR list browse mode doesn't need a free-text query, so allow
+    # --rr-list to stand in for --search.
+    if args.search or getattr(args, "rr_list", None):
+        if not args.search:
+            args.search = ""
         _handle_search(args)
         return
 

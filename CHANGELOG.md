@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.6.3 — 2026-04-17
+
+### Royal Road
+
+- **STUB status is no longer misleading**: Royal Road's `STUB` label
+  means the author trimmed chapters after publishing elsewhere — it's
+  a state, not a size descriptor. The 1.6.0 display of "Stub" in the
+  status column read like "this is a short piece" for fictions with
+  hundreds of remaining chapters. STUB is now separated from the
+  completion state: the status becomes `Stubbed` on its own, or
+  combined as `Complete (Stubbed)` / `In-Progress (Stubbed)` / etc.
+  when the card or fiction page exposes a completion label.
+- **Enrichment fetch for stubbed results**: when the search card
+  carries only STUB with no completion label, one follow-up GET to
+  the fiction page pulls the real status (Complete / In-Progress /
+  Hiatus / Dropped / Inactive) and combines them. Some stubbed
+  fictions don't expose completion anywhere public on RR; those
+  still display as plain `Stubbed`.
+- **List browse for RR**: a new `Browse` dropdown on the Royal Road
+  tab lets you pull one of RR's curated lists — Best Rated, Trending,
+  Active Popular, Weekly/Monthly Popular, Latest Updates, New
+  Releases, Complete, Rising Stars — instead of a free-text search.
+  Tags still filter the list. CLI equivalent: `--rr-list "rising
+  stars"` (no `--search` argument needed).
+
 ## 1.6.2 — 2026-04-17
 
 ### Fixes
