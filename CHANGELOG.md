@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.12.9 — 2026-04-18
+
+### Fix
+
+- **Auto-updater no longer loops on every launch.** The v1.12.3–v1.12.8
+  releases shipped with ``ffn_dl/__init__.py`` still pinned to
+  ``1.12.7``, so the installed build reported itself as 1.12.7 even
+  after a successful update. The updater then saw the newer tag on
+  GitHub, re-downloaded, re-extracted, relaunched, and immediately
+  offered the same update again. Bumping ``__version__`` in lockstep
+  with ``pyproject.toml`` fixes the compare.
+
 ## 1.12.8 — 2026-04-18
 
 ### Fix
