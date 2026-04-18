@@ -541,6 +541,15 @@ def _refine_with_fastcoref(segments, full_text):
 _booknlp_cache: dict[str, object] = {}
 _booknlp_windows_patched = False
 _booknlp_state_dict_patched = False
+_booknlp_text_encoding_patched = False
+
+
+def _basename_any_sep(s: str) -> str:
+    """Strip any directory prefix using either ``/`` or ``\\`` as a
+    separator, regardless of the host OS. ``os.path.basename`` on POSIX
+    Python doesn't recognise ``\\`` as a separator, which makes the
+    Windows-path shim a silent no-op on Linux/macOS test runs."""
+    return s.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
 
 
 def _patch_booknlp_windows_paths() -> None:
@@ -559,18 +568,17 @@ def _patch_booknlp_windows_paths() -> None:
 
     We patch each affected module's ``re`` binding with a shim that
     intercepts only the ``re.sub("google_bert", ...)`` call used for
-    this derivation and strips the directory via ``os.path.basename``
-    before the real substitution runs. Every other regex flows
-    through unchanged.
+    this derivation and strips the directory before the real
+    substitution runs. Every other regex flows through unchanged.
+
+    Runs on every platform: on POSIX the basename strip is a no-op for
+    POSIX paths, but it ensures any Windows-style path passed in
+    (e.g. via a config) is handled too.
     """
     global _booknlp_windows_patched
     if _booknlp_windows_patched:
         return
-    if sys.platform != "win32":
-        _booknlp_windows_patched = True
-        return
 
-    import os.path as _osp
     import re as _re
     from booknlp.english import entity_tagger, litbank_coref, bert_qa
 
@@ -580,7 +588,7 @@ def _patch_booknlp_windows_paths() -> None:
 
         def sub(self, pattern, repl, string, *a, **k):
             if pattern == "google_bert" and isinstance(string, str):
-                string = _osp.basename(string)
+                string = _basename_any_sep(string)
             return self._real.sub(pattern, repl, string, *a, **k)
 
         def __getattr__(self, name):
@@ -639,11 +647,64 @@ def _patch_booknlp_state_dict() -> None:
     _booknlp_state_dict_patched = True
 
 
+def _patch_booknlp_text_encoding() -> None:
+    """Force every text-mode ``open()`` inside BookNLP to use UTF-8.
+
+    Several BookNLP modules read input or auxiliary files with bare
+    ``open(filename)`` — no ``encoding=`` argument. Python on Windows
+    falls back to ``locale.getpreferredencoding()`` (cp1252), which
+    chokes on UTF-8 fanfic text that contains smart quotes (U+201D
+    encodes to ``E2 80 9D``; ``0x9D`` is undefined in cp1252):
+
+        'charmap' codec can't decode byte 0x9d in position 1701: ...
+
+    The most visible call site is ``english_booknlp.process()`` which
+    opens the input book.txt; we also patch every other module that
+    does an unencoded text read so reruns and re-imports don't
+    regress. Binary mode opens are passed through unchanged.
+    """
+    global _booknlp_text_encoding_patched
+    if _booknlp_text_encoding_patched:
+        return
+
+    import builtins
+
+    from booknlp.english import (
+        english_booknlp,
+        entity_tagger,
+        gender_inference_model_1,
+        name_coref,
+        bert_coref_quote_pronouns,
+    )
+    from booknlp.common import b3, sequence_layered_reader
+
+    real_open = builtins.open
+
+    def _utf8_open(file, mode="r", *a, **k):
+        if "b" not in mode and "encoding" not in k:
+            k["encoding"] = "utf-8"
+        return real_open(file, mode, *a, **k)
+
+    for mod in (
+        english_booknlp,
+        entity_tagger,
+        gender_inference_model_1,
+        name_coref,
+        bert_coref_quote_pronouns,
+        b3,
+        sequence_layered_reader,
+    ):
+        mod.open = _utf8_open
+
+    _booknlp_text_encoding_patched = True
+
+
 def _get_booknlp_model(model_size: str):
     if model_size in _booknlp_cache:
         return _booknlp_cache[model_size]
     _patch_booknlp_windows_paths()
     _patch_booknlp_state_dict()
+    _patch_booknlp_text_encoding()
     from booknlp.booknlp import BookNLP
     model = BookNLP(
         "en",

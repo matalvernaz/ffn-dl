@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.12.8 — 2026-04-18
+
+### Fix
+
+- **BookNLP attribution no longer dies on smart-quoted fanfic.** Several
+  BookNLP modules — most visibly ``english_booknlp.process()`` — open
+  text files with bare ``open(filename)``. On Windows that defaults to
+  cp1252 and chokes on UTF-8 right-double-quotes (``E2 80 9D``) with
+  ``'charmap' codec can't decode byte 0x9d``.
+  ``_patch_booknlp_text_encoding()`` shims ``open`` in every affected
+  module to default to ``encoding="utf-8"`` for text reads.
+- **Windows-path shim now runs on every platform** instead of only when
+  ``sys.platform == "win32"``. ``os.path.basename`` on POSIX Python
+  doesn't recognise ``\\`` as a separator, so the previous guard made
+  the shim a silent no-op on any non-Windows host that received a
+  Windows-style model path. Replaced ``_osp.basename`` with an
+  OS-agnostic ``rsplit`` on both separators.
+
 ## 1.12.7 — 2026-04-18
 
 ### Change
