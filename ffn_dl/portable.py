@@ -7,6 +7,7 @@ The Windows release ships as a zip that unpacks to a single folder:
       _internal/              <- PyInstaller bundle
       settings.ini            <- GUI preferences (was: Windows registry)
       cache/                  <- chapter cache (was: ~/.cache/ffn-dl)
+        huggingface/          <- HF Hub model downloads (via HF_HOME)
       neural/
         py/                   <- embedded Python for neural backends
         deps/                 <- pip-installed neural backends
@@ -163,6 +164,16 @@ def setup_env() -> None:
     for sub in ("cache", "neural"):
         (root / sub).mkdir(parents=True, exist_ok=True)
 
+    # Unify the HuggingFace download cache with ffn-dl's own cache dir.
+    # Without this HF lands in ``<HOME>/.cache/huggingface/`` which — once
+    # ``HOME`` is redirected below — shows up as a hidden ``.cache/``
+    # folder next to the visible ``cache/`` folder, which is just
+    # confusing. Migrate any pre-existing download so users don't re-
+    # fetch the ~300 MB BERT weights.
+    hf_home = root / "cache" / "huggingface"
+    _migrate_hf_cache(root / ".cache" / "huggingface", hf_home)
+    os.environ.setdefault("HF_HOME", str(hf_home))
+
     if is_frozen():
         # BookNLP's model loader does os.path.expanduser("~/booknlp_models").
         # On Windows that checks USERPROFILE first, HOMEDRIVE+HOMEPATH
@@ -173,3 +184,29 @@ def setup_env() -> None:
         if sys.platform == "win32":
             os.environ["USERPROFILE"] = home_str
     _env_set = True
+
+
+def _migrate_hf_cache(old: Path, new: Path) -> None:
+    """Move a pre-existing HuggingFace cache from ``old`` to ``new``.
+
+    Only fires when ``old`` exists and ``new`` doesn't — any other state
+    (already migrated, fresh install, both exist because the user has
+    been tinkering) is left alone so we never clobber real data.
+    Failures are swallowed: the worst case is HF re-downloads into the
+    new path on first use.
+    """
+    try:
+        if not old.exists() or new.exists():
+            return
+        new.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.move(str(old), str(new))
+        # Clean up the now-empty ``.cache`` parent if nothing else is
+        # in there. ``rmdir`` silently refuses if it isn't empty, so
+        # this is safe when other tools happen to share that folder.
+        try:
+            old.parent.rmdir()
+        except OSError:
+            pass
+    except Exception:
+        pass

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.12.7 — 2026-04-18
+
+### Change
+
+- **HuggingFace downloads now live under the visible ``cache/`` folder**
+  instead of the hidden ``.cache/huggingface/`` sibling that the
+  ``HOME`` redirect used to create. ``portable.setup_env()`` sets
+  ``HF_HOME=<root>/cache/huggingface`` and moves any pre-existing
+  download on first run, so the ~300 MB BERT weights aren't
+  re-fetched. Nothing changes for the user except that the portable
+  folder is less confusing to browse.
+
 ## 1.12.6 — 2026-04-18
 
 ### Fix
