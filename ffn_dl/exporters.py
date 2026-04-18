@@ -498,3 +498,25 @@ EXPORTERS = {
     "html": export_html,
     "epub": export_epub,
 }
+
+
+def check_format_deps(fmt: str) -> None:
+    """Raise ImportError with an install hint if the exporter for `fmt`
+    needs an optional dependency that isn't installed. Cheap to call —
+    meant as a pre-flight check before a long download."""
+    if fmt == "epub":
+        try:
+            import ebooklib  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "EPUB export requires the 'ebooklib' package.\n"
+                "Install it with: pip install 'ffn-dl[epub]'  (or pip install ebooklib)"
+            )
+    elif fmt == "audio":
+        try:
+            import edge_tts  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "Audiobook export requires the 'edge-tts' package.\n"
+                "Install it with: pip install 'ffn-dl[audio]'  (or pip install edge-tts)"
+            )

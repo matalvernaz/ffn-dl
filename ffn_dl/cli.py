@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .ao3 import AO3LockedError, AO3Scraper
-from .exporters import DEFAULT_TEMPLATE, EXPORTERS
+from .exporters import DEFAULT_TEMPLATE, EXPORTERS, check_format_deps
 from .ficwad import FicWadScraper
 from .literotica import LiteroticaScraper
 from .mediaminer import MediaMinerScraper
@@ -135,6 +135,11 @@ def _merge_stories(series_name, series_url, stories):
 
 def _handle_merge_series(series_urls, args, output_dir):
     """Download each series URL (AO3 or Literotica), merge its works, export as one file."""
+    try:
+        check_format_deps(args.format)
+    except ImportError as exc:
+        print(f"Missing dependency: {exc}", file=sys.stderr)
+        return False
     all_ok = True
     for series_url in series_urls:
         scraper = _build_scraper(series_url, args)
@@ -204,6 +209,12 @@ def _handle_merge_parts(series_name, series_url, work_urls, args, output_dir):
     """
     if not work_urls:
         print(f"No parts to merge for {series_name}.", file=sys.stderr)
+        return False
+
+    try:
+        check_format_deps(args.format)
+    except ImportError as exc:
+        print(f"Missing dependency: {exc}", file=sys.stderr)
         return False
 
     # Resolve the anchor part to its canonical series (Literotica only).
@@ -300,6 +311,7 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
         print(f"  [{current}/{total}] {title}{tag}")
 
     try:
+        check_format_deps(args.format)
         story_id = scraper.parse_story_id(url)
         if update_path:
             print(
@@ -318,7 +330,11 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
         )
 
         new_count = len(story.chapters)
-        words = story.metadata.get("words", "?")
+        words = story.metadata.get("words", "")
+        if not words:
+            from .exporters import _count_story_words
+            counted = _count_story_words(story)
+            words = f"{counted:,}" if counted else "?"
         status = story.metadata.get("status", "Unknown")
 
         if update_path and new_count == 0:
