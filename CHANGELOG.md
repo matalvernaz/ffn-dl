@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.16.1 — 2026-04-18
+
+### Fix
+
+- **Windows release build no longer fails on a flaky ffmpeg mirror.**
+  GitHub's "releases/download/latest" redirect occasionally serves a
+  ~92-byte stub instead of the real archive, and the build step
+  trusted whatever arrived. The v1.16.0 tag fell into exactly that
+  hole and never produced an installer. The build now size-checks
+  the download and retries up to five times before giving up, so
+  transient hiccups don't swallow a release.
+
 ## 1.16.0 — 2026-04-18
 
 ### Add

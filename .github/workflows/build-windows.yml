@@ -26,8 +26,28 @@ jobs:
 
       - name: Download ffmpeg
         shell: bash
+        # GitHub's "/releases/download/latest/..." redirect is occasionally
+        # rate-limited or serves a ~92-byte stub instead of the real zip.
+        # curl --retry only retries on transport errors, so we have to
+        # size-check the payload ourselves and loop on a too-small file.
         run: |
-          curl -L -o ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
+          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
+          for attempt in 1 2 3 4 5; do
+            curl -L --fail --retry 3 --retry-delay 5 --retry-all-errors \
+              --connect-timeout 30 --max-time 300 \
+              -o ffmpeg.zip "$url" || true
+            size=$(wc -c < ffmpeg.zip 2>/dev/null || echo 0)
+            echo "Attempt $attempt: ffmpeg.zip is $size bytes"
+            if [ "$size" -gt 1000000 ]; then
+              break
+            fi
+            echo "Too small; retrying in 15s..."
+            sleep 15
+          done
+          if [ "$(wc -c < ffmpeg.zip)" -lt 1000000 ]; then
+            echo "ffmpeg.zip never reached a sane size — failing the build."
+            exit 1
+          fi
           unzip -j ffmpeg.zip "*/bin/ffmpeg.exe" "*/bin/ffprobe.exe" -d ffmpeg_bin/
           ls -la ffmpeg_bin/
 
