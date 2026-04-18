@@ -56,10 +56,18 @@ def test_does_not_match_real_prose():
 
 
 def test_does_not_match_plain_letter_repetition():
-    # "ooo"/"OOO"/"XXX" alone could be prose or a rating — ambiguous
-    # enough that we decline to treat them as dividers.
-    for line in ["ooo", "OOO", "XXX"]:
+    # ``ooo`` / ``OOO`` / ``xxx`` stay excluded — rating labels or
+    # prose affection markers, ambiguous enough to be unsafe. Pure
+    # uppercase X runs are handled separately below.
+    for line in ["ooo", "OOO", "xxx"]:
         assert not _is_scene_break_line(line), line
+
+
+def test_pure_uppercase_x_run_matches():
+    # Overwhelmingly used as a scene break in fanfic; uppercase ``O``
+    # runs stay excluded for disambiguation.
+    for line in ["XXX", "XXXX", "XXXXX", "X X X", "X X X X"]:
+        assert _is_scene_break_line(line), line
 
 
 # ── HTML → audiobook text pipeline ───────────────────────────────────

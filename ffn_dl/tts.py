@@ -1344,13 +1344,22 @@ def _is_scene_break_line(text):
     if len(s) > 40:
         return False
     # Pure ornamental-letter line: accept only distinctive patterns —
-    # mixed case (``oOo``, ``xXx``, ``ooOoo``) or containing a digit 0
-    # (``o0o``). This avoids treating a lowercase ``ooo`` (rare prose
-    # laugh) or an uppercase ``OOO`` (rating/label) as a break.
+    # mixed case (``oOo``, ``xXx``, ``ooOoo``), containing a digit 0
+    # (``o0o``), or a pure-uppercase X run (``XXX`` / ``XXXX`` /
+    # ``X X X``). The last one is included because ``XXX`` is
+    # overwhelmingly used as a scene break in fanfic; ``OOO`` is
+    # deliberately still excluded since it's ambiguous with rating
+    # labels, and lowercase ``ooo`` / ``xxx`` stay excluded as prose
+    # affection/laugh markers.
     has_lower = any(c in "ox" for c in s)
     has_upper = any(c in "OX" for c in s)
     has_zero = "0" in s
-    return (has_lower and has_upper) or has_zero
+    if (has_lower and has_upper) or has_zero:
+        return True
+    letters = [c for c in s if c.isalpha()]
+    if len(letters) >= 3 and all(c == "X" for c in letters):
+        return True
+    return False
 
 
 def _normalize_scene_break_lines(text):

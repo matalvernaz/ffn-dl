@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.11.2 — 2026-04-17
+
+### Improve
+
+- **`XXX` / `XXXX` / `X X X` now count as scene-break dividers.**
+  Pure-uppercase `X` runs of 3+ characters are overwhelmingly used
+  as scene breaks in fanfic but were previously excluded from the
+  detector along with `OOO` and lowercase `ooo` / `xxx` — the
+  collective exclusion was too broad. `OOO` and the lowercase
+  variants stay excluded (ambiguous with rating labels and prose
+  affection/laugh markers); uppercase `X` runs get through. Applies
+  to both the HTML/EPUB `--hr-as-stars` path and the TTS scene-break
+  detector, so `<p>XXX</p>` now renders as `* * *` (or a silence
+  beat in audio).
+
 ## 1.11.1 — 2026-04-17
 
 ### Improve

@@ -348,10 +348,19 @@ def _is_divider_text(text: str) -> bool:
     # mid-prose.
     if len(s) > 40:
         return False
+    # Mixed case (``oOo``, ``xXx``), zero-bearing (``o0o``), or pure-
+    # uppercase X runs (``XXX`` / ``XXXX`` / ``X X X``). ``OOO`` and
+    # lowercase ``ooo`` / ``xxx`` stay excluded — rating labels and
+    # prose affection markers — see ``tts._is_scene_break_line``.
     has_lower = any(c in "ox" for c in s)
     has_upper = any(c in "OX" for c in s)
     has_zero = "0" in s
-    return (has_lower and has_upper) or has_zero
+    if (has_lower and has_upper) or has_zero:
+        return True
+    letters = [c for c in s if c.isalpha()]
+    if len(letters) >= 3 and all(c == "X" for c in letters):
+        return True
+    return False
 
 
 def _apply_hr_as_stars(html: str) -> str:

@@ -227,6 +227,14 @@ class TestDividerAsStars:
         assert "OK" in out
         assert out.count("scenebreak") == 0
 
+    def test_uppercase_x_divider_converted(self):
+        # ``XXX`` and longer runs are overwhelmingly scene breaks in
+        # fanfic; detector accepts them while still rejecting ``OOO``.
+        html = "<p>Prose.</p><p>XXX</p><p>More.</p><p>OOO</p><p>End.</p>"
+        out = _apply_hr_as_stars(html)
+        assert out.count("scenebreak") == 1  # XXX converted, OOO kept
+        assert "OOO" in out
+
 
 class TestHrAsStars:
     def test_substitutes_hr_tags(self):
