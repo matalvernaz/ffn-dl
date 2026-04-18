@@ -1800,19 +1800,37 @@ def _site_display_name(url):
     return host or "the web"
 
 
+# Structural labels that name their own place in the book. When the
+# author's chapter title *is* one of these (optionally with a
+# subtitle, e.g. "Prologue: Before the Fall"), we read it verbatim —
+# "Chapter 1. Prologue" sounds wrong.
+_STRUCTURAL_LABELS = (
+    "prologue", "prelude", "preface", "foreword", "introduction",
+    "epilogue", "afterword", "postscript", "coda",
+    "interlude", "intermission", "intermezzo",
+    "author's note", "authors note", "a/n",
+)
+
+
 def _format_chapter_heading(n, title):
     """Build the spoken heading for chapter ``n`` given its raw title.
 
     Handles the common fanfic cases: a missing/generic title collapses
-    to ``Chapter N``; a title that already names itself a chapter is
-    read verbatim; otherwise the number is prepended so the listener
-    always hears a clear chapter marker.
+    to ``Chapter N``; a title that already names itself a chapter or
+    a structural label (Prologue, Epilogue, Interlude, …) is read
+    verbatim; otherwise the number is prepended so the listener always
+    hears a clear chapter marker.
     """
     title = (title or "").strip()
     if not title:
         return f"Chapter {n}"
     if re.match(r"^chapter\b", title, re.I):
         return title
+    # Structural labels — verbatim, optionally with a ": subtitle".
+    low = title.lower()
+    for label in _STRUCTURAL_LABELS:
+        if low == label or low.startswith(label + ":") or low.startswith(label + " -"):
+            return title
     # Pure-number titles ("1", "1.", "1 -") — upgrade to "Chapter N".
     if re.match(r"^\d+\s*[.\-:)]*\s*$", title):
         return f"Chapter {n}"

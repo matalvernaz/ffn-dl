@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.15.0 — 2026-04-18
+
+### Fix
+
+- **Spoken chapter headings no longer mislabel structural chapters.**
+  A chapter titled "Prologue", "Epilogue", "Interlude", "A/N", etc.
+  (optionally with a subtitle, e.g. "Prologue: Before the Fall") is
+  now read verbatim instead of being prefixed with "Chapter N." —
+  "Chapter 1. Prologue" was wrong for every book that has a prologue.
+
 ## 1.14.0 — 2026-04-18
 
 ### Add
