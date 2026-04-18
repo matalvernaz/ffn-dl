@@ -1950,7 +1950,11 @@ def build_m4b(chapter_files, story, output_path, cover_path=None, intro_file=Non
     ]
     if cover_path and Path(cover_path).exists():
         cmd.extend(["-i", str(cover_path)])
+        # -c:v mjpeg forces JPEG-encoded cover art; without it the ipod
+        # muxer defaults to libx264, which refuses odd-dimension images
+        # (e.g. a 75x100 webp thumbnail) and aborts the whole mux.
         cmd.extend(["-map_metadata", "1", "-map", "0:a", "-map", "2:v",
+                     "-c:v", "mjpeg",
                      "-disposition:v", "attached_pic"])
     else:
         cmd.extend(["-map_metadata", "1"])

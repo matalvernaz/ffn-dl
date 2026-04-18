@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.15.2 — 2026-04-18
+
+### Fix
+
+- **M4B mux no longer fails on odd-dimension cover art.** The ipod
+  muxer was defaulting to libx264 for the cover stream, which rejects
+  any image whose width or height is not divisible by 2 (common for
+  small webp thumbnails like 75x100). Force `-c:v mjpeg` so the cover
+  is stored as JPEG attached-picture instead of being re-encoded to
+  h264.
+
 ## 1.15.1 — 2026-04-18
 
 ### Fix
