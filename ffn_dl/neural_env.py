@@ -177,7 +177,13 @@ def _download(url: str, dest: Path, log_callback=None) -> bool:
 def _enable_site_in_pth(py_dir: Path, log_callback=None) -> bool:
     """Uncomment the ``import site`` line in python3XX._pth so the
     embedded interpreter runs site.py on startup — pip's install
-    paths and our DEPS_DIR both depend on that machinery.
+    paths and our DEPS_DIR both depend on that machinery. Also adds
+    ``DEPS_DIR`` as an explicit path entry: when a ._pth file is
+    present Python IGNORES ``PYTHONPATH`` entirely (documented embed
+    behaviour), so ``run_python``'s env-var approach never made
+    packages installed under DEPS_DIR importable from subprocesses.
+    Writing the path directly into ._pth is the officially-blessed
+    way to extend the embedded interpreter's sys.path.
     """
     candidates = list(py_dir.glob("python*._pth"))
     if not candidates:
@@ -191,6 +197,23 @@ def _enable_site_in_pth(py_dir: Path, log_callback=None) -> bool:
         text = text.replace("#import site", "import site")
     elif "import site" not in text:
         text = text.rstrip() + "\nimport site\n"
+
+    deps_line = str(DEPS_DIR)
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    if deps_line not in lines:
+        # Insert before the `import site` directive so the additions
+        # are on sys.path by the time site.py runs.
+        out = []
+        inserted = False
+        for ln in lines:
+            if not inserted and ln.strip() == "import site":
+                out.append(deps_line)
+                inserted = True
+            out.append(ln)
+        if not inserted:
+            out.append(deps_line)
+        text = "\n".join(out) + "\n"
+
     pth.write_text(text, encoding="utf-8")
     return True
 
@@ -203,6 +226,12 @@ def ensure_embed_python(log_callback=None) -> bool:
     ``python_exe()`` is ready to run ``-m pip``.
     """
     if BOOTSTRAP_DONE.exists() and python_exe().exists():
+        # Re-apply the ._pth edit on every call. Older installs
+        # (pre-1.12.4) only uncommented ``import site`` without adding
+        # DEPS_DIR to the path, so subprocesses couldn't import
+        # anything we pip-installed. Idempotent: a no-op if the file
+        # is already current.
+        _enable_site_in_pth(PY_DIR, log_callback=log_callback)
         return True
 
     PY_DIR.mkdir(parents=True, exist_ok=True)

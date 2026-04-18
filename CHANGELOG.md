@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.12.4 — 2026-04-18
+
+### Fix
+
+- **Embedded Python subprocesses can now actually import the packages
+  we pip-installed into `neural/deps/`.** The `--target` pip flag puts
+  files in the right place, and `neural_env.run_python` set
+  `PYTHONPATH=<DEPS_DIR>` to make them importable — but the embeddable
+  Python ships with a `._pth` file, and per the documented embed
+  contract, `._pth` disables `PYTHONPATH` entirely. So every call to
+  `python -m spacy …` through the embedded Python died with
+  `No module named spacy`, which the v1.12.3 logger-routing change
+  finally surfaced. The fix writes the absolute `DEPS_DIR` path into
+  the `._pth` file next to the interpreter (inserted before
+  `import site` so additions are visible when site.py runs). The edit
+  is idempotent and re-applied on every `ensure_embed_python` call, so
+  installs bootstrapped against older versions self-heal on the next
+  render. Together with the `--target` fix from v1.12.3, BookNLP's
+  one-shot spaCy model download now actually lands somewhere the main
+  .exe can import from.
+
 ## 1.12.3 — 2026-04-18
 
 ### Fix
