@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.16.0 — 2026-04-18
+
+### Add
+
+- **Persistent chapter-audio cache.** Per-chapter TTS output now lives
+  under `<portable_root>/cache/chapter_audio/`, content-addressed on
+  (segments + voice assignments + narrator + rate). A failed M4B mux,
+  a cover-download retry, or a re-render with a different cover no
+  longer re-synthesises thousands of segments — only new or edited
+  chapters are spoken again. Cache hit/miss counts are logged.
+- **Spoken chapter headings now survive failed runs.** Headings are
+  synthesised separately from the body and excluded from the cache
+  key, so a one-off heading-TTS failure on an earlier run can no
+  longer poison subsequent runs with a "Chapter N. Title"-less body.
+  (This also addresses the user-visible "chapter names aren't being
+  announced" regression after the mux fixes in 1.15.1 / 1.15.2.)
+
+### Improve
+
+- **Dialogue attribution handles adverb interposition.** Patterns like
+  `"…," Harry finally said`, `"…," said Harry quietly`, and
+  `Harry quietly said, "…"` now resolve to the named speaker instead
+  of falling through to narrator voice. Adverbs are matched
+  lowercase-only so proper nouns ending in `-ly` (Sally, Riley, Holly)
+  aren't swallowed.
+- **Pre-action attribution handles multi-name action beats.** When
+  the narration before a quote mentions more than one character (e.g.
+  `Harry grinned at Ron. "Let's go."`), the subject of the *last*
+  sentence is used as the speaker instead of bailing to unattributed.
+
 ## 1.15.2 — 2026-04-18
 
 ### Fix

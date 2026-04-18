@@ -164,9 +164,13 @@ _NAME_PAT = (
     r"(?:he|she|they|it|He|She|They|It)"
     r")"
 )
-_AFTER_NAME_VERB = re.compile(rf"\s*{_NAME_PAT}\s+(?P<verb>\w+)")
+# Optional adverb between name and verb (or verb and name). Lowercase
+# only so proper nouns ending in -ly ("Sally", "Riley", "Holly") aren't
+# swallowed as manner adverbs and stripped from attribution.
+_ADVERB_OPT = r"(?:[a-z]+ly\s+)?"
+_AFTER_NAME_VERB = re.compile(rf"\s*{_NAME_PAT}\s+{_ADVERB_OPT}(?P<verb>\w+)")
 _AFTER_VERB_NAME = re.compile(
-    rf"\s*(?P<verb>\w+)\s+{_NAME_PAT}"
+    rf"\s*{_ADVERB_OPT}(?P<verb>\w+)\s+{_NAME_PAT}"
     r"(?:\s|[.,;!?])"  # require word boundary after name
 )
 
@@ -175,7 +179,7 @@ _BEFORE_ATTRIB = re.compile(
     r"(?P<name>"
     rf"(?:{_TITLE_PREFIX})?{_PROPER_TOKENS}"
     r")"
-    r'\s+(?P<verb>\w+)\s*,\s*$'
+    rf'\s+{_ADVERB_OPT}(?P<verb>\w+)\s*,\s*$'
 )
 
 # Common attribution verbs. Fanfic writers reach for non-speech verbs
@@ -492,30 +496,50 @@ def parse_segments(text):
         # Pre-action attribution — "Ron looked up. 'Trouble?'" — a
         # very common fanfic pattern where the speaker is named in
         # the immediately-preceding narration but without a speech
-        # verb. Require a SINGLE distinct proper name in the gap so
-        # ambiguous crowds don't get misattributed.
+        # verb. If only one name appears in the action beat, use it.
+        # If several do, fall back to the *last sentence's subject*:
+        # "Harry grinned at Ron. 'Hi.'" resolves to Harry, not Ron,
+        # because the subject of the sentence the quote follows is
+        # almost always the speaker in fanfic prose.
         if not speaker:
             pre_text = text[pos : match.start()]
             stripped = pre_text.strip()
             if 0 < len(stripped) <= 200:
-                raw_names = _PROPER_NAME_RE.findall(stripped)
-                clean_names = []
-                for n in raw_names:
-                    n = _strip_possessive(n)
-                    if n in _SENTENCE_STARTERS or n in _NAME_SKIP_TITLES:
-                        continue
-                    if n not in clean_names:
-                        clean_names.append(n)
-                if len(clean_names) == 1:
-                    candidate = clean_names[0]
-                    # Attach a leading honorific if present
-                    idx = stripped.rfind(candidate)
-                    preceding = stripped[max(0, idx - 20):idx].rstrip()
+                def _clean_unique(hay):
+                    out = []
+                    for n in _PROPER_NAME_RE.findall(hay):
+                        n = _strip_possessive(n)
+                        if n in _SENTENCE_STARTERS or n in _NAME_SKIP_TITLES:
+                            continue
+                        if n not in out:
+                            out.append(n)
+                    return out
+
+                def _apply_title(hay, candidate):
+                    idx = hay.rfind(candidate)
+                    if idx < 0:
+                        return candidate
+                    preceding = hay[max(0, idx - 20):idx].rstrip()
                     for title in _NAME_SKIP_TITLES:
                         if preceding.endswith(title) or preceding.endswith(title + "."):
-                            candidate = f"{title} {candidate}"
-                            break
-                    speaker = candidate
+                            return f"{title} {candidate}"
+                    return candidate
+
+                clean_names = _clean_unique(stripped)
+                if len(clean_names) == 1:
+                    speaker = _apply_title(stripped, clean_names[0])
+                elif len(clean_names) >= 2:
+                    sentences = [
+                        s.strip()
+                        for s in re.split(r"(?<=[.!?])\s+", stripped)
+                        if s.strip()
+                    ]
+                    if sentences:
+                        last_sent = sentences[-1]
+                        last_names = _clean_unique(last_sent)
+                        if last_names:
+                            # First name in the last sentence ≈ subject
+                            speaker = _apply_title(last_sent, last_names[0])
 
         # Consecutive-quote fallback: if this dialogue has no attribution
         # and the text between it and the previous quote is short OR
@@ -1610,13 +1634,15 @@ async def _generate_with_semaphore(sem, seg, voice, path, idx, ch_num, speech_ra
 async def generate_chapter_audio(
     segments, voice_mapper, output_path,
     chapter_num=0, narrator_voice=None, speech_rate=0,
-    chapter_heading=None,
 ):
     """Generate audio for a full chapter's worth of segments.
 
-    ``chapter_heading``, if provided, is synthesised in the narrator
-    voice and prepended to the chapter so the listener hears "Chapter N.
-    Title" before the prose starts.
+    Produces chapter *body* audio only — the per-chapter spoken heading
+    ("Chapter N. Title") is synthesised separately by the caller and
+    concatenated at assembly time. Keeping the heading out of the body
+    keeps chapter-body caching content-addressed on prose alone, so a
+    retitled chapter doesn't invalidate thousands of synthesised
+    segments.
     """
     narrator = narrator_voice or NARRATOR_VOICE
     segments = _merge_small_segments(segments)
@@ -1630,23 +1656,6 @@ async def generate_chapter_audio(
     # Longer clip substituted for <hr/> scene breaks so the listener
     # actually hears a beat between scenes.
     scene_break_clip = _make_silence_clip(tmp_dir, _SCENE_BREAK_PAUSE_MS / 1000)
-
-    heading_path = None
-    if chapter_heading:
-        heading_path = tmp_dir / "heading.mp3"
-        try:
-            ok = await _synthesize_heading(
-                chapter_heading, narrator, heading_path,
-                speech_rate=speech_rate,
-            )
-            if not ok or not heading_path.exists() or heading_path.stat().st_size == 0:
-                heading_path = None
-        except Exception as exc:
-            logger.warning(
-                "Chapter %d heading TTS failed (%s); falling back to silence",
-                chapter_num, exc,
-            )
-            heading_path = None
 
     # Launch all segment TTS calls concurrently (bounded by semaphore),
     # preserving the speaker for each so we can detect voice changes
@@ -1691,16 +1700,6 @@ async def generate_chapter_audio(
 
     if not any(kind == "speech" for kind, _, _ in ordered):
         return False
-
-    # Prepend chapter heading + scene-break-sized pause. The heading
-    # carries a sentinel speaker so the stitcher treats the gap between
-    # it and the first real segment as a speaker change (pause inserted
-    # naturally via the existing concat logic).
-    if heading_path is not None:
-        lead = [("heading", "__heading__", heading_path)]
-        if scene_break_clip is not None:
-            lead.append(("scene_break", None, scene_break_clip))
-        ordered = lead + ordered
 
     # Merge segments into one chapter file using ffmpeg, inserting the
     # speaker-change silence clip between consecutive segments whose
@@ -2156,6 +2155,95 @@ def _save_attr_entry(backend, model_size, text_hash, segment_dicts):
             pass
 
 
+# ── Chapter audio cache ───────────────────────────────────────────
+#
+# Per-chapter TTS is the single most expensive step in the pipeline —
+# a 44-chapter book is thousands of Edge-TTS round trips, each subject
+# to sporadic 503s, and a failed M4B mux at the end used to mean
+# re-synthesising the whole book on the next run. We content-address
+# the chapter *body* audio on (segments + voice assignments + narrator
+# + rate) so re-runs after any downstream failure, and re-runs with a
+# different cover or different chapter titles, reuse the expensive
+# synthesis. Headings are deliberately excluded from the key: they're
+# cheap to regenerate and were also the source of an earlier bug where
+# cached chapters silently lacked the spoken title.
+_CHAPTER_CACHE_VERSION = 1
+
+
+def _chapter_cache_root(story_id):
+    """Per-story cache dir for chapter body MP3s."""
+    from . import portable
+
+    safe_id = re.sub(r"[^A-Za-z0-9_\-]+", "_", str(story_id or "anon"))[:64]
+    return (
+        portable.cache_dir()
+        / "chapter_audio"
+        / f"v{_CHAPTER_CACHE_VERSION}"
+        / safe_id
+    )
+
+
+def _chapter_cache_key(segs, voice_mapper, narrator, speech_rate):
+    """Content-address the chapter body audio.
+
+    Must cover every input that affects the rendered WAV bytes: the
+    ordered segment texts/speakers/emotions/scene-breaks, the voice
+    each speaker resolves to in this story, the narrator fallback, and
+    the speech rate. Pronunciation overrides don't need their own
+    fingerprint — they're applied to ``seg.text`` before this runs.
+    """
+    speakers = sorted({s.speaker for s in segs if s.speaker})
+    voice_fp = {sp: voice_mapper.get(sp, narrator) for sp in speakers}
+    blob = json.dumps(
+        {
+            "v": _CHAPTER_CACHE_VERSION,
+            "segs": [
+                [s.text, s.speaker, s.emotion, bool(s.scene_break)]
+                for s in segs
+            ],
+            "voices": voice_fp,
+            "narrator": narrator,
+            "rate": speech_rate,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _concat_mp3s(inputs, output):
+    """Lossless concat of MP3 inputs into ``output`` using the concat demuxer."""
+    inputs = [Path(p) for p in inputs if p and Path(p).exists()]
+    if not inputs:
+        return False
+    if len(inputs) == 1:
+        shutil.copyfile(inputs[0], output)
+        return True
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ffn-concat-"))
+    try:
+        list_file = tmp_dir / "list.txt"
+        with open(list_file, "w", encoding="utf-8") as f:
+            for p in inputs:
+                f.write(f"file '{p.resolve()}'\n")
+        result = subprocess.run(
+            [
+                FFMPEG, "-y", "-f", "concat", "-safe", "0",
+                "-i", str(list_file), "-c", "copy", str(output),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "ffmpeg concat failed (%s); stderr tail: %s",
+                result.returncode, (result.stderr or "").strip()[-300:],
+            )
+            return False
+        return True
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def generate_audiobook(
     story, output_dir,
     progress_callback=None,
@@ -2306,37 +2394,91 @@ def generate_audiobook(
 
     mapper.save()
 
-    # Generate audio for each chapter
+    # Generate audio for each chapter.
+    #
+    # Body (prose) and heading ("Chapter N. Title") are produced and
+    # cached separately:
+    #   * Body is expensive (hundreds of TTS calls) and content-addressed
+    #     in the persistent cache under portable.cache_dir(), so re-runs
+    #     after a failed mux or cover download skip re-synthesis.
+    #   * Heading is cheap (one TTS call) and regenerated per run —
+    #     a title edit or a prior heading-synth failure can't poison
+    #     future runs the way an inline-with-body cache would.
+    cache_root = _chapter_cache_root(story.id)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    build_tmp = Path(tempfile.mkdtemp(prefix="ffn-audiobook-", dir=output_dir))
+
     chapter_files = []
     total = len(story.chapters)
+    cache_hits = 0
+    cache_misses = 0
 
     for i, (ch, segs) in enumerate(zip(story.chapters, all_segments), 1):
-        ch_path = output_dir / f"ch_{i:04d}.mp3"
+        body_key = _chapter_cache_key(segs, mapper, narrator, speech_rate)
+        body_path = cache_root / f"{body_key}.mp3"
 
-        if ch_path.exists() and ch_path.stat().st_size > 0:
-            chapter_files.append(ch_path)
-            if progress_callback:
-                progress_callback(i, total, ch.title)
-            continue
-
-        success = asyncio.run(
-            generate_chapter_audio(
-                segs, mapper, ch_path,
-                chapter_num=i, narrator_voice=narrator,
-                speech_rate=speech_rate,
-                chapter_heading=_format_chapter_heading(i, ch.title),
-            )
-        )
-        if success:
-            chapter_files.append(ch_path)
+        if body_path.exists() and body_path.stat().st_size > 0:
+            cache_hits += 1
         else:
-            logger.warning("No audio generated for chapter %d", i)
+            tmp_body = body_path.with_suffix(body_path.suffix + ".tmp")
+            success = asyncio.run(
+                generate_chapter_audio(
+                    segs, mapper, tmp_body,
+                    chapter_num=i, narrator_voice=narrator,
+                    speech_rate=speech_rate,
+                )
+            )
+            if success and tmp_body.exists() and tmp_body.stat().st_size > 0:
+                os.replace(tmp_body, body_path)
+                cache_misses += 1
+            else:
+                logger.warning("No audio generated for chapter %d", i)
+                if tmp_body.exists():
+                    tmp_body.unlink(missing_ok=True)
+                if progress_callback:
+                    progress_callback(i, total, ch.title)
+                continue
+
+        # Heading synth per run — if it fails we fall back to the body
+        # alone so the chapter is still audible, just untitled.
+        heading_text = _format_chapter_heading(i, ch.title)
+        heading_path = build_tmp / f"heading_{i:04d}.mp3"
+        try:
+            heading_ok = asyncio.run(
+                _synthesize_heading(
+                    heading_text, narrator, heading_path,
+                    speech_rate=speech_rate,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Chapter %d heading TTS failed (%s); chapter will play untitled",
+                i, exc,
+            )
+            heading_ok = False
+
+        assembled = build_tmp / f"ch_{i:04d}.mp3"
+        if heading_ok and heading_path.exists() and heading_path.stat().st_size > 0:
+            if not _concat_mp3s([heading_path, body_path], assembled):
+                # Concat failed — fall back to body only.
+                shutil.copyfile(body_path, assembled)
+        else:
+            shutil.copyfile(body_path, assembled)
+        chapter_files.append(assembled)
 
         if progress_callback:
             progress_callback(i, total, ch.title)
 
     if not chapter_files:
+        shutil.rmtree(build_tmp, ignore_errors=True)
         raise RuntimeError("No chapter audio was generated.")
+
+    logger.info(
+        "Chapter audio cache: %d hit%s, %d miss%s (%s)",
+        cache_hits, "" if cache_hits == 1 else "s",
+        cache_misses, "" if cache_misses == 1 else "es",
+        cache_root,
+    )
 
     # Download cover image for embedding
     cover_path = None
@@ -2348,13 +2490,13 @@ def generate_audiobook(
         if result:
             img_bytes, media_type = result
             ext = "jpg" if "jpeg" in media_type else media_type.split("/")[-1]
-            cover_path = output_dir / f"cover.{ext}"
+            cover_path = build_tmp / f"cover.{ext}"
             cover_path.write_bytes(img_bytes)
 
     # Synthesize a short attribution intro — "Title, by Author.
     # Downloaded from <site>." — so the opening of the audiobook names
     # what it is rather than dropping the listener straight into prose.
-    intro_path = output_dir / "intro.mp3"
+    intro_path = build_tmp / "intro.mp3"
     intro_text = (
         f"{story.title}, by {story.author}. "
         f"Downloaded from {_site_display_name(story.url)}."
@@ -2376,15 +2518,14 @@ def generate_audiobook(
     m4b_path = output_dir / filename
 
     logger.info("Building M4B with %d chapters...", len(chapter_files))
-    build_m4b(chapter_files, story, m4b_path, cover_path, intro_file=intro_path)
-
-    # Clean up chapter MP3s, intro, and cover
-    for cf in chapter_files:
-        cf.unlink(missing_ok=True)
-    if intro_path and Path(intro_path).exists():
-        Path(intro_path).unlink()
-    if cover_path and cover_path.exists():
-        cover_path.unlink()
-    map_path.unlink(missing_ok=True)
+    try:
+        build_m4b(chapter_files, story, m4b_path, cover_path, intro_file=intro_path)
+    finally:
+        # Per-run scratch (assembled chapter files, heading clips, intro,
+        # cover) is disposable. The body-audio cache lives under
+        # portable.cache_dir() and is deliberately left untouched so the
+        # next run can reuse it.
+        shutil.rmtree(build_tmp, ignore_errors=True)
+        map_path.unlink(missing_ok=True)
 
     return m4b_path
