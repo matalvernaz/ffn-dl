@@ -20,6 +20,7 @@ KEY_ATTRIBUTION_BACKEND = "attribution_backend"
 KEY_ATTRIBUTION_MODEL_SIZE = "attribution_model_size"
 KEY_LOG_LEVEL = "log_level"
 KEY_LOG_TO_FILE = "log_to_file"
+KEY_STORY_PICKER_SORT = "story_picker_sort"
 # Per-tab JSON blobs: {"query": "...", "filters": {key: value, ...}}
 KEY_SEARCH_STATE_FFN = "search_state_ffn"
 KEY_SEARCH_STATE_AO3 = "search_state_ao3"

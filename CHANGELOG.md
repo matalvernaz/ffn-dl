@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.18.1 — 2026-04-18
+
+### Add
+
+- **StoryPickerDialog remembers your sort choice.** The "Sort by"
+  dropdown in the author/bookmarks picker now persists across
+  launches via a new `story_picker_sort` pref, so picking
+  *Last updated (newest first)* once keeps it that way for every
+  future picker. (Search-tab "Sort by" dropdowns were already
+  persisted as part of per-site search state.)
+
 ## 1.18.0 — 2026-04-18
 
 ### Add

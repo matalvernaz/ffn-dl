@@ -1515,7 +1515,7 @@ class MainFrame(wx.Frame):
         wx.CallAfter(self._open_picker, title, works, _handle_selection)
 
     def _open_picker(self, title, works, on_ok):
-        dlg = StoryPickerDialog(self, title, works)
+        dlg = StoryPickerDialog(self, title, works, prefs=self.prefs)
         result = dlg.ShowModal()
         picked_urls = dlg.picked_urls() if result == wx.ID_OK else []
         dlg.Destroy()
@@ -2480,7 +2480,7 @@ class StoryPickerDialog(wx.Dialog):
         ("Section (own first)", "section"),
     ]
 
-    def __init__(self, parent, title, works):
+    def __init__(self, parent, title, works, prefs=None):
         super().__init__(
             parent, title=title,
             size=(720, 560),
@@ -2488,10 +2488,22 @@ class StoryPickerDialog(wx.Dialog):
         )
         self._works = list(works)
         self._order = list(range(len(self._works)))
-        self._sort_key = None
+        self._prefs = prefs
+        self._sort_key = self._load_saved_sort_key()
         self._section_filter = "all"
         self._picked = []
+        self._apply_sort()
         self._build_ui()
+
+    def _load_saved_sort_key(self):
+        if self._prefs is None:
+            return None
+        from .prefs import KEY_STORY_PICKER_SORT
+        saved = self._prefs.get(KEY_STORY_PICKER_SORT, "")
+        if not saved:
+            return None
+        valid_keys = {key for _, key in self._SORT_OPTIONS if key is not None}
+        return saved if saved in valid_keys else None
 
     def _build_ui(self):
         panel = wx.Panel(self)
@@ -2505,7 +2517,11 @@ class StoryPickerDialog(wx.Dialog):
         self.sort_ctrl = wx.Choice(
             panel, choices=[label for label, _ in self._SORT_OPTIONS],
         )
-        self.sort_ctrl.SetSelection(0)
+        initial_idx = next(
+            (i for i, (_, k) in enumerate(self._SORT_OPTIONS) if k == self._sort_key),
+            0,
+        )
+        self.sort_ctrl.SetSelection(initial_idx)
         self.sort_ctrl.SetName("Sort order")
         self.sort_ctrl.Bind(wx.EVT_CHOICE, self._on_sort_change)
         controls.Add(self.sort_ctrl, 0, wx.RIGHT, 16)
@@ -2689,6 +2705,9 @@ class StoryPickerDialog(wx.Dialog):
         idx = self.sort_ctrl.GetSelection()
         _, key = self._SORT_OPTIONS[idx] if 0 <= idx < len(self._SORT_OPTIONS) else (None, None)
         self._sort_key = key
+        if self._prefs is not None:
+            from .prefs import KEY_STORY_PICKER_SORT
+            self._prefs.set(KEY_STORY_PICKER_SORT, key or "")
         self._apply_sort()
         self._refresh()
 
