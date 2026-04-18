@@ -1,6 +1,6 @@
 """ffn-dl: Cross-platform fanfiction downloader."""
 
-__version__ = "1.13.2"
+__version__ = "1.13.3"
 
 # Portable-build bootstrap. For frozen Windows builds this redirects
 # HOME/USERPROFILE into the exe's folder so every library that expands

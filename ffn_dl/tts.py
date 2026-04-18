@@ -1857,22 +1857,20 @@ def _check_ffmpeg():
 #   * A chapter edited by the author (typo fix, rewrite) is naturally
 #     re-attributed because its hash no longer matches.
 #
-# The cache lives in the user's home dir (``~/.ffn-dl/attribution-cache/``
-# — redirected into the portable folder on frozen Windows builds by the
-# ``ffn_dl.portable`` bootstrap) so two people who download the same
-# story share attribution results across different output directories.
-# One file per chapter (content-addressed by sha256) means concurrent
-# renders never collide and a single torn write only loses one chapter.
+# The cache lives under ``<portable_root>/cache/attribution/`` — the
+# same ``cache/`` folder that already holds HuggingFace downloads and
+# chapter cache, so everything reusable across runs sits in one place.
+# Two people who download the same story share attribution results
+# across different output directories. One file per chapter
+# (content-addressed by sha256) means concurrent renders never collide
+# and a single torn write only loses one chapter.
 _ATTR_CACHE_VERSION = 1
 
 
 def _attr_cache_root():
-    """Shared attribution-cache directory, independent of output dir.
-
-    ``Path.home()`` is redirected into the portable folder by
-    ``ffn_dl.portable``, so this is correct for frozen builds too.
-    """
-    return Path.home() / ".ffn-dl" / "attribution-cache" / f"v{_ATTR_CACHE_VERSION}"
+    """Shared attribution-cache directory, independent of output dir."""
+    from . import portable
+    return portable.cache_dir() / "attribution" / f"v{_ATTR_CACHE_VERSION}"
 
 
 def _attr_cache_entry_path(backend, model_size, text_hash):
