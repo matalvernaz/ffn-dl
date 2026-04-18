@@ -37,14 +37,18 @@ jobs:
       # install, uses Windows Restart Manager to diagnose locked files,
       # and relaunches. Target framework is net45 — preinstalled on every
       # Windows 8+ machine, so no .NET runtime install for users.
+      #
+      # Uses VS MSBuild, not `dotnet build`: .NET SDK 10's resource
+      # pipeline errors out on net45 WinForms .resx files containing
+      # non-string resources (MSB3823 / MSB3822). MSBuild from VS
+      # handles the legacy Framework path correctly.
+      - uses: microsoft/setup-msbuild@v2
       - name: Build ZipExtractor.exe
         shell: pwsh
         run: |
           $tag = 'v1.9.2'
           git clone --depth 1 --branch $tag https://github.com/ravibpatel/AutoUpdater.NET.git zipextractor_src
-          Push-Location zipextractor_src/ZipExtractor
-          dotnet build ZipExtractor.csproj -c Release
-          Pop-Location
+          msbuild zipextractor_src/ZipExtractor/ZipExtractor.csproj /p:Configuration=Release /v:minimal
           New-Item -ItemType Directory -Force -Path zipextractor_bin | Out-Null
           Copy-Item zipextractor_src/AutoUpdater.NET/Resources/ZipExtractor.exe zipextractor_bin/
           Get-ChildItem zipextractor_bin/
