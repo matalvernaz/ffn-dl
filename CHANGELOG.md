@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.16.2 — 2026-04-18
+
+### Fix
+
+- **Audiobook chapter assembly no longer fails on Windows temp paths.**
+  The ffmpeg concat demuxer interprets escape sequences inside
+  single-quoted path values, so a Windows temp path like
+  `C:\Users\...\Temp\ffn-tts-xxxx\seg_000001.mp3` had its `\t` /
+  `\n` / etc. silently reinterpreted and the segment files couldn't
+  be found. Concat list entries now normalise to forward slashes
+  and escape embedded quotes. The related warning now logs the
+  tail of ffmpeg's stderr instead of the banner, so future concat
+  regressions are self-diagnosing.
+
 ## 1.16.1 — 2026-04-18
 
 ### Fix

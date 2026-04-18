@@ -1705,13 +1705,13 @@ async def generate_chapter_audio(
     # speaker-change silence clip between consecutive segments whose
     # speakers differ, and the scene-break clip at each marker.
     list_file = tmp_dir / "segments.txt"
-    with open(list_file, "w") as f:
+    with open(list_file, "w", encoding="utf-8") as f:
         prev_speaker = None
         first = True
         last_was_scene_break = False
         for kind, speaker, sf in ordered:
             if kind == "scene_break":
-                f.write(f"file '{sf}'\n")
+                f.write(_concat_entry(sf))
                 last_was_scene_break = True
                 # Don't reset prev_speaker — the scene-break pause
                 # already covers the speaker-change gap, so the first
@@ -1724,8 +1724,8 @@ async def generate_chapter_audio(
                 and not last_was_scene_break
                 and speaker != prev_speaker
             ):
-                f.write(f"file '{silence_clip}'\n")
-            f.write(f"file '{sf}'\n")
+                f.write(_concat_entry(silence_clip))
+            f.write(_concat_entry(sf))
             prev_speaker = speaker
             first = False
             last_was_scene_break = False
@@ -1736,13 +1736,15 @@ async def generate_chapter_audio(
             "-i", str(list_file), "-c", "copy", str(output_path),
         ],
         capture_output=True,
+        text=True,
     )
 
     # Clean up temp dir
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if result.returncode != 0:
-        logger.warning("ffmpeg concat failed for ch %d: %s", chapter_num, result.stderr[:200])
+        tail = (result.stderr or "").strip()[-400:]
+        logger.warning("ffmpeg concat failed for ch %d: %s", chapter_num, tail)
         return False
 
     return True
@@ -1849,6 +1851,18 @@ async def _synthesize_heading(text, voice, output_path, speech_rate=0):
     )
 
 
+def _concat_entry(path) -> str:
+    """Format a path for an ffmpeg concat-demuxer list file. Resolves to
+    an absolute POSIX-style path: the concat demuxer parses single-quoted
+    values with escape-sequence semantics, so a Windows `C:\\Users\\...\\Temp\\ffn-tts-x`
+    gets `\\t`/`\\n`/etc. interpreted and the file lookup fails. Forward
+    slashes are accepted by ffmpeg on both platforms.
+    """
+    s = str(Path(path).resolve()).replace("\\", "/")
+    s = s.replace("'", "'\\''")
+    return f"file '{s}'\n"
+
+
 def _run_ffmpeg(cmd, *, step):
     """Run an ffmpeg/ffprobe invocation and surface stderr on failure.
     The default `subprocess.run(check=True, capture_output=True)` raises
@@ -1881,11 +1895,11 @@ def build_m4b(chapter_files, story, output_path, cover_path=None, intro_file=Non
     # `file` entries relative to the list file's own directory, so a bare
     # "ch_0001.mp3" here would be looked up inside tmp_dir.
     list_file = tmp_dir / "chapters.txt"
-    with open(list_file, "w") as f:
+    with open(list_file, "w", encoding="utf-8") as f:
         if intro_file and Path(intro_file).exists():
-            f.write(f"file '{Path(intro_file).resolve()}'\n")
+            f.write(_concat_entry(intro_file))
         for cf in chapter_files:
-            f.write(f"file '{Path(cf).resolve()}'\n")
+            f.write(_concat_entry(cf))
 
     # First pass: merge all MP3s into one
     merged = tmp_dir / "merged.mp3"
@@ -2224,7 +2238,7 @@ def _concat_mp3s(inputs, output):
         list_file = tmp_dir / "list.txt"
         with open(list_file, "w", encoding="utf-8") as f:
             for p in inputs:
-                f.write(f"file '{p.resolve()}'\n")
+                f.write(_concat_entry(p))
         result = subprocess.run(
             [
                 FFMPEG, "-y", "-f", "concat", "-safe", "0",
