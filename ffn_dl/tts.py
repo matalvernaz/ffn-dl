@@ -153,7 +153,9 @@ _TITLE_PREFIX = (
     r"Brother|Sister|Father|Mother|Reverend|Cardinal|Bishop"
     r")\s+"
 )
-_PROPER_TOKENS = r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?"
+# Allow camelcase / mid-word caps / apostrophes so names like McGonagall,
+# MacArthur, and O'Brien register as a single proper-noun token.
+_PROPER_TOKENS = r"[A-Z][a-zA-Z']*[a-z](?:\s+[A-Z][a-zA-Z']*[a-z])?"
 _NAME_PAT = (
     r"(?P<name>"
     rf"(?:{_TITLE_PREFIX})?{_PROPER_TOKENS}"
@@ -223,6 +225,10 @@ _SPEECH_VERBS = {
     "suggested", "proposed", "recommended",
     "began", "started", "resumed", "ended", "stopped",
     "interjected", "cut", "butted",  # "butted in"
+    # Between-dialogue pause verbs — speaker is the same character
+    # doing an action between two lines of their own speech:
+    # "Hi," Harry paused, "how are you?"
+    "paused", "hesitated", "stopped",
     "drawled", "purred", "rumbled",
     "hollered", "whooped",
     "trailed", "faltered", "finished",
@@ -276,7 +282,8 @@ _SENTENCE_STARTERS = {
     "She", "His", "Her", "Him", "They", "Their", "Them", "You", "Your",
     "Our", "Ours", "Its", "It", "We", "Us", "My", "Mine",
     # Adverbs / conjunctions that often start a sentence
-    "Then", "When", "What", "How", "Not", "Now", "Yes", "No",
+    "Then", "When", "Where", "What", "Which", "Who", "Whom", "Whose",
+    "Why", "How", "Not", "Now", "Yes", "No",
     "Well", "So", "If", "While", "Since", "Once", "Twice",
     "Perhaps", "Maybe", "Somehow", "Sometimes", "Often", "Always",
     "Never", "Rarely", "Just", "Only", "Only", "Barely",
@@ -343,6 +350,7 @@ def parse_segments(text):
     segments = []
     pos = 0
     last_speaker = None
+    prev_speaker = None  # speaker before last_speaker, for 2-way alternation
 
     for match in _DIALOGUE_RE.finditer(text):
         # Narration before this dialogue
@@ -357,17 +365,27 @@ def parse_segments(text):
         # Try attribution after the quote: "dialogue," Name verbed
         after_text = text[match.end() : match.end() + 80]
 
-        def _resolve_pronoun():
+        def _resolve_pronoun(pronoun=None):
             """When attribution uses a pronoun, find the nearest name in
             the preceding narration text. Returns a full titled name
             when the match is preceded by an honorific ("Mrs. Weasley",
             "Professor McGonagall") so speakers are not split into a
-            spurious "Weasley" character."""
+            spurious "Weasley" character.
+
+            When a pronoun ("he"/"she") is passed, prefer candidates
+            whose gender matches — "Hermione called. 'X,' he said."
+            should resolve `he` to a male character, not Hermione.
+            """
+            pronoun_gender = None
+            if pronoun:
+                p = pronoun.lower()
+                if p in ("he", "him", "his", "himself"):
+                    pronoun_gender = "male"
+                elif p in ("she", "her", "hers", "herself"):
+                    pronoun_gender = "female"
+
             window = text[max(0, match.start() - 200) : match.start()]
-            # Find all (start_offset, name) tuples
             matches = [(m.start(), m.group(1)) for m in _PROPER_NAME_RE.finditer(window)]
-            # Drop honorifics, common non-name capitalized words, and
-            # vocatives that get matched inside dialogue.
             candidates = [
                 (pos, n) for pos, n in matches
                 if n not in _SENTENCE_STARTERS
@@ -375,17 +393,37 @@ def parse_segments(text):
                 and not _is_possessive(n)
             ]
             if not candidates:
+                # Fall back to possessive-only context:
+                # "Harry's eyes narrowed. 'Hi,' he said." should still
+                # resolve the pronoun to Harry.
+                candidates = [
+                    (pos, n) for pos, n in matches
+                    if n not in _SENTENCE_STARTERS
+                    and n not in _NAME_SKIP_TITLES
+                ]
+            if not candidates:
                 return last_speaker
+
+            def _titled(pos, name):
+                name = _strip_possessive(name)
+                preceding = window[max(0, pos - 20):pos].rstrip()
+                for title in _NAME_SKIP_TITLES:
+                    if preceding.endswith(title) or preceding.endswith(title + "."):
+                        return f"{title} {name}"
+                return name
+
+            # Gender-aware pick: walk candidates latest-first and return
+            # the first whose detected gender matches the pronoun.
+            if pronoun_gender:
+                for pos, name in reversed(candidates):
+                    full = _titled(pos, name)
+                    g = _guess_gender_from_name(full)
+                    if g == pronoun_gender:
+                        return full
+                # No gender match — fall through to nearest-name default
+
             pos, name = candidates[-1]
-            # Strip possessive 's so "Harry's" resolves to "Harry"
-            name = _strip_possessive(name)
-            # If a title word immediately precedes this name, include it.
-            preceding = window[max(0, pos - 20):pos].rstrip()
-            for title in _NAME_SKIP_TITLES:
-                # Match "Mrs.", "Mr ", "Professor ", "Aunt ", etc.
-                if preceding.endswith(title) or preceding.endswith(title + "."):
-                    return f"{title} {name}"
-            return name
+            return _titled(pos, name)
 
         def _clean_speaker(raw_name):
             """Normalize a captured speaker name: strip possessive 's,
@@ -410,9 +448,13 @@ def parse_segments(text):
                 return None
             return " ".join(tokens)
 
-        # Detect post-dialogue attribution to identify the speaker, but
-        # DO NOT advance past it — the attribution text ("Harry said")
-        # must stay in the narration so a listener can tell who spoke.
+        # Detect post-dialogue attribution. When found, we still need
+        # the listener to hear "Harry said", so the attribution text is
+        # emitted as its own narrator segment after the dialogue — and
+        # `attrib_end` advances so the NEXT iteration's pre-text doesn't
+        # re-include the same words (which would confuse the pre-action
+        # heuristic below by counting the just-used name again).
+        attrib_end = match.end()
         am = _AFTER_NAME_VERB.match(after_text)
         if am and am.group("verb").lower() in _SPEECH_VERBS:
             name = am.group("name")
@@ -420,8 +462,9 @@ def parse_segments(text):
             if name.lower() not in _PRONOUNS:
                 speaker = _clean_speaker(name)
             else:
-                speaker = _resolve_pronoun()
+                speaker = _resolve_pronoun(name)
             emotion = EMOTION_MAP.get(verb)
+            attrib_end = match.end() + am.end()
 
         if not speaker:
             am = _AFTER_VERB_NAME.match(after_text)
@@ -431,8 +474,9 @@ def parse_segments(text):
                 if name.lower() not in _PRONOUNS:
                     speaker = _clean_speaker(name)
                 else:
-                    speaker = _resolve_pronoun()
+                    speaker = _resolve_pronoun(name)
                 emotion = EMOTION_MAP.get(verb)
+                attrib_end = match.end() + am.end()
 
         if not speaker:
             before_text = text[max(0, match.start() - 80) : match.start()]
@@ -441,24 +485,95 @@ def parse_segments(text):
                 speaker = _clean_speaker(bm.group("name"))
                 emotion = EMOTION_MAP.get(bm.group("verb").lower())
 
+        # Pre-action attribution — "Ron looked up. 'Trouble?'" — a
+        # very common fanfic pattern where the speaker is named in
+        # the immediately-preceding narration but without a speech
+        # verb. Require a SINGLE distinct proper name in the gap so
+        # ambiguous crowds don't get misattributed.
+        if not speaker:
+            pre_text = text[pos : match.start()]
+            stripped = pre_text.strip()
+            if 0 < len(stripped) <= 200:
+                raw_names = _PROPER_NAME_RE.findall(stripped)
+                clean_names = []
+                for n in raw_names:
+                    n = _strip_possessive(n)
+                    if n in _SENTENCE_STARTERS or n in _NAME_SKIP_TITLES:
+                        continue
+                    if n not in clean_names:
+                        clean_names.append(n)
+                if len(clean_names) == 1:
+                    candidate = clean_names[0]
+                    # Attach a leading honorific if present
+                    idx = stripped.rfind(candidate)
+                    preceding = stripped[max(0, idx - 20):idx].rstrip()
+                    for title in _NAME_SKIP_TITLES:
+                        if preceding.endswith(title) or preceding.endswith(title + "."):
+                            candidate = f"{title} {candidate}"
+                            break
+                    speaker = candidate
+
         # Consecutive-quote fallback: if this dialogue has no attribution
-        # and the text between it and the previous quote is just
-        # whitespace (or very short connective narration like " "), it
-        # is most likely the same speaker continuing.
+        # and the text between it and the previous quote is short OR
+        # references the previous speaker by name, it is most likely the
+        # same speaker continuing.
+        #   "Hi," Hermione said. "Where have you been?"
+        #              └── gap mentions "Hermione" → carry forward
+        # For pure-whitespace gaps in a two-speaker exchange, alternate
+        # between last_speaker and prev_speaker so quick back-and-forth
+        # dialogue reads correctly instead of sticking to one voice.
         if not speaker and last_speaker:
             pre_text = text[pos : match.start()]
-            # "Just whitespace" OR "only a couple words of prose between"
-            # — be conservative: ≤15 non-whitespace chars.
             stripped = pre_text.strip()
             non_ws = len(stripped)
-            if non_ws <= 15:
+            has_words = any(c.isalnum() for c in stripped)
+            if not has_words and prev_speaker and prev_speaker != last_speaker:
+                # No actual words between quotes (pure whitespace or
+                # just stray punctuation left over from consumed
+                # attribution) and two distinct speakers are in play —
+                # alternate between them.
+                speaker = prev_speaker
+            elif non_ws <= 15:
                 speaker = last_speaker
+            elif non_ws <= 200:
+                # Carry forward when the gap has no OTHER proper name in
+                # play — absence of a new character = same speaker
+                # continuing. "X said. Y walked in. 'hi'" would wrongly
+                # keep X, so this is gated on no other names appearing.
+                last_first = last_speaker.split()[0]
+                last_tail = last_speaker.split()[-1]
+                other_names = [
+                    n for n in _PROPER_NAME_RE.findall(stripped)
+                    if n not in _SENTENCE_STARTERS
+                    and n not in _NAME_SKIP_TITLES
+                    and n != last_first
+                    and n != last_tail
+                    and not _is_possessive(n)
+                ]
+                if not other_names:
+                    speaker = last_speaker
 
         if speaker:
+            if speaker != last_speaker:
+                prev_speaker = last_speaker
             last_speaker = speaker
 
-        segments.append(Segment(speech, speaker=speaker, emotion=emotion))
-        pos = match.end()
+        # Truly unattributable dialogue — no speaker, no pronoun, no
+        # preceding/trailing name. Render it as narrator speech but
+        # keep the quote marks so TTS renders it with dialogue-like
+        # intonation instead of sounding like plain exposition.
+        seg_text = speech
+        if speaker is None:
+            seg_text = f'"{speech}"'
+        segments.append(Segment(seg_text, speaker=speaker, emotion=emotion))
+        # If we consumed after-attribution text ("Harry said"), emit it
+        # as its own narrator segment so the listener hears it — while
+        # keeping pos advanced past it for clean subsequent parsing.
+        if attrib_end > match.end():
+            attrib_text = text[match.end():attrib_end].strip()
+            if attrib_text:
+                segments.append(Segment(attrib_text))
+        pos = attrib_end
 
     # Trailing narration
     trailing = text[pos:].strip()
@@ -869,6 +984,35 @@ def consolidate_speakers(speaker_counts):
         "parkinson", "greengrass", "scamander",
     }
 
+    # Pre-pass: collapse punctuation/title-spelling variants of the same
+    # name ("Mr. Dumbledore" ↔ "Mr Dumbledore") so they don't survive as
+    # two distinct speakers with two different voices.
+    def _norm_key(name):
+        tokens = name.split()
+        stripped, _ = _strip_titles(tokens)
+        return tuple(t.lower().rstrip(".,:;!?'\u2019") for t in stripped)
+
+    variant_groups = {}  # norm_key → [(name, count), ...]
+    for name, cnt in speaker_counts.items():
+        clean = _strip_possessive(name).strip()
+        key = _norm_key(clean)
+        if not key:
+            continue
+        variant_groups.setdefault(key, []).append((clean, cnt))
+
+    # Canonical spelling per group: highest-count variant, preferring
+    # the one with a period in its title ("Mr. Dumbledore" over "Mr
+    # Dumbledore") on ties.
+    variant_canon = {}  # any_variant → canonical_variant
+    for key, variants in variant_groups.items():
+        if len(variants) == 1:
+            variant_canon[variants[0][0]] = variants[0][0]
+            continue
+        variants.sort(key=lambda x: (-x[1], 0 if "." in x[0] else 1))
+        winner = variants[0][0]
+        for v, _c in variants:
+            variant_canon[v] = winner
+
     canonical = {}
     # Build candidate map: short-name → list of (long_name, count)
     by_first = {}
@@ -876,6 +1020,7 @@ def consolidate_speakers(speaker_counts):
     multi_word = []
     for name, cnt in speaker_counts.items():
         clean = _strip_possessive(name).strip()
+        clean = variant_canon.get(clean, clean)
         tokens = clean.split()
         if len(tokens) == 1:
             continue
@@ -893,6 +1038,7 @@ def consolidate_speakers(speaker_counts):
 
     for name, cnt in speaker_counts.items():
         clean = _strip_possessive(name).strip()
+        clean = variant_canon.get(clean, clean)
         tokens = clean.split()
         if len(tokens) > 1:
             canonical[name] = clean
