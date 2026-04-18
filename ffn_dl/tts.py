@@ -1154,8 +1154,38 @@ class VoiceMapper:
 # ── Audio generation ──────────────────────────────────────────────
 
 
-async def _generate_segment_audio(segment, voice, output_path):
-    """Generate audio for a single segment using edge-tts."""
+def _rate_str(pct):
+    """Format a percent delta (int) as edge-tts rate string: '+20%' / '-15%'.
+    None or 0 returns None (no rate override — edge-tts default).
+    """
+    if pct is None or pct == 0:
+        return None
+    return f"{pct:+d}%"
+
+
+def _combine_rate(base_pct, emotion_rate):
+    """Combine a user rate override with an emotion's own rate shift.
+
+    emotion_rate comes from EMOTION_PROSODY as a string like '+10%' or
+    '-20%'. If either is absent the other wins; if both are present the
+    deltas sum.
+    """
+    if not emotion_rate:
+        return _rate_str(base_pct)
+    try:
+        emo_pct = int(emotion_rate.rstrip("%"))
+    except ValueError:
+        return _rate_str(base_pct) or emotion_rate
+    total = (base_pct or 0) + emo_pct
+    return _rate_str(total) if total else None
+
+
+async def _generate_segment_audio(segment, voice, output_path, speech_rate=0):
+    """Generate audio for a single segment using edge-tts.
+
+    speech_rate is an integer percent delta applied on top of any
+    emotion-driven rate adjustment.
+    """
     text = segment.text.strip()
     # Skip fragments too short to be meaningful speech
     if not text or len(text) < 3 or text.strip(".,;:!?-–—' \"") == "":
@@ -1164,9 +1194,18 @@ async def _generate_segment_audio(segment, voice, output_path):
     kwargs = {"voice": voice}
 
     # Apply prosody adjustments for emotional delivery
+    emotion_prosody = {}
     if segment.emotion:
-        prosody = EMOTION_PROSODY.get(segment.emotion, {})
-        kwargs.update(prosody)
+        emotion_prosody = EMOTION_PROSODY.get(segment.emotion, {})
+
+    # rate is the one that combines additively with user preference;
+    # volume and pitch stay emotion-only.
+    rate = _combine_rate(speech_rate, emotion_prosody.get("rate"))
+    if rate:
+        kwargs["rate"] = rate
+    for key in ("volume", "pitch"):
+        if key in emotion_prosody:
+            kwargs[key] = emotion_prosody[key]
 
     comm = _require_edge_tts().Communicate(text, **kwargs)
     await comm.save(str(output_path))
@@ -1279,12 +1318,12 @@ def _load_pronunciation_map(path):
     return {}
 
 
-async def _generate_with_semaphore(sem, seg, voice, path, idx, ch_num):
+async def _generate_with_semaphore(sem, seg, voice, path, idx, ch_num, speech_rate=0):
     """Generate one segment with a concurrency limiter (retries up to 3 times)."""
     async with sem:
         for attempt in range(1, 4):
             try:
-                ok = await _generate_segment_audio(seg, voice, path)
+                ok = await _generate_segment_audio(seg, voice, path, speech_rate=speech_rate)
                 if ok and path.exists() and path.stat().st_size > 0:
                     return path
             except Exception as exc:
@@ -1302,7 +1341,10 @@ async def _generate_with_semaphore(sem, seg, voice, path, idx, ch_num):
     return None
 
 
-async def generate_chapter_audio(segments, voice_mapper, output_path, chapter_num=0, narrator_voice=None):
+async def generate_chapter_audio(
+    segments, voice_mapper, output_path,
+    chapter_num=0, narrator_voice=None, speech_rate=0,
+):
     """Generate audio for a full chapter's worth of segments."""
     narrator = narrator_voice or NARRATOR_VOICE
     segments = _merge_small_segments(segments)
@@ -1324,7 +1366,7 @@ async def generate_chapter_audio(segments, voice_mapper, output_path, chapter_nu
         voice = voice_mapper.get(seg.speaker, narrator) if seg.speaker else narrator
         seg_path = tmp_dir / f"seg_{i:06d}.mp3"
         tasks.append((i, seg_path, seg.speaker, _generate_with_semaphore(
-            sem, seg, voice, seg_path, i, chapter_num
+            sem, seg, voice, seg_path, i, chapter_num, speech_rate=speech_rate,
         )))
 
     results = await asyncio.gather(*(t[3] for t in tasks))
@@ -1580,10 +1622,21 @@ def _check_ffmpeg():
         )
 
 
-def generate_audiobook(story, output_dir, progress_callback=None, narrator_voice=None):
+def generate_audiobook(
+    story, output_dir,
+    progress_callback=None,
+    narrator_voice=None,
+    speech_rate=0,
+    attribution_backend="builtin",
+):
     """Generate an M4B audiobook from a Story with character voice mapping.
 
     narrator_voice overrides the default NARRATOR_VOICE constant.
+    speech_rate is an integer percent delta (-50..+100 sensible range)
+    applied to every TTS synthesis call on top of any emotion prosody.
+    attribution_backend selects the speaker-attribution refinement pass:
+    "builtin" (regex only), "fastcoref", or "booknlp". Unknown or
+    uninstalled backends silently fall back to builtin.
     progress_callback(current_chapter, total_chapters, title) is called
     after each chapter is synthesized.
     """
@@ -1628,6 +1681,17 @@ def generate_audiobook(story, output_dir, progress_callback=None, narrator_voice
     for text in chapter_texts:
         segs = parse_segments(text)
         all_segments.append(segs)
+
+    # Optional neural refinement pass — replaces / augments the regex
+    # speaker attribution. Silently no-ops if the backend isn't
+    # installed, so the render never fails on a missing dep.
+    if attribution_backend and attribution_backend != "builtin":
+        from . import attribution
+
+        for idx, (text, segs) in enumerate(zip(chapter_texts, all_segments)):
+            all_segments[idx] = attribution.refine_speakers(
+                segs, text, backend=attribution_backend,
+            )
 
     # Apply pronunciation overrides to every segment's text before TTS.
     if pronunciation_map:
@@ -1679,7 +1743,11 @@ def generate_audiobook(story, output_dir, progress_callback=None, narrator_voice
             continue
 
         success = asyncio.run(
-            generate_chapter_audio(segs, mapper, ch_path, chapter_num=i, narrator_voice=narrator)
+            generate_chapter_audio(
+                segs, mapper, ch_path,
+                chapter_num=i, narrator_voice=narrator,
+                speech_rate=speech_rate,
+            )
         )
         if success:
             chapter_files.append(ch_path)

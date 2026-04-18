@@ -208,6 +208,64 @@ class MainFrame(wx.Frame):
         opts2.Add(self.strip_notes_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
         root_sizer.Add(opts2, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
 
+        # ── Audiobook settings (visible only when Format = audio) ────
+        from . import attribution as _attribution_module
+        self._attribution_module = _attribution_module
+        self.audio_panel = wx.Panel(root)
+        audio_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        audio_sizer.Add(
+            wx.StaticText(self.audio_panel, label="Speech &rate:"),
+            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+        )
+        self.speech_rate_ctrl = wx.SpinCtrl(
+            self.audio_panel, min=-50, max=100, initial=0, size=(70, -1),
+        )
+        self.speech_rate_ctrl.SetName("Speech rate percent")
+        self.speech_rate_ctrl.SetToolTip(
+            "Integer percent delta applied to every TTS call. "
+            "Example: -20 for 20% slower, +30 for 30% faster."
+        )
+        audio_sizer.Add(self.speech_rate_ctrl, 0, wx.RIGHT, 4)
+        audio_sizer.Add(
+            wx.StaticText(self.audio_panel, label="% "),
+            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16,
+        )
+
+        audio_sizer.Add(
+            wx.StaticText(self.audio_panel, label="&Attribution:"),
+            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+        )
+        # Friendly display labels — the backend key is the lowercase
+        # first token so they round-trip cleanly.
+        self._attribution_choices = list(_attribution_module.available())
+        display_labels = [
+            _attribution_module.BACKENDS[b]["display"]
+            for b in self._attribution_choices
+        ]
+        self.attribution_ctrl = wx.Choice(self.audio_panel, choices=display_labels)
+        self.attribution_ctrl.SetSelection(0)
+        self.attribution_ctrl.SetName("Attribution backend")
+        self.attribution_ctrl.Bind(wx.EVT_CHOICE, self._on_attribution_change)
+        audio_sizer.Add(self.attribution_ctrl, 0, wx.RIGHT, 4)
+
+        self.attribution_status = wx.StaticText(self.audio_panel, label="")
+        self.attribution_status.SetName("Attribution status")
+        audio_sizer.Add(self.attribution_status, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+
+        self.attribution_install_btn = wx.Button(
+            self.audio_panel, label="&Install...", size=(90, -1),
+        )
+        self.attribution_install_btn.Bind(wx.EVT_BUTTON, self._on_install_attribution)
+        audio_sizer.Add(self.attribution_install_btn, 0)
+
+        self.audio_panel.SetSizer(audio_sizer)
+        root_sizer.Add(self.audio_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+
+        self.format_ctrl.Bind(wx.EVT_CHOICE, self._on_format_change)
+        self._update_audio_panel_visibility()
+        self._refresh_attribution_status()
+
         out_sizer = wx.BoxSizer(wx.HORIZONTAL)
         out_sizer.Add(wx.StaticText(root, label="&Save to:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         default_dir = str(Path.home() / "Downloads")
@@ -494,6 +552,84 @@ class MainFrame(wx.Frame):
             self.output_ctrl.SetValue(dlg.GetPath())
         dlg.Destroy()
 
+    # ── Audiobook settings ──────────────────────────────────
+
+    def _on_format_change(self, event):
+        self._update_audio_panel_visibility()
+
+    def _update_audio_panel_visibility(self):
+        is_audio = (
+            self.format_ctrl.GetString(self.format_ctrl.GetSelection()) == "audio"
+        )
+        self.audio_panel.Show(is_audio)
+        self.audio_panel.GetContainingSizer().Layout()
+        self.Layout()
+
+    def _selected_attribution_backend(self):
+        idx = self.attribution_ctrl.GetSelection()
+        if idx < 0 or idx >= len(self._attribution_choices):
+            return "builtin"
+        return self._attribution_choices[idx]
+
+    def _refresh_attribution_status(self):
+        backend = self._selected_attribution_backend()
+        if backend == "builtin":
+            self.attribution_status.SetLabel("(built-in)")
+            self.attribution_install_btn.Enable(False)
+            self.attribution_install_btn.SetLabel("&Install...")
+            return
+        if self._attribution_module.is_installed(backend):
+            self.attribution_status.SetLabel("(installed)")
+            self.attribution_install_btn.Enable(True)
+            self.attribution_install_btn.SetLabel("Re&install...")
+        else:
+            self.attribution_status.SetLabel("(not installed)")
+            self.attribution_install_btn.Enable(True)
+            self.attribution_install_btn.SetLabel("&Install...")
+
+    def _on_attribution_change(self, event):
+        self._refresh_attribution_status()
+        backend = self._selected_attribution_backend()
+        if backend != "builtin" and not self._attribution_module.is_installed(backend):
+            self._log(
+                f"Attribution backend '{backend}' is not installed. "
+                f"Click Install or run: ffn-dl --install-attribution {backend}"
+            )
+
+    def _on_install_attribution(self, event):
+        backend = self._selected_attribution_backend()
+        if backend == "builtin":
+            return
+        info = self._attribution_module.BACKENDS[backend]
+        size = info.get("size_hint", "?")
+        msg = (
+            f"Install '{backend}' from PyPI?\n\n"
+            f"{info.get('description', '')}\n\n"
+            f"Download size: {size}. This runs `pip install {info['pip_name']}`."
+        )
+        if wx.MessageBox(msg, "Confirm install", wx.YES_NO | wx.ICON_QUESTION) != wx.YES:
+            return
+
+        self._log(f"\nInstalling {backend} in the background...")
+        self.attribution_install_btn.Enable(False)
+        self.attribution_status.SetLabel("(installing...)")
+
+        def run():
+            def cb(line):
+                # Marshal log lines back to the main thread.
+                wx.CallAfter(self._log, line)
+            ok = self._attribution_module.install(backend, log_callback=cb)
+            wx.CallAfter(self._after_install, backend, ok)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _after_install(self, backend, ok):
+        if ok:
+            self._log(f"Installed {backend} successfully.")
+        else:
+            self._log(f"Install of {backend} failed — see log above for pip output.")
+        self._refresh_attribution_status()
+
     # ── Prefs ────────────────────────────────────────────────
 
     def _load_prefs(self):
@@ -518,6 +654,20 @@ class MainFrame(wx.Frame):
 
         self.hr_stars_ctrl.SetValue(self.prefs.get_bool(_p.KEY_HR_AS_STARS))
         self.strip_notes_ctrl.SetValue(self.prefs.get_bool(_p.KEY_STRIP_NOTES))
+
+        try:
+            rate = int(self.prefs.get(_p.KEY_SPEECH_RATE) or 0)
+        except (TypeError, ValueError):
+            rate = 0
+        self.speech_rate_ctrl.SetValue(max(-50, min(100, rate)))
+
+        backend = self.prefs.get(_p.KEY_ATTRIBUTION_BACKEND) or "builtin"
+        if backend in self._attribution_choices:
+            self.attribution_ctrl.SetSelection(
+                self._attribution_choices.index(backend)
+            )
+        self._refresh_attribution_status()
+        self._update_audio_panel_visibility()
 
         for site_key, pref_key in (
             ("ffn", _p.KEY_SEARCH_STATE_FFN),
@@ -547,6 +697,8 @@ class MainFrame(wx.Frame):
         self.prefs.set(_p.KEY_OUTPUT_DIR, self.output_ctrl.GetValue())
         self.prefs.set_bool(_p.KEY_HR_AS_STARS, self.hr_stars_ctrl.GetValue())
         self.prefs.set_bool(_p.KEY_STRIP_NOTES, self.strip_notes_ctrl.GetValue())
+        self.prefs.set(_p.KEY_SPEECH_RATE, self.speech_rate_ctrl.GetValue())
+        self.prefs.set(_p.KEY_ATTRIBUTION_BACKEND, self._selected_attribution_backend())
 
         for site_key, pref_key in (
             ("ffn", _p.KEY_SEARCH_STATE_FFN),
@@ -1403,9 +1555,16 @@ class MainFrame(wx.Frame):
             def audio_progress(current, total, title):
                 self._log(f"  Synthesizing [{current}/{total}] {title}")
 
-            self._log("\nGenerating audiobook...")
+            backend = self._selected_attribution_backend()
+            rate = self.speech_rate_ctrl.GetValue()
+            self._log(
+                f"\nGenerating audiobook (attribution={backend}, rate={rate:+d}%)..."
+            )
             return generate_audiobook(
-                story, output_dir, progress_callback=audio_progress
+                story, output_dir,
+                progress_callback=audio_progress,
+                speech_rate=rate,
+                attribution_backend=backend,
             )
 
         from .exporters import EXPORTERS

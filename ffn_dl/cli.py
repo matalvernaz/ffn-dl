@@ -178,7 +178,10 @@ def _handle_merge_series(series_urls, args, output_dir):
             def audio_progress(current, total, title):
                 print(f"  Synthesizing [{current}/{total}] {title}")
             path = generate_audiobook(
-                merged, str(output_dir), progress_callback=audio_progress
+                merged, str(output_dir),
+                progress_callback=audio_progress,
+                speech_rate=args.speech_rate,
+                attribution_backend=args.attribution,
             )
         else:
             exporter = EXPORTERS[args.format]
@@ -250,7 +253,10 @@ def _handle_merge_parts(series_name, series_url, work_urls, args, output_dir):
         def audio_progress(current, total, title):
             print(f"  Synthesizing [{current}/{total}] {title}")
         path = generate_audiobook(
-            merged, str(output_dir), progress_callback=audio_progress
+            merged, str(output_dir),
+            progress_callback=audio_progress,
+            speech_rate=args.speech_rate,
+            attribution_backend=args.attribution,
         )
     else:
         exporter = EXPORTERS[args.format]
@@ -342,7 +348,10 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
 
             print("\nGenerating audiobook...")
             path = generate_audiobook(
-                story, str(output_dir), progress_callback=audio_progress
+                story, str(output_dir),
+                progress_callback=audio_progress,
+                speech_rate=args.speech_rate,
+                attribution_backend=args.attribution,
             )
         else:
             exporter = EXPORTERS[args.format]
@@ -980,6 +989,34 @@ def main(argv=None):
         help="Output format (default: epub, or inferred from --update file)",
     )
     parser.add_argument(
+        "--speech-rate",
+        type=int,
+        default=0,
+        metavar="PCT",
+        help=(
+            "Audiobook speech rate delta, integer percent "
+            "(e.g. -20 = 20%% slower, +30 = 30%% faster). Default: 0."
+        ),
+    )
+    parser.add_argument(
+        "--attribution",
+        choices=["builtin", "fastcoref", "booknlp"],
+        default="builtin",
+        help=(
+            "Audiobook speaker attribution backend. 'builtin' is the "
+            "default regex parser. 'fastcoref' and 'booknlp' are optional "
+            "neural models you must pip-install separately — see "
+            "`ffn-dl --install-attribution BACKEND`."
+        ),
+    )
+    parser.add_argument(
+        "--install-attribution",
+        choices=["fastcoref", "booknlp"],
+        default=None,
+        metavar="BACKEND",
+        help="Install an optional attribution backend and exit.",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         default=None,
@@ -1318,6 +1355,19 @@ def main(argv=None):
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(message)s",
     )
+
+    # Short-circuit: install an attribution backend and exit.
+    if getattr(args, "install_attribution", None):
+        from . import attribution as _attr
+
+        backend = args.install_attribution
+        print(f"Installing {backend} (this may take a minute)...")
+        ok = _attr.install(backend, log_callback=print)
+        if ok:
+            print(f"\n{backend} installed successfully.")
+            return 0
+        print(f"\nFailed to install {backend}.")
+        return 1
 
     # --- Search mode ---
     # Most searches need --search, but several flags stand in for a
