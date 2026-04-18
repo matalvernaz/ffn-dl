@@ -56,7 +56,10 @@ jobs:
           (Get-Content $csproj) `
             -replace '<TargetFramework>net45</TargetFramework>', '<TargetFramework>net48</TargetFramework>' `
             | Set-Content $csproj
-          msbuild $csproj /p:Configuration=Release /v:minimal
+          # /restore runs NuGet restore first — SDK-style csproj needs
+          # project.assets.json generated before msbuild can resolve
+          # targets, even when the project has no PackageReferences.
+          msbuild $csproj /restore /p:Configuration=Release /v:minimal
           New-Item -ItemType Directory -Force -Path zipextractor_bin | Out-Null
           Copy-Item zipextractor_src/AutoUpdater.NET/Resources/ZipExtractor.exe zipextractor_bin/
           Get-ChildItem zipextractor_bin/
