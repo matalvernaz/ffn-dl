@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.9.2 — 2026-04-18
+
+### Feature
+
+- **Neural attribution backends install from the standalone .exe**.
+  The previous release disabled the Install button when running as
+  the frozen Windows build because `sys.executable -m pip` points
+  at the .exe bootloader and fails. This release adopts the pattern
+  ComfyUI / A1111 / InvokeAI use: on first Install, ffn-dl downloads
+  a Python 3.12 embeddable distribution (~10 MB) to
+  `%LOCALAPPDATA%\ffn-dl\neural\py\`, bootstraps pip into it, and
+  then runs `pip install --target=<neural\deps>` with that
+  interpreter. On app startup `ffn_dl/__init__.py` calls
+  `site.addsitedir()` on that deps directory so torch's `.pth`
+  registration works and `import fastcoref` / `import booknlp`
+  succeed from the frozen exe. Torch is pulled from PyPI's
+  `whl/cpu` index so users don't accidentally download the 2.5 GB
+  CUDA build. After a successful install a message dialog asks the
+  user to restart ffn-dl so the new modules are loaded before the
+  first audiobook render.
+
 ## 1.9.1 — 2026-04-18
 
 ### Fix

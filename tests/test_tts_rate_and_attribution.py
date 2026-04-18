@@ -205,39 +205,65 @@ def test_refine_ignores_size_for_fastcoref(monkeypatch):
 # ── frozen-exe handling ────────────────────────────────────────────
 
 
-def test_install_unsupported_reason_when_frozen(monkeypatch):
-    """Frozen .exe builds can't run `sys.executable -m pip` — the
-    registry must surface a reason instead of returning a bogus
-    install command."""
+def test_install_command_none_when_frozen(monkeypatch):
+    """Frozen builds don't use sys.executable for pip — it points at
+    the .exe bootloader. install_command must return None so callers
+    don't mistakenly Popen the exe with pip flags."""
     monkeypatch.setattr(attribution, "_is_frozen", lambda: True)
     assert attribution.install_command("fastcoref") is None
     assert attribution.install_command("booknlp") is None
-    assert attribution.install_unsupported_reason("fastcoref")
-    assert attribution.install_unsupported_reason("booknlp")
 
 
-def test_install_unsupported_reason_none_when_not_frozen(monkeypatch):
-    monkeypatch.setattr(attribution, "_is_frozen", lambda: False)
+def test_install_unsupported_reason_none_on_windows_frozen(monkeypatch):
+    """On Windows-frozen, install is supported via neural_env — no reason to refuse."""
+    from ffn_dl import neural_env
+
+    monkeypatch.setattr(attribution, "_is_frozen", lambda: True)
+    monkeypatch.setattr(neural_env, "is_supported", lambda: True)
     assert attribution.install_unsupported_reason("fastcoref") is None
     assert attribution.install_unsupported_reason("booknlp") is None
 
 
-def test_install_refuses_cleanly_when_frozen(monkeypatch):
-    """install() must not Popen sys.executable as a pip runner when
-    frozen — it would route pip flags to the exe's argparse and fail."""
+def test_install_unsupported_reason_non_windows_frozen(monkeypatch):
+    """If we ever ship a frozen build on a platform neural_env doesn't
+    handle, install() must refuse with an explanation instead of
+    silently no-opping."""
+    from ffn_dl import neural_env
+
     monkeypatch.setattr(attribution, "_is_frozen", lambda: True)
-    lines = []
-    ok = attribution.install("fastcoref", log_callback=lines.append)
-    assert ok is False
-    # The first logged line should be the first line of the frozen
-    # explanation — the user gets a clear message, not a confused
-    # argparse traceback.
-    assert lines, "expected a user-facing log message"
-    assert "standalone .exe" in lines[0]
+    monkeypatch.setattr(neural_env, "is_supported", lambda: False)
+    reason = attribution.install_unsupported_reason("fastcoref")
+    assert reason and "Windows" in reason
+
+
+def test_install_routes_through_neural_env_when_frozen(monkeypatch):
+    """Frozen install() must NOT Popen sys.executable — it must call
+    neural_env.pip_install with the backend's pip_name and the
+    CPU-torch extra-index-url so it doesn't pull 2.5 GB of CUDA."""
+    from ffn_dl import neural_env
+
+    monkeypatch.setattr(attribution, "_is_frozen", lambda: True)
+    monkeypatch.setattr(neural_env, "is_supported", lambda: True)
+
+    seen = {}
+
+    def fake_pip(packages, log_callback=None, extra_args=None):
+        seen["packages"] = list(packages)
+        seen["extra_args"] = list(extra_args or [])
+        return True
+
+    monkeypatch.setattr(neural_env, "pip_install", fake_pip)
+
+    ok = attribution.install("fastcoref", log_callback=lambda _l: None)
+    assert ok is True
+    assert seen["packages"] == ["fastcoref"]
+    # CPU torch index must be passed to keep the install sane-sized.
+    assert "--extra-index-url" in seen["extra_args"]
+    assert any("cpu" in a for a in seen["extra_args"])
 
 
 def test_install_builtin_noop_when_frozen(monkeypatch):
-    """builtin has nothing to install — the frozen guard must not
-    accidentally start rejecting builtin."""
+    """builtin is nothing to install — the frozen guard must not
+    accidentally start rejecting it."""
     monkeypatch.setattr(attribution, "_is_frozen", lambda: True)
     assert attribution.install("builtin") is True

@@ -27,21 +27,23 @@ from typing import Iterable, List
 
 def _is_frozen() -> bool:
     """True when running inside a PyInstaller bundle. In that mode
-    `sys.executable` is the bundled .exe (not a Python interpreter)
-    and the app's site-packages is read-only and isolated — neural
-    backends cannot be installed or imported from it."""
+    ``sys.executable`` is the .exe bootloader rather than a Python
+    interpreter, so ``sys.executable -m pip`` would route the pip
+    flags into ffn-dl's own argparse. The frozen codepath instead
+    uses ``neural_env`` to install into a sibling embedded Python."""
     return bool(getattr(sys, "frozen", False))
 
 
-_FROZEN_MESSAGE = (
-    "Optional attribution backends can't be installed into the "
-    "standalone .exe build of ffn-dl — the bundled Python is isolated "
-    "and read-only. To use fastcoref or BookNLP, install ffn-dl from "
-    "PyPI instead:\n"
-    "  pip install ffn-dl[gui,audio]\n"
-    "  pip install fastcoref   # or: pip install booknlp\n"
-    "Then run `ffn-dl` from that environment."
-)
+# Extra pip args per backend — keep torch on CPU wheels so we don't
+# pull the ~2.5 GB CUDA build when all we need is inference.
+_EXTRA_ARGS = {
+    "fastcoref": [
+        "--extra-index-url", "https://download.pytorch.org/whl/cpu",
+    ],
+    "booknlp": [
+        "--extra-index-url", "https://download.pytorch.org/whl/cpu",
+    ],
+}
 
 logger = logging.getLogger(__name__)
 
@@ -159,10 +161,13 @@ def is_installed(backend: str) -> bool:
 
 
 def install_command(backend: str) -> List[str] | None:
-    """Return the ``pip install`` argv for a backend, or None if there
-    is nothing to install (builtin), the backend is unknown, or we are
-    running as a frozen .exe where sys.executable isn't a Python
-    interpreter and installation is fundamentally unsupported."""
+    """Return the ``pip install`` argv for a backend when not frozen.
+
+    Returns None for the builtin backend, unknown backends, or when
+    running as a frozen .exe — the frozen path doesn't shell out to
+    pip directly, it goes through ``neural_env.pip_install`` which
+    uses a separate embedded Python interpreter.
+    """
     info = BACKENDS.get(backend)
     if not info or not info["pip_name"]:
         return None
@@ -172,36 +177,77 @@ def install_command(backend: str) -> List[str] | None:
 
 
 def install_unsupported_reason(backend: str) -> str | None:
-    """Return a human-readable reason why `install(backend)` would
-    refuse to run, or None if installation is supported. Lets the UI
-    explain WHY the Install button is disabled instead of silently
-    greying out."""
-    if _is_frozen():
-        return _FROZEN_MESSAGE
+    """Return a human-readable reason why ``install(backend)`` would
+    refuse to run, or None if installation is supported.
+
+    Installation IS supported in the frozen .exe (via neural_env).
+    The only unsupported case is frozen non-Windows builds, which we
+    don't actually ship — included so future platforms fail loudly
+    instead of silently doing nothing.
+    """
     info = BACKENDS.get(backend) or {}
     if not info.get("pip_name"):
-        return None  # builtin — no install needed, nothing to explain
+        return None  # builtin — no install needed
+    if _is_frozen():
+        try:
+            from . import neural_env
+        except ImportError:
+            return (
+                "The embedded Python helper (neural_env) isn't available "
+                "in this build — neural backends can't be installed."
+            )
+        if not neural_env.is_supported():
+            return (
+                "Neural backend installation from the standalone build "
+                "is only supported on Windows. Install ffn-dl from PyPI "
+                "on other platforms."
+            )
     return None
 
 
 def install(backend: str, log_callback=None) -> bool:
-    """Install a backend via ``pip`` in a subprocess, streaming output.
+    """Install a backend, streaming pip's output to ``log_callback``.
 
-    log_callback(line) is invoked for each line of stdout/stderr so a
-    GUI can surface progress. Returns True on success.
+    In a pip-installed ffn-dl this just runs
+    ``sys.executable -m pip install <backend>``. In the frozen .exe it
+    routes through ``neural_env``, which lazily downloads an
+    embeddable Python on first use and pip-installs into a user dir
+    that ``ffn_dl/__init__.py`` adds to ``sys.path`` at startup.
 
-    Refuses (returns False with an explanatory log message) when
-    running inside a frozen PyInstaller bundle — see install_command.
+    Returns True on success. Never raises — failures surface through
+    ``log_callback`` so the GUI can report them inline.
     """
-    if _is_frozen() and backend != "builtin":
+    if backend == "builtin":
+        return True
+
+    info = BACKENDS.get(backend)
+    if not info or not info["pip_name"]:
+        return False
+
+    reason = install_unsupported_reason(backend)
+    if reason:
         if log_callback:
-            for line in _FROZEN_MESSAGE.splitlines():
+            for line in reason.splitlines():
                 log_callback(line)
         return False
 
+    if _is_frozen():
+        try:
+            from . import neural_env
+        except ImportError as exc:
+            if log_callback:
+                log_callback(f"neural_env unavailable: {exc}")
+            return False
+        return neural_env.pip_install(
+            [info["pip_name"]],
+            log_callback=log_callback,
+            extra_args=_EXTRA_ARGS.get(backend),
+        )
+
+    # Non-frozen path — use sys.executable's pip directly.
     cmd = install_command(backend)
     if not cmd:
-        return backend == "builtin"
+        return False
 
     try:
         proc = subprocess.Popen(

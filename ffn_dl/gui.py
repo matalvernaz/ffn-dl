@@ -591,10 +591,9 @@ class MainFrame(wx.Frame):
             self.attribution_install_btn.Enable(False)
             self.attribution_install_btn.SetLabel("&Install...")
             return
-        # Frozen .exe builds can't install neural deps — be explicit
-        # about why rather than letting the user click and fail.
-        if self._attribution_module.install_unsupported_reason(backend):
-            self.attribution_status.SetLabel("(not available in .exe build)")
+        reason = self._attribution_module.install_unsupported_reason(backend)
+        if reason:
+            self.attribution_status.SetLabel("(install unsupported)")
             self.attribution_install_btn.Enable(False)
             self.attribution_install_btn.SetLabel("&Install...")
             return
@@ -675,10 +674,24 @@ class MainFrame(wx.Frame):
             return
         info = self._attribution_module.BACKENDS[backend]
         size = info.get("size_hint", "?")
+        # In the frozen .exe we warn about the total on-disk cost
+        # (embedded Python + torch + package), which is far bigger
+        # than the "backend size" alone.
+        import sys as _sys
+        frozen = bool(getattr(_sys, "frozen", False))
+        if frozen:
+            footprint = (
+                "Downloads ~10 MB of embedded Python on first run, then "
+                "pulls torch + transformers (~300 MB) and the model "
+                "package (~90 MB for fastcoref, ~150 MB for BookNLP). "
+                "Everything lives in %LOCALAPPDATA%\\ffn-dl\\neural\\."
+            )
+        else:
+            footprint = f"Download size: {size}. This runs `pip install {info['pip_name']}`."
         msg = (
-            f"Install '{backend}' from PyPI?\n\n"
+            f"Install '{backend}'?\n\n"
             f"{info.get('description', '')}\n\n"
-            f"Download size: {size}. This runs `pip install {info['pip_name']}`."
+            f"{footprint}"
         )
         if wx.MessageBox(msg, "Confirm install", wx.YES_NO | wx.ICON_QUESTION) != wx.YES:
             return
@@ -692,13 +705,24 @@ class MainFrame(wx.Frame):
                 # Marshal log lines back to the main thread.
                 wx.CallAfter(self._log, line)
             ok = self._attribution_module.install(backend, log_callback=cb)
-            wx.CallAfter(self._after_install, backend, ok)
+            wx.CallAfter(self._after_install, backend, ok, frozen)
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _after_install(self, backend, ok):
+    def _after_install(self, backend, ok, frozen):
         if ok:
             self._log(f"Installed {backend} successfully.")
+            if frozen:
+                # A .pth-using package like torch usually needs a fresh
+                # interpreter to import cleanly. Don't try to hot-load;
+                # prompt for a restart.
+                wx.MessageBox(
+                    f"{backend} was installed successfully.\n\n"
+                    "Please restart ffn-dl so the new modules are "
+                    "loaded before you generate an audiobook.",
+                    "Restart required",
+                    wx.OK | wx.ICON_INFORMATION,
+                )
         else:
             self._log(f"Install of {backend} failed — see log above for pip output.")
         self._refresh_attribution_status()
