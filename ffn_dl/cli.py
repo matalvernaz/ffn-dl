@@ -188,6 +188,8 @@ def _handle_merge_series(series_urls, args, output_dir):
                 speech_rate=args.speech_rate,
                 attribution_backend=args.attribution,
                 attribution_model_size=args.attribution_model_size,
+                strip_notes=args.strip_notes,
+                hr_as_stars=args.hr_as_stars,
             )
         else:
             exporter = EXPORTERS[args.format]
@@ -270,6 +272,8 @@ def _handle_merge_parts(series_name, series_url, work_urls, args, output_dir):
             speech_rate=args.speech_rate,
             attribution_backend=args.attribution,
             attribution_model_size=args.attribution_model_size,
+            strip_notes=args.strip_notes,
+            hr_as_stars=args.hr_as_stars,
         )
     else:
         exporter = EXPORTERS[args.format]
@@ -371,6 +375,8 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
                 speech_rate=args.speech_rate,
                 attribution_backend=args.attribution,
                 attribution_model_size=args.attribution_model_size,
+                strip_notes=args.strip_notes,
+                hr_as_stars=args.hr_as_stars,
             )
         else:
             exporter = EXPORTERS[args.format]
@@ -1124,9 +1130,12 @@ def main(argv=None):
         "--hr-as-stars",
         action="store_true",
         help=(
-            "Replace each <hr/> scene break with a centred '* * *' marker "
-            "in HTML/EPUB output (TXT output already renders hr as '* * *'). "
-            "Useful for readers whose stylesheet draws hr as a barely-visible line."
+            "Mark scene breaks clearly. In HTML/EPUB/TXT output, each "
+            "<hr/> becomes a centred '* * *' marker. In audio (-f audio) "
+            "output, every scene divider — <hr/> tags plus text-based "
+            "dividers like '---', '* * *', 'oOo' — is replaced with a "
+            "1.5-second silence clip instead of being read aloud as "
+            "'asterisk asterisk asterisk'."
         ),
     )
     parser.add_argument(
@@ -1134,8 +1143,9 @@ def main(argv=None):
         action="store_true",
         help=(
             "Remove paragraphs that start with 'A/N', \"Author's Note\", etc. "
-            "Heuristic — catches the common FFN pattern; AO3's structured "
-            "notes are already excluded at scrape time."
+            "Applies to every output format including audio. Heuristic — "
+            "catches the common FFN pattern; AO3's structured notes are "
+            "already excluded at scrape time."
         ),
     )
     parser.add_argument(

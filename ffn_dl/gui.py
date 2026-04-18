@@ -197,9 +197,16 @@ class MainFrame(wx.Frame):
         # Extra export options row
         opts2 = wx.BoxSizer(wx.HORIZONTAL)
         self.hr_stars_ctrl = wx.CheckBox(
-            root, label="Render scene breaks as &* * *  (instead of a thin rule)"
+            root,
+            label=(
+                "Mark scene &breaks clearly "
+                "(* * * in text, a silence pause in audiobooks)"
+            ),
         )
-        self.hr_stars_ctrl.SetName("Render scene breaks as asterisks")
+        self.hr_stars_ctrl.SetName(
+            "Mark scene breaks clearly — asterisks in text output, "
+            "silence pause in audiobook output"
+        )
         opts2.Add(self.hr_stars_ctrl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
         self.strip_notes_ctrl = wx.CheckBox(
             root, label="Strip &author's notes (A/N paragraphs)"
@@ -1672,6 +1679,8 @@ class MainFrame(wx.Frame):
                 speech_rate=rate,
                 attribution_backend=backend,
                 attribution_model_size=size,
+                strip_notes=strip_notes,
+                hr_as_stars=hr_as_stars,
             )
 
         from .exporters import EXPORTERS

@@ -1354,19 +1354,24 @@ def _normalize_scene_break_lines(text):
     return "\n".join(lines) if changed else text
 
 
-def _html_to_audiobook_text(html):
-    """HTML → plain text tuned for TTS.
+def _html_to_audiobook_text(html, strip_notes=False, hr_as_stars=False):
+    """HTML → plain text tuned for TTS, gated on the user-facing flags.
 
-    Always strips paragraph-level author's notes (reading A/Ns aloud is
-    always the wrong behaviour for a listening experience), converts
-    each <hr/> to a scene-break sentinel, and normalises text-based
-    scene breaks (``---``, ``* * *``, ``oOo``, etc.) to the same marker
-    so the chapter stitcher can drop in a pause instead of synthesising
-    the divider as literal speech.
+    When ``strip_notes`` is set, paragraph-level author's notes are
+    removed before synthesis. When ``hr_as_stars`` is set, every scene
+    divider — real ``<hr/>`` tags plus text-based dividers (``---``,
+    ``* * *``, ``oOo``, etc.) — is replaced with a scene-break sentinel
+    so the chapter stitcher can insert a silence pause instead of
+    synthesising the divider as literal speech.
+
+    With both flags off, this degrades to the legacy ``html_to_text``
+    behaviour: A/Ns are read aloud and ``<hr/>`` becomes "* * *" (which
+    edge-tts reads as "asterisk asterisk asterisk"). Listeners who
+    actually want that can opt in by leaving both checkboxes clear.
     """
     from bs4 import BeautifulSoup, NavigableString, Tag
 
-    cleaned = strip_note_paragraphs(html)
+    cleaned = strip_note_paragraphs(html) if strip_notes else html
     soup = BeautifulSoup(cleaned, "html.parser")
 
     for br in soup.find_all("br"):
@@ -1378,15 +1383,19 @@ def _html_to_audiobook_text(html):
             text = str(child).strip()
             if not text:
                 continue
-            parts.append(_normalize_scene_break_lines(text))
+            if hr_as_stars:
+                text = _normalize_scene_break_lines(text)
+            parts.append(text)
         elif isinstance(child, Tag):
             if child.name == "hr":
-                parts.append(_SCENE_BREAK_MARKER)
+                parts.append(_SCENE_BREAK_MARKER if hr_as_stars else "* * *")
                 continue
             text = child.get_text().strip()
             if not text:
                 continue
-            parts.append(_normalize_scene_break_lines(text))
+            if hr_as_stars:
+                text = _normalize_scene_break_lines(text)
+            parts.append(text)
 
     return "\n\n".join(parts)
 
@@ -1718,20 +1727,21 @@ FFPLAY = _find_tool("ffplay")
 
 # ── Voice preview ─────────────────────────────────────────────────
 
-def detect_voices(story, map_path=None):
+def detect_voices(story, map_path=None, strip_notes=False, hr_as_stars=False):
     """Run the character + voice pipeline on a Story without synthesising.
 
     Returns a list of {"name", "gender", "voice"} dicts in frequency order
     (most-mentioned speakers first). Existing mappings in map_path are
     preserved; newly-seen characters are assigned a voice and written back
-    on save.
+    on save. ``strip_notes`` / ``hr_as_stars`` match the audiobook flags
+    so preview numbers line up with what the listener will actually hear.
     """
     mapper = VoiceMapper(map_path)
 
     full_text = ""
     all_segments = []
     for ch in story.chapters:
-        text = _html_to_audiobook_text(ch.html)
+        text = _html_to_audiobook_text(ch.html, strip_notes=strip_notes, hr_as_stars=hr_as_stars)
         full_text += text + "\n"
         all_segments.append(_segment_chapter_text(text))
 
@@ -1809,6 +1819,8 @@ def generate_audiobook(
     speech_rate=0,
     attribution_backend="builtin",
     attribution_model_size=None,
+    strip_notes=False,
+    hr_as_stars=False,
 ):
     """Generate an M4B audiobook from a Story with character voice mapping.
 
@@ -1820,6 +1832,12 @@ def generate_audiobook(
     uninstalled backends silently fall back to builtin.
     attribution_model_size picks a size variant for backends that
     expose one (BookNLP: "small" or "big"; ignored otherwise).
+    strip_notes, when True, drops paragraph-level author's notes before
+    synthesis (listeners who want A/Ns read aloud can leave it off).
+    hr_as_stars, when True, replaces every scene divider (<hr/> plus
+    text-based patterns like ``---``, ``* * *``, ``oOo``) with a 1.5s
+    silence clip so the chapter stitcher inserts a real beat instead of
+    synthesising the divider as literal speech.
     progress_callback(current_chapter, total_chapters, title) is called
     after each chapter is synthesized.
     """
@@ -1851,13 +1869,15 @@ def generate_audiobook(
     if pronunciation_map:
         logger.info("Loaded %d pronunciation overrides", len(pronunciation_map))
 
-    # Gather full text for gender detection — uses the audiobook text
-    # helper so author's notes don't pollute the speaker inventory and
-    # <hr/> scene breaks become pause markers instead of literal "* * *".
+    # Gather full text for gender detection — honours the caller's
+    # strip-notes / hr-as-stars preferences so A/Ns and dividers are
+    # handled consistently with what the listener will hear.
     full_text = ""
     chapter_texts = []
     for ch in story.chapters:
-        text = _html_to_audiobook_text(ch.html)
+        text = _html_to_audiobook_text(
+            ch.html, strip_notes=strip_notes, hr_as_stars=hr_as_stars,
+        )
         chapter_texts.append(text)
         full_text += text + "\n"
 

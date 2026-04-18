@@ -15,8 +15,10 @@ from ffn_dl.tts import (
 )
 
 
-def _segments(html):
-    return _segment_chapter_text(_html_to_audiobook_text(html))
+def _segments(html, *, strip_notes=True, hr_as_stars=True):
+    return _segment_chapter_text(
+        _html_to_audiobook_text(html, strip_notes=strip_notes, hr_as_stars=hr_as_stars)
+    )
 
 
 def _texts(segments):
@@ -113,3 +115,47 @@ def test_no_scene_break_marker_leaks_into_segment_text():
     html = "<p>Before.</p><hr/><p>oOo</p><p>After.</p>"
     for seg in _segments(html):
         assert _SCENE_BREAK_MARKER not in seg.text
+
+
+# ── opt-out: flags OFF means the listener gets the raw behaviour ─────
+
+
+def test_flags_off_keeps_author_notes_in_narration():
+    """If a listener deliberately leaves --strip-notes off, the A/N
+    paragraph must still reach the narrator — don't strip behind their
+    back."""
+    html = "<p>Real prose.</p><p>A/N: hi everyone</p><p>More prose.</p>"
+    joined = " ".join(_texts(_segments(html, strip_notes=False, hr_as_stars=False)))
+    assert "A/N" in joined or "hi everyone" in joined
+
+
+def test_flags_off_keeps_hr_as_literal_asterisks():
+    """Without --hr-as-stars, <hr/> falls through to the legacy '* * *'
+    string so the listener opted-in gets exactly the prior behaviour."""
+    html = "<p>Before.</p><hr/><p>After.</p>"
+    segs = _segments(html, strip_notes=False, hr_as_stars=False)
+    assert _break_count(segs) == 0
+    joined = " ".join(s.text for s in segs)
+    assert "* * *" in joined
+
+
+def test_flags_off_does_not_normalise_text_dividers():
+    """Without the flag, `---` or `oOo` on their own line survive as
+    narration text (will be read aloud)."""
+    html = "<p>Before.</p><p>---</p><p>oOo</p><p>After.</p>"
+    segs = _segments(html, strip_notes=False, hr_as_stars=False)
+    assert _break_count(segs) == 0
+    joined = " ".join(s.text for s in segs)
+    assert "---" in joined
+    assert "oOo" in joined
+
+
+def test_strip_notes_independent_of_hr_as_stars():
+    """Flags are independent — stripping A/Ns without touching dividers
+    is a valid combination."""
+    html = "<p>Prose.</p><p>A/N: note</p><hr/><p>More prose.</p>"
+    segs = _segments(html, strip_notes=True, hr_as_stars=False)
+    joined = " ".join(s.text for s in segs)
+    assert "A/N" not in joined and "note" not in joined
+    assert "* * *" in joined
+    assert _break_count(segs) == 0

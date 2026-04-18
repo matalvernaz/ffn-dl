@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.10.4 — 2026-04-17
+
+### Change
+
+- **Audiobook text cleanup is now opt-in, gated on the same flags that
+  control the visual output.** 1.10.3 unconditionally stripped A/Ns
+  and converted every scene divider to silence in audiobook mode on
+  the theory that "nobody wants to hear 'asterisk asterisk asterisk'"
+  — but a listener *could* legitimately want the A/N in the narration
+  or the literal "star star star" reading. The behaviour now follows
+  `--strip-notes` / `--hr-as-stars` (and the matching GUI checkboxes)
+  for every output format. With both flags off, the audiobook falls
+  back to the pre-1.10.3 behaviour (A/Ns read aloud, `<hr/>` → "* * *"
+  via edge-tts). The GUI checkbox label and CLI help text are updated
+  to spell out what each flag does in audio mode, and the
+  "Mark scene breaks clearly" checkbox now means "asterisks in text
+  output, a 1.5-second silence pause in audiobook output".
+
 ## 1.10.3 — 2026-04-17
 
 ### Fix
