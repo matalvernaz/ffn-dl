@@ -1610,8 +1610,14 @@ async def _generate_with_semaphore(sem, seg, voice, path, idx, ch_num, speech_ra
 async def generate_chapter_audio(
     segments, voice_mapper, output_path,
     chapter_num=0, narrator_voice=None, speech_rate=0,
+    chapter_heading=None,
 ):
-    """Generate audio for a full chapter's worth of segments."""
+    """Generate audio for a full chapter's worth of segments.
+
+    ``chapter_heading``, if provided, is synthesised in the narrator
+    voice and prepended to the chapter so the listener hears "Chapter N.
+    Title" before the prose starts.
+    """
     narrator = narrator_voice or NARRATOR_VOICE
     segments = _merge_small_segments(segments)
 
@@ -1624,6 +1630,23 @@ async def generate_chapter_audio(
     # Longer clip substituted for <hr/> scene breaks so the listener
     # actually hears a beat between scenes.
     scene_break_clip = _make_silence_clip(tmp_dir, _SCENE_BREAK_PAUSE_MS / 1000)
+
+    heading_path = None
+    if chapter_heading:
+        heading_path = tmp_dir / "heading.mp3"
+        try:
+            ok = await _synthesize_heading(
+                chapter_heading, narrator, heading_path,
+                speech_rate=speech_rate,
+            )
+            if not ok or not heading_path.exists() or heading_path.stat().st_size == 0:
+                heading_path = None
+        except Exception as exc:
+            logger.warning(
+                "Chapter %d heading TTS failed (%s); falling back to silence",
+                chapter_num, exc,
+            )
+            heading_path = None
 
     # Launch all segment TTS calls concurrently (bounded by semaphore),
     # preserving the speaker for each so we can detect voice changes
@@ -1668,6 +1691,16 @@ async def generate_chapter_audio(
 
     if not any(kind == "speech" for kind, _, _ in ordered):
         return False
+
+    # Prepend chapter heading + scene-break-sized pause. The heading
+    # carries a sentinel speaker so the stitcher treats the gap between
+    # it and the first real segment as a speaker change (pause inserted
+    # naturally via the existing concat logic).
+    if heading_path is not None:
+        lead = [("heading", "__heading__", heading_path)]
+        if scene_break_clip is not None:
+            lead.append(("scene_break", None, scene_break_clip))
+        ordered = lead + ordered
 
     # Merge segments into one chapter file using ffmpeg, inserting the
     # speaker-change silence clip between consecutive segments whose
@@ -1735,6 +1768,70 @@ def _escape_ffmeta(value) -> str:
     )
 
 
+# Map known fanfic-host suffixes to TTS-friendly display names for the
+# audiobook intro line. Keys are matched as suffixes against the parsed
+# netloc, so both bare and "www." hosts hit the same entry.
+_SITE_DISPLAY_NAMES = {
+    "archiveofourown.org": "Archive of Our Own",
+    "fanfiction.net": "fanfiction dot net",
+    "fictionpress.com": "fictionpress dot com",
+    "royalroad.com": "Royal Road",
+    "wattpad.com": "Wattpad",
+    "literotica.com": "Literotica",
+    "mediaminer.org": "Media Miner",
+    "ficwad.com": "Fic Wad",
+}
+
+
+def _site_display_name(url):
+    """TTS-friendly name for the source site behind ``url``.
+
+    Falls back to the bare host (minus ``www.``) so an unknown site
+    still produces a speakable phrase rather than being omitted.
+    """
+    from urllib.parse import urlparse
+
+    host = (urlparse(url).netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    for suffix, name in _SITE_DISPLAY_NAMES.items():
+        if host == suffix or host.endswith("." + suffix):
+            return name
+    return host or "the web"
+
+
+def _format_chapter_heading(n, title):
+    """Build the spoken heading for chapter ``n`` given its raw title.
+
+    Handles the common fanfic cases: a missing/generic title collapses
+    to ``Chapter N``; a title that already names itself a chapter is
+    read verbatim; otherwise the number is prepended so the listener
+    always hears a clear chapter marker.
+    """
+    title = (title or "").strip()
+    if not title:
+        return f"Chapter {n}"
+    if re.match(r"^chapter\b", title, re.I):
+        return title
+    # Pure-number titles ("1", "1.", "1 -") — upgrade to "Chapter N".
+    if re.match(r"^\d+\s*[.\-:)]*\s*$", title):
+        return f"Chapter {n}"
+    return f"Chapter {n}. {title}"
+
+
+async def _synthesize_heading(text, voice, output_path, speech_rate=0):
+    """Synthesize a single narrator line (intro / chapter heading).
+
+    Uses a stripped-down Segment so emotion prosody and speech-rate
+    handling stay consistent with the per-segment pipeline, but without
+    the attribution/pronunciation machinery that applies to prose.
+    """
+    seg = Segment(text)
+    return await _generate_segment_audio(
+        seg, voice, output_path, speech_rate=speech_rate,
+    )
+
+
 def _run_ffmpeg(cmd, *, step):
     """Run an ffmpeg/ffprobe invocation and surface stderr on failure.
     The default `subprocess.run(check=True, capture_output=True)` raises
@@ -1751,8 +1848,13 @@ def _run_ffmpeg(cmd, *, step):
     return result
 
 
-def build_m4b(chapter_files, story, output_path, cover_path=None):
-    """Merge per-chapter MP3s into a single M4B with chapter markers."""
+def build_m4b(chapter_files, story, output_path, cover_path=None, intro_file=None):
+    """Merge per-chapter MP3s into a single M4B with chapter markers.
+
+    ``intro_file``, if given, is concatenated before the first chapter
+    and gets its own "Introduction" chapter marker so listeners can
+    skip back to the attribution without scrubbing.
+    """
     if not chapter_files:
         return None
 
@@ -1763,6 +1865,8 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
     # "ch_0001.mp3" here would be looked up inside tmp_dir.
     list_file = tmp_dir / "chapters.txt"
     with open(list_file, "w") as f:
+        if intro_file and Path(intro_file).exists():
+            f.write(f"file '{Path(intro_file).resolve()}'\n")
         for cf in chapter_files:
             f.write(f"file '{Path(cf).resolve()}'\n")
 
@@ -1776,6 +1880,17 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
         step="concat",
     )
 
+    def _probe_ms(path):
+        probe = subprocess.run(
+            [
+                FFPROBE, "-v", "quiet", "-show_entries",
+                "format=duration", "-of", "csv=p=0", str(path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return int(float(probe.stdout.strip() or "0") * 1000)
+
     # Get chapter durations for metadata
     chapters_meta = tmp_dir / "chapters_meta.txt"
     with open(chapters_meta, "w", encoding="utf-8") as f:
@@ -1786,17 +1901,18 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
         f.write("genre=Audiobook\n\n")
 
         offset_ms = 0
+        if intro_file and Path(intro_file).exists():
+            intro_ms = _probe_ms(intro_file)
+            if intro_ms > 0:
+                f.write("[CHAPTER]\n")
+                f.write("TIMEBASE=1/1000\n")
+                f.write(f"START={offset_ms}\n")
+                f.write(f"END={offset_ms + intro_ms}\n")
+                f.write("title=Introduction\n\n")
+                offset_ms += intro_ms
+
         for i, cf in enumerate(chapter_files):
-            probe = subprocess.run(
-                [
-                    FFPROBE, "-v", "quiet", "-show_entries",
-                    "format=duration", "-of", "csv=p=0", str(cf),
-                ],
-                capture_output=True,
-                text=True,
-            )
-            duration_s = float(probe.stdout.strip() or "0")
-            duration_ms = int(duration_s * 1000)
+            duration_ms = _probe_ms(cf)
             ch_title = story.chapters[i].title if i < len(story.chapters) else f"Chapter {i + 1}"
 
             f.write("[CHAPTER]\n")
@@ -2182,6 +2298,7 @@ def generate_audiobook(
                 segs, mapper, ch_path,
                 chapter_num=i, narrator_voice=narrator,
                 speech_rate=speech_rate,
+                chapter_heading=_format_chapter_heading(i, ch.title),
             )
         )
         if success:
@@ -2208,6 +2325,24 @@ def generate_audiobook(
             cover_path = output_dir / f"cover.{ext}"
             cover_path.write_bytes(img_bytes)
 
+    # Synthesize a short attribution intro — "Title, by Author.
+    # Downloaded from <site>." — so the opening of the audiobook names
+    # what it is rather than dropping the listener straight into prose.
+    intro_path = output_dir / "intro.mp3"
+    intro_text = (
+        f"{story.title}, by {story.author}. "
+        f"Downloaded from {_site_display_name(story.url)}."
+    )
+    try:
+        intro_ok = asyncio.run(
+            _synthesize_heading(intro_text, narrator, intro_path, speech_rate=speech_rate)
+        )
+        if not intro_ok or not intro_path.exists() or intro_path.stat().st_size == 0:
+            intro_path = None
+    except Exception as exc:
+        logger.warning("Audiobook intro TTS failed (%s); continuing without it", exc)
+        intro_path = None
+
     # Build final M4B
     from .exporters import _safe_filename
 
@@ -2215,11 +2350,13 @@ def generate_audiobook(
     m4b_path = output_dir / filename
 
     logger.info("Building M4B with %d chapters...", len(chapter_files))
-    build_m4b(chapter_files, story, m4b_path, cover_path)
+    build_m4b(chapter_files, story, m4b_path, cover_path, intro_file=intro_path)
 
-    # Clean up chapter MP3s and cover
+    # Clean up chapter MP3s, intro, and cover
     for cf in chapter_files:
         cf.unlink(missing_ok=True)
+    if intro_path and Path(intro_path).exists():
+        Path(intro_path).unlink()
     if cover_path and cover_path.exists():
         cover_path.unlink()
     map_path.unlink(missing_ok=True)

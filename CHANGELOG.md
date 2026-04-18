@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.14.0 — 2026-04-18
+
+### Add
+
+- **Spoken chapter titles.** Each chapter in the generated M4B now
+  opens with a narrator-voiced "Chapter N. Title" heading followed by
+  a short beat, so listeners hear where they are instead of only
+  seeing the chapter marker. Titles that already start with "Chapter"
+  are read verbatim; pure-number titles collapse to "Chapter N".
+- **Audiobook attribution intro.** A one-line "Title, by Author.
+  Downloaded from <site>." preamble is synthesised in the narrator
+  voice and prepended to the M4B with its own "Introduction"
+  chapter marker. Site names are mapped to TTS-friendly forms
+  (Archive of Our Own, Royal Road, fanfiction dot net, etc.).
+
 ## 1.13.1 — 2026-04-18
 
 ### Fix
