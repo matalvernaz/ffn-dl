@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.11.3 — 2026-04-17
+
+### Fix
+
+- **BookNLP attribution now actually runs in the frozen Windows build.**
+  PyInstaller's static analysis only bundles stdlib modules it can
+  detect as imported from ffn-dl's own code, so modules like `timeit`
+  that BookNLP's transitive deps (torch/transformers) import at
+  runtime were silently missing from the frozen `ffn-dl.exe`. BookNLP
+  would blow up on first use with `No module named 'timeit'`,
+  `refine_speakers` would swallow the exception and fall back to the
+  builtin regex attribution, and users would see their audiobook
+  render fine but `booknlp_models/` stay empty forever because
+  BookNLP never actually instantiated. `neural_env.activate()` now
+  appends the embeddable Python's `python<MM>.zip` (full stdlib) to
+  `sys.path` so any such gap falls back to the embedded stdlib. Fix
+  is self-contained — no rebuild of the neural backend install is
+  needed; the embedded Python is already sitting in `neural/py/`.
+
 ## 1.11.2 — 2026-04-17
 
 ### Improve

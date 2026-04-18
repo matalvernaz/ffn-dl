@@ -87,14 +87,36 @@ def deps_activated() -> bool:
     return any(Path(p).resolve() == DEPS_DIR.resolve() for p in sys.path if p)
 
 
+def _embed_stdlib_zip() -> Path:
+    """Path to the embeddable Python's stdlib zip (may not exist).
+
+    Embeddable distributions ship the stdlib as ``python<MM>.zip``
+    next to ``python.exe``. Matches the currently-running Python's
+    minor version — ``PYTHON_EMBED_VERSION`` is pinned to the same
+    minor as the frozen .exe's interpreter so the bytecode is ABI-
+    compatible for pure-Python modules.
+    """
+    vi = sys.version_info
+    return PY_DIR / f"python{vi.major}{vi.minor}.zip"
+
+
 def activate() -> None:
-    """Add DEPS_DIR to sys.path so neural backends become importable.
+    """Add DEPS_DIR (and the embeddable stdlib) to sys.path so
+    neural backends become importable.
 
     Called at package import time from ``ffn_dl/__init__.py``. Safe
     to call repeatedly and safe to call before the directory exists
     — it just no-ops. Uses ``site.addsitedir`` rather than a plain
     ``sys.path.insert`` so ``.pth`` files get processed (torch ships
     a ``.pth`` that registers its internal extension paths).
+
+    Also appends the embeddable Python's ``python<MM>.zip`` to
+    ``sys.path`` so any stdlib module PyInstaller excluded from the
+    frozen ffn-dl.exe bundle (it only bundles stdlib modules it can
+    statically detect as imported — e.g. BookNLP's transitive deps
+    import ``timeit`` but ffn-dl doesn't) falls back to the full
+    embedded stdlib. Appended at the end so PyInstaller's bundled
+    modules still win for everything it did include.
     """
     if not DEPS_DIR.exists():
         return
@@ -105,6 +127,12 @@ def activate() -> None:
         site.addsitedir(str(DEPS_DIR))
     except Exception as exc:  # never block app startup on this
         logger.debug("neural_env.activate failed: %s", exc)
+
+    stdlib_zip = _embed_stdlib_zip()
+    if stdlib_zip.exists():
+        path_str = str(stdlib_zip)
+        if path_str not in sys.path:
+            sys.path.append(path_str)
 
 
 # ── embeddable Python bootstrap ────────────────────────────────────

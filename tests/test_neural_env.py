@@ -67,6 +67,70 @@ def test_activate_swallows_exceptions(tmp_path, monkeypatch):
         neural_env.activate()  # should not raise
 
 
+def test_activate_appends_stdlib_zip_when_present(tmp_path, monkeypatch):
+    """The embedded Python's stdlib zip must land on sys.path so
+    stdlib modules PyInstaller excluded (e.g. timeit) resolve."""
+    deps = tmp_path / "deps"
+    deps.mkdir()
+    py_dir = tmp_path / "py"
+    py_dir.mkdir()
+    vi = neural_env.sys.version_info
+    stdlib_zip = py_dir / f"python{vi.major}{vi.minor}.zip"
+    stdlib_zip.write_bytes(b"PK\x03\x04")  # placeholder; activate only checks existence
+
+    monkeypatch.setattr(neural_env, "DEPS_DIR", deps)
+    monkeypatch.setattr(neural_env, "PY_DIR", py_dir)
+    monkeypatch.setattr(neural_env, "sys", neural_env.sys)  # keep reference
+    original_path = list(neural_env.sys.path)
+    try:
+        with mock.patch.object(neural_env.site, "addsitedir"):
+            neural_env.activate()
+        assert str(stdlib_zip) in neural_env.sys.path
+        # Appended, not prepended — PyInstaller-bundled stdlib wins.
+        assert neural_env.sys.path[-1] == str(stdlib_zip)
+    finally:
+        neural_env.sys.path[:] = original_path
+
+
+def test_activate_stdlib_zip_is_idempotent(tmp_path, monkeypatch):
+    """Repeated activate() calls must not stack duplicate entries."""
+    deps = tmp_path / "deps"
+    deps.mkdir()
+    py_dir = tmp_path / "py"
+    py_dir.mkdir()
+    vi = neural_env.sys.version_info
+    stdlib_zip = py_dir / f"python{vi.major}{vi.minor}.zip"
+    stdlib_zip.write_bytes(b"PK\x03\x04")
+
+    monkeypatch.setattr(neural_env, "DEPS_DIR", deps)
+    monkeypatch.setattr(neural_env, "PY_DIR", py_dir)
+    original_path = list(neural_env.sys.path)
+    try:
+        with mock.patch.object(neural_env.site, "addsitedir"):
+            neural_env.activate()
+            neural_env.activate()
+        assert neural_env.sys.path.count(str(stdlib_zip)) == 1
+    finally:
+        neural_env.sys.path[:] = original_path
+
+
+def test_activate_skips_stdlib_zip_when_absent(tmp_path, monkeypatch):
+    """If the embedded Python isn't bootstrapped yet, don't touch sys.path
+    for the stdlib zip — only DEPS_DIR gets added."""
+    deps = tmp_path / "deps"
+    deps.mkdir()
+    py_dir = tmp_path / "py"  # exists, but no zip inside
+    py_dir.mkdir()
+    monkeypatch.setattr(neural_env, "DEPS_DIR", deps)
+    monkeypatch.setattr(neural_env, "PY_DIR", py_dir)
+    before = list(neural_env.sys.path)
+    with mock.patch.object(neural_env.site, "addsitedir"):
+        neural_env.activate()
+    # sys.path must be unchanged w.r.t. any zip under py_dir.
+    added = [p for p in neural_env.sys.path if p not in before]
+    assert all("python" not in Path(p).name or not p.endswith(".zip") for p in added)
+
+
 # ── _enable_site_in_pth rewrites the embeddable's ._pth ─────────────
 
 
