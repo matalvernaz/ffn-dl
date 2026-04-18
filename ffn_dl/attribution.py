@@ -379,6 +379,17 @@ def _spacy_download(model_name: str, log_callback=None) -> bool:
             if log_callback:
                 log_callback(f"neural_env unavailable: {exc}")
             return False
+        # spaCy's download subcommand shells out to ``pip install
+        # <wheel>`` with no --target. Without one, pip falls back to
+        # the embedded Python's own Lib/site-packages — which is NOT on
+        # the frozen app's sys.path; only DEPS_DIR is (added via
+        # site.addsitedir from neural_env.activate). Trailing args on
+        # ``spacy download`` are forwarded to pip, so pinning --target
+        # here is what lands the model where the main .exe can import
+        # it. Without this the download "succeeds" but the model stays
+        # invisible to the running app, and every render falls back to
+        # builtin attribution.
+        args = args + ["--target", str(neural_env.DEPS_DIR)]
         return neural_env.run_python(args, log_callback=log_callback)
 
     cmd = [sys.executable, *args]
@@ -411,13 +422,15 @@ def _ensure_spacy_model(model_name: str, log_callback=None) -> bool:
         return False
     _spacy_model_checked.add(model_name)
 
-    msg = f"spaCy model {model_name!r} not found; downloading..."
-    if log_callback:
-        log_callback(msg)
-    else:
-        logger.info(msg)
+    # When there's no caller-supplied log_callback (runtime path from
+    # _refine_with_booknlp), fall through to the logger so the download
+    # progress and any failure reason land in ffn-dl.log instead of
+    # vanishing.
+    cb = log_callback or (lambda line: logger.info(line))
 
-    ok = _spacy_download(model_name, log_callback=log_callback)
+    cb(f"spaCy model {model_name!r} not found; downloading...")
+
+    ok = _spacy_download(model_name, log_callback=cb)
     # Invalidate importlib's finder cache so the freshly-installed
     # package is discoverable without restarting the process.
     importlib.invalidate_caches()

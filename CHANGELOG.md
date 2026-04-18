@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.12.3 — 2026-04-18
+
+### Fix
+
+- **BookNLP attribution no longer silently falls back to builtin on
+  every render.** When the frozen app auto-downloaded the missing
+  `en_core_web_sm` spaCy model, spaCy's `download` subcommand shells
+  out to `pip install <wheel>` with no `--target`, so the model landed
+  in the embeddable Python's own `Lib/site-packages` — which isn't on
+  the main .exe's `sys.path`. Every runtime check kept failing the
+  availability test and BookNLP degraded to the builtin parser. The
+  download now forwards `--target <neural/deps>` so the model installs
+  where `site.addsitedir` actually picks it up. Subprocess output from
+  the download also routes through the logger when no UI callback is
+  supplied, so a future failure is visible in `logs/ffn-dl.log`
+  instead of vanishing. Reinstalling BookNLP from the GUI isn't
+  required — the next audiobook render self-heals.
+
 ## 1.12.2 — 2026-04-18
 
 ### Fix
