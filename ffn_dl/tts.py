@@ -353,7 +353,6 @@ def parse_segments(text):
         speech = match.group("speech").strip()
         speaker = None
         emotion = None
-        attrib_end = match.end()  # will advance past attribution text
 
         # Try attribution after the quote: "dialogue," Name verbed
         after_text = text[match.end() : match.end() + 80]
@@ -411,6 +410,9 @@ def parse_segments(text):
                 return None
             return " ".join(tokens)
 
+        # Detect post-dialogue attribution to identify the speaker, but
+        # DO NOT advance past it — the attribution text ("Harry said")
+        # must stay in the narration so a listener can tell who spoke.
         am = _AFTER_NAME_VERB.match(after_text)
         if am and am.group("verb").lower() in _SPEECH_VERBS:
             name = am.group("name")
@@ -420,7 +422,6 @@ def parse_segments(text):
             else:
                 speaker = _resolve_pronoun()
             emotion = EMOTION_MAP.get(verb)
-            attrib_end = match.end() + am.end()
 
         if not speaker:
             am = _AFTER_VERB_NAME.match(after_text)
@@ -432,7 +433,6 @@ def parse_segments(text):
                 else:
                     speaker = _resolve_pronoun()
                 emotion = EMOTION_MAP.get(verb)
-                attrib_end = match.end() + am.end()
 
         if not speaker:
             before_text = text[max(0, match.start() - 80) : match.start()]
@@ -458,7 +458,7 @@ def parse_segments(text):
             last_speaker = speaker
 
         segments.append(Segment(speech, speaker=speaker, emotion=emotion))
-        pos = attrib_end
+        pos = match.end()
 
     # Trailing narration
     trailing = text[pos:].strip()
