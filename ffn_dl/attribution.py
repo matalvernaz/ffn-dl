@@ -539,11 +539,63 @@ def _refine_with_fastcoref(segments, full_text):
 # several spaCy / PyTorch components. Cache per model_size so a
 # multi-chapter render doesn't reload everything on every chapter.
 _booknlp_cache: dict[str, object] = {}
+_booknlp_windows_patched = False
+
+
+def _patch_booknlp_windows_paths() -> None:
+    """Work around an upstream BookNLP bug that breaks on Windows.
+
+    Three tagger classes (entity_tagger.LitBankEntityTagger,
+    litbank_coref.LitBankCoref, bert_qa.QuotationAttribution) derive
+    the HuggingFace base-model name from the on-disk model file via
+    ``model_file.split("/")[-1]``. On POSIX that strips the directory
+    and leaves just the model filename. On Windows paths use ``\\``,
+    so the split returns the whole path unchanged and transformers'
+    ``from_pretrained`` sees e.g.
+    ``C:\\ffdl\\booknlp_models\\entities_google/bert_uncased_...``,
+    which HuggingFace Hub's repo-id validator rejects because it
+    contains ``:`` and ``\\``.
+
+    We patch each affected module's ``re`` binding with a shim that
+    intercepts only the ``re.sub("google_bert", ...)`` call used for
+    this derivation and strips the directory via ``os.path.basename``
+    before the real substitution runs. Every other regex flows
+    through unchanged.
+    """
+    global _booknlp_windows_patched
+    if _booknlp_windows_patched:
+        return
+    if sys.platform != "win32":
+        _booknlp_windows_patched = True
+        return
+
+    import os.path as _osp
+    import re as _re
+    from booknlp.english import entity_tagger, litbank_coref, bert_qa
+
+    class _ReShim:
+        def __init__(self, real):
+            self._real = real
+
+        def sub(self, pattern, repl, string, *a, **k):
+            if pattern == "google_bert" and isinstance(string, str):
+                string = _osp.basename(string)
+            return self._real.sub(pattern, repl, string, *a, **k)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    shim = _ReShim(_re)
+    entity_tagger.re = shim
+    litbank_coref.re = shim
+    bert_qa.re = shim
+    _booknlp_windows_patched = True
 
 
 def _get_booknlp_model(model_size: str):
     if model_size in _booknlp_cache:
         return _booknlp_cache[model_size]
+    _patch_booknlp_windows_paths()
     from booknlp.booknlp import BookNLP
     model = BookNLP(
         "en",

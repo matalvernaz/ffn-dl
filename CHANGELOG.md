@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.12.5 — 2026-04-18
+
+### Fix
+
+- **BookNLP now actually loads on Windows.** Three of BookNLP's tagger
+  classes (entity, coref, quote) derive the HuggingFace base-model
+  name from the on-disk model file via
+  ``model_file.split("/")[-1]`` — on POSIX that strips the directory,
+  on Windows paths use ``\`` so it returns the whole absolute path
+  unchanged. ``transformers.from_pretrained`` then feeds e.g.
+  ``C:\\ffdl\\booknlp_models\\entities_google/bert_uncased_...``
+  straight into HuggingFace Hub's repo-id validator, which rejects it
+  because repo ids can't contain ``:`` or ``\``. We install a small
+  shim on each module's ``re`` binding that calls ``os.path.basename``
+  before the ``google_bert``-replacing ``re.sub`` runs. Upstream
+  BookNLP bug; the workaround is localized to the three taggers and
+  leaves all other regex calls untouched.
+
 ## 1.12.4 — 2026-04-18
 
 ### Fix
