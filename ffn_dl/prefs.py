@@ -1,8 +1,11 @@
-"""Persistent GUI preferences backed by wx.Config.
+"""Persistent GUI preferences.
 
-wx.Config writes to the registry on Windows and to a dotfile on Linux/Mac,
-so preferences land in the right place per platform without extra work.
-Keep keys and defaults here so both read and write sites stay in sync.
+Frozen Windows builds store preferences as ``settings.ini`` next to
+ffn-dl.exe (portable — no registry dependency, moves with the folder).
+Non-frozen installs use ``wx.Config`` with its platform default
+(dotfile on POSIX, registry on Windows) so pip-installed ffn-dl
+behaves the same as it always has. Either way the accessor methods
+below stay identical.
 """
 
 KEY_NAME_TEMPLATE = "name_template"
@@ -38,7 +41,19 @@ class Prefs:
 
     def __init__(self):
         import wx
-        self._cfg = wx.Config("ffn-dl")
+        from . import portable
+
+        # Portable frozen build: keep settings.ini next to the exe
+        # (or in the writable-fallback dir). Pip-installed / dev mode
+        # uses the platform default so users keep their existing prefs.
+        if portable.is_frozen():
+            self._cfg = wx.FileConfig(
+                appName="ffn-dl",
+                localFilename=str(portable.settings_file()),
+                style=wx.CONFIG_USE_LOCAL_FILE,
+            )
+        else:
+            self._cfg = wx.Config("ffn-dl")
 
     def get(self, key: str, default=None):
         val = self._cfg.Read(key, "")

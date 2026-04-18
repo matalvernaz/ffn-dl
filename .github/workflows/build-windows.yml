@@ -31,10 +31,15 @@ jobs:
           unzip -j ffmpeg.zip "*/bin/ffmpeg.exe" "*/bin/ffprobe.exe" -d ffmpeg_bin/
           ls -la ffmpeg_bin/
 
+      # --onedir (not --onefile) — produces dist\ffn-dl\ with the exe +
+      # _internal\ next to it. That folder is what we zip up and ship.
+      # Portable install layout: users unzip the archive anywhere, all
+      # runtime data (settings, cache, neural deps) lives in the same
+      # folder as the exe.
       - name: Build executable
         shell: bash
         run: |
-          pyinstaller --onefile --name ffn-dl --console \
+          pyinstaller --onedir --name ffn-dl --console \
             --add-binary "ffmpeg_bin/ffmpeg.exe;." \
             --add-binary "ffmpeg_bin/ffprobe.exe;." \
             --hidden-import ffn_dl.cli \
@@ -51,6 +56,9 @@ jobs:
             --hidden-import ffn_dl.gui \
             --hidden-import ffn_dl.mailer \
             --hidden-import ffn_dl.prefs \
+            --hidden-import ffn_dl.portable \
+            --hidden-import ffn_dl.neural_env \
+            --hidden-import ffn_dl.attribution \
             --hidden-import ffn_dl.self_update \
             --hidden-import ffn_dl.search \
             --hidden-import edge_tts \
@@ -61,17 +69,26 @@ jobs:
             --collect-all wx \
             ffn_dl/__main__.py
 
-      - name: Test executable
-        run: dist\ffn-dl.exe --help
+      - name: Smoke-test executable
+        run: dist\ffn-dl\ffn-dl.exe --help
+
+      # Pack the whole dist\ffn-dl\ folder into a zip the user can
+      # unpack anywhere. Compress-Archive with a trailing path segment
+      # keeps "ffn-dl" as the top-level folder inside the archive.
+      - name: Create portable zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\ffn-dl -DestinationPath dist\ffn-dl-portable.zip -Force
+          Get-ChildItem dist\ffn-dl-portable.zip | Format-List Name, Length
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ffn-dl-windows
-          path: dist/ffn-dl.exe
+          name: ffn-dl-windows-portable
+          path: dist/ffn-dl-portable.zip
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ffn-dl.exe
+          files: dist/ffn-dl-portable.zip

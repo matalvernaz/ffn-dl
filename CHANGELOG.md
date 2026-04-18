@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.10.0 — 2026-04-18
+
+### Breaking
+
+- **Windows release is now a portable zip, not a single .exe**. Unzip
+  `ffn-dl-portable.zip` anywhere and double-click `ffn-dl.exe` inside.
+  Everything the app writes — GUI preferences, chapter cache, embedded
+  Python for neural backends, installed torch / fastcoref / BookNLP,
+  BookNLP model weights — now lives inside that folder. Uninstall is
+  "delete the folder"; backup is "zip the folder"; move to another
+  machine is "copy the folder." Nothing goes to the registry, AppData,
+  or the user's home directory anymore (unless the user unzipped into
+  a read-only location like `C:\Program Files`, in which case data
+  falls back to `%LOCALAPPDATA%\ffn-dl\`).
+
+### Changed
+
+- **GUI preferences moved from the Windows registry to `settings.ini`**
+  alongside `ffn-dl.exe`. Pip-installed ffn-dl is unchanged (still
+  uses `wx.Config`'s platform default, including registry on Windows).
+  Existing .exe users' registry prefs are NOT migrated — re-set your
+  filename template, output directory, and audiobook preferences on
+  first launch.
+- **Chapter cache moved** from `~/.cache/ffn-dl` to `<exe>/cache/` for
+  frozen builds. Pip installs still use the home-dir location.
+- **Neural backend install dir moved** from `%LOCALAPPDATA%\ffn-dl\neural`
+  (1.9.2) to `<exe>/neural/`. Users who installed fastcoref or BookNLP
+  on 1.9.2 will need to reinstall on 1.10.0 via the GUI Install button.
+- **BookNLP models** now land in `<exe>/booknlp_models/` instead of
+  `~/booknlp_models/`. Achieved by redirecting `HOME`/`USERPROFILE` to
+  the portable root at app startup so BookNLP's hardcoded `~/booknlp_models`
+  resolves inside the folder.
+- **Auto-updater rewritten for the zip format**. Downloads
+  `ffn-dl-portable.zip`, extracts to a temp folder, writes a batch
+  script that waits for ffn-dl.exe to release its locks, robocopies
+  the new files into place (preserving `settings.ini`, `cache/`,
+  `neural/`, and `booknlp_models/`), and relaunches. 1.9.2 clients
+  will see "new version available" but their old self-updater can't
+  apply a zip — download 1.10.0 manually once.
+
 ## 1.9.2 — 2026-04-18
 
 ### Feature

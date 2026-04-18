@@ -1,24 +1,36 @@
-"""GitHub-release self-update for the PyInstaller Windows build.
+"""GitHub-release self-update for the portable Windows build.
 
-In-place update flow, Windows frozen-exe only:
-  1. Rename the running exe to <name>.exe.old (NTFS permits renaming a
-     running executable, just not overwriting or deleting it by name).
-  2. Write the newly downloaded exe to the original path.
-  3. Spawn the new exe and exit.
-  4. On the next startup, cleanup_old_exe() deletes the .exe.old left
-     behind (the previous process is gone by then, so the delete succeeds).
+The app is unpacked to a folder that contains ``ffn-dl.exe``,
+``_internal/`` (PyInstaller bundle), and user data directories. A
+running ffn-dl.exe holds a lock on itself and on the DLLs inside
+``_internal/``, so we can't replace them while the app is running —
+instead we:
 
-On other platforms or when not running frozen, check_for_update still works
-— callers should open the release page in a browser instead of attempting
-in-place replacement.
+  1. Download the new ``ffn-dl-portable.zip`` into a temp directory.
+  2. Extract it to ``<temp>/ffn-dl-new/``.
+  3. Write an updater batch script that:
+       - waits for ffn-dl.exe to exit,
+       - copies every file from ``ffn-dl-new/`` over the current install
+         (user data folders are left untouched),
+       - deletes the temp dir,
+       - relaunches ffn-dl.exe,
+       - self-deletes.
+  4. Spawn that batch script detached and exit.
+
+On other platforms or when not running frozen, ``check_for_update`` still
+works — callers should open the release page in a browser instead of
+attempting in-place replacement.
 """
 
 import hashlib
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 from curl_cffi import requests as curl_requests
@@ -58,20 +70,29 @@ def check_for_update():
     if not latest or not current or latest <= current:
         return None
 
+    # Prefer the portable zip (current distribution format); fall back
+    # to a single-file .exe only if one is still attached to an old
+    # release so 1.9.x clients keep working.
+    zip_asset = None
     exe_asset = None
     for asset in data.get("assets") or []:
-        if asset.get("name", "").lower().endswith(".exe"):
-            exe_asset = asset
+        name = asset.get("name", "").lower()
+        if name.endswith(".zip") and "portable" in name:
+            zip_asset = asset
             break
-    if not exe_asset:
+        if name.endswith(".exe") and exe_asset is None:
+            exe_asset = asset
+    chosen = zip_asset or exe_asset
+    if not chosen:
         return None
 
     return {
         "tag": data["tag_name"],
-        "download_url": exe_asset["browser_download_url"],
-        "size": exe_asset.get("size", 0),
-        "digest": exe_asset.get("digest"),  # "sha256:<hex>" when present
+        "download_url": chosen["browser_download_url"],
+        "size": chosen.get("size", 0),
+        "digest": chosen.get("digest"),  # "sha256:<hex>" when present
         "release_url": data.get("html_url"),
+        "is_zip": zip_asset is not None,
     }
 
 
@@ -114,41 +135,25 @@ def cleanup_old_exe() -> None:
         logger.debug("Could not remove stale old exe: %s", exc)
 
 
-def download_and_replace(update_info, progress_cb=None) -> Path:
-    """Download the new exe and swap it in. Returns the path of the new exe.
+# User-data directories inside the install folder that MUST survive
+# an update. Keep this list in sync with ffn_dl/portable.py.
+_USER_DATA_DIRS = {
+    "cache",
+    "neural",
+    "booknlp_models",
+}
+_USER_DATA_FILES = {
+    "settings.ini",
+}
 
-    Raises RuntimeError on anything that leaves the install in a recoverable
-    state; on success, the caller should spawn the new exe and exit.
-    """
-    if not can_self_replace():
-        raise RuntimeError(
-            "In-place update is only supported for the Windows .exe build."
-        )
 
-    current_exe = Path(sys.executable)
-    target_dir = current_exe.parent
-    tmp_path = target_dir / (current_exe.stem + ".new.exe")
-    old_path = current_exe.with_name(current_exe.stem + ".exe.old")
-
-    # Clear any old backup and stale temp from a prior failed attempt
-    for p in (tmp_path, old_path):
-        if p.exists():
-            try:
-                p.unlink()
-            except OSError:
-                pass
-
-    resp = curl_requests.get(
-        update_info["download_url"],
-        impersonate="chrome",
-        timeout=60,
-        stream=True,
-    )
+def _download(url: str, dest: Path, progress_cb=None, expected_size: int = 0) -> None:
+    """Stream ``url`` to ``dest``; raises on HTTP errors."""
+    resp = curl_requests.get(url, impersonate="chrome", timeout=60, stream=True)
     resp.raise_for_status()
-    total = int(resp.headers.get("content-length") or update_info.get("size") or 0)
-
+    total = int(resp.headers.get("content-length") or expected_size or 0)
     done = 0
-    with open(tmp_path, "wb") as f:
+    with open(dest, "wb") as f:
         for chunk in resp.iter_content(chunk_size=1 << 20):
             if not chunk:
                 continue
@@ -157,26 +162,130 @@ def download_and_replace(update_info, progress_cb=None) -> Path:
             if progress_cb:
                 progress_cb(done, total)
 
+
+def _write_updater_batch(
+    script_path: Path,
+    exe_path: Path,
+    new_dir: Path,
+    install_dir: Path,
+) -> None:
+    """Write the .bat helper that runs after we exit and swaps files.
+
+    robocopy-based because it's stock Windows and handles locked files
+    better than ``copy`` / ``xcopy``. The /XD flag excludes user data
+    dirs so an update preserves the user's settings, chapter cache,
+    and any installed neural backends.
+    """
+    xd = " ".join(f'"{install_dir / d}"' for d in _USER_DATA_DIRS)
+    # settings.ini lives at the top level — robocopy's /XF excludes files by name.
+    xf = " ".join(f'"{f}"' for f in _USER_DATA_FILES)
+    # Wait loop: try to rename the exe to a scratch name to prove it's no
+    # longer locked. If the rename works we rename it back and proceed.
+    script = f"""@echo off
+setlocal
+set "EXE={exe_path}"
+set "INSTALL={install_dir}"
+set "NEW={new_dir}"
+rem Wait up to 30 seconds for ffn-dl.exe to release its lock.
+set /a tries=0
+:waitloop
+set /a tries+=1
+if %tries% GTR 30 goto :giveup
+ren "%EXE%" "ffn-dl.exe.locktest" >nul 2>&1
+if errorlevel 1 (
+    timeout /t 1 /nobreak >nul
+    goto :waitloop
+)
+ren "%INSTALL%\\ffn-dl.exe.locktest" "ffn-dl.exe" >nul 2>&1
+
+rem Copy new files over the install, preserving user data.
+robocopy "%NEW%" "%INSTALL%" /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP /XD {xd} /XF {xf} >nul
+rem robocopy exit codes 0-7 are success; 8+ are failures.
+if errorlevel 8 goto :giveup
+
+rem Clean up and relaunch.
+rmdir /S /Q "%NEW%" >nul 2>&1
+start "" "%EXE%"
+del "%~f0"
+exit /b 0
+
+:giveup
+rem Leave the new files for the user to inspect; don't relaunch.
+echo Update failed. New version is at: %NEW%
+del "%~f0"
+exit /b 1
+"""
+    script_path.write_text(script, encoding="utf-8")
+
+
+def download_and_replace(update_info, progress_cb=None) -> Path:
+    """Download the new portable zip and spawn the updater script.
+
+    Returns the install directory (for logging). Caller MUST exit
+    shortly after — the updater batch waits for the process to release
+    its file locks before it can proceed.
+    """
+    if not can_self_replace():
+        raise RuntimeError(
+            "In-place update is only supported for the Windows portable build."
+        )
+
+    if not update_info.get("is_zip"):
+        # A prior-release .exe asset — we can't swap a single exe into a
+        # one-folder install safely, so fall back to directing the user
+        # at the release page.
+        raise RuntimeError(
+            "Update asset is not a portable zip. Please download the new "
+            "version manually from the release page."
+        )
+
+    current_exe = Path(sys.executable).resolve()
+    install_dir = current_exe.parent
+    workdir = Path(tempfile.mkdtemp(prefix="ffn-dl-update-"))
+    zip_path = workdir / "ffn-dl-portable.zip"
+    new_dir = workdir / "ffn-dl-new"
+
     try:
-        _verify_digest(tmp_path, update_info.get("digest"))
+        _download(
+            update_info["download_url"],
+            zip_path,
+            progress_cb=progress_cb,
+            expected_size=update_info.get("size", 0),
+        )
+        _verify_digest(zip_path, update_info.get("digest"))
+
+        new_dir.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(new_dir)
+        zip_path.unlink(missing_ok=True)
+
+        # The release zip's top-level is "ffn-dl/" — unwrap one level if
+        # present so new_dir mirrors install_dir's layout directly.
+        inner = list(new_dir.iterdir())
+        if len(inner) == 1 and inner[0].is_dir():
+            src = inner[0]
+            for item in src.iterdir():
+                item.rename(new_dir / item.name)
+            src.rmdir()
+
+        script_path = workdir / "apply-update.bat"
+        _write_updater_batch(script_path, current_exe, new_dir, install_dir)
+
+        # Launch the updater detached so it survives our exit.
+        creationflags = 0x8 | 0x200  # DETACHED + CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen(
+            ["cmd.exe", "/c", str(script_path)],
+            close_fds=True,
+            creationflags=creationflags,
+            cwd=str(workdir),
+        )
     except Exception:
-        tmp_path.unlink(missing_ok=True)
+        # Clean up workdir on any pre-spawn failure so we don't leave
+        # partial downloads accumulating in %TEMP%.
+        shutil.rmtree(workdir, ignore_errors=True)
         raise
 
-    # Rename the running exe aside, then move the new one into place. If the
-    # second rename fails we try to put the original back so the user isn't
-    # left with a broken install.
-    os.replace(str(current_exe), str(old_path))
-    try:
-        os.replace(str(tmp_path), str(current_exe))
-    except OSError as exc:
-        try:
-            os.replace(str(old_path), str(current_exe))
-        except OSError:
-            pass
-        raise RuntimeError(f"Failed to install new version: {exc}") from exc
-
-    return current_exe
+    return install_dir
 
 
 def restart() -> None:

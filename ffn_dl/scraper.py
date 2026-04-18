@@ -30,6 +30,16 @@ class CloudflareBlockError(Exception):
 
 
 def _default_cache_dir():
+    # Frozen Windows builds keep their chapter cache inside the
+    # portable folder so uninstall is still "delete the folder".
+    try:
+        from . import portable
+        if portable.is_frozen():
+            path = portable.cache_dir()
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+    except Exception:
+        pass
     path = Path.home() / ".cache" / "ffn-dl"
     path.mkdir(parents=True, exist_ok=True)
     return path

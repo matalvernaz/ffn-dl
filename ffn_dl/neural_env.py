@@ -48,16 +48,15 @@ GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 def _root() -> Path:
     """Where we keep the embedded Python + installed deps.
 
-    On Windows we use %LOCALAPPDATA%\\ffn-dl\\neural\\ — roaming
-    would sync a multi-GB torch install to every machine the user
-    logs into, which nobody wants. Elsewhere we fall back to
-    ~/.ffn-dl/neural/, though in practice ``is_supported()`` returns
-    False off Windows because we don't ship a frozen .exe there.
+    For portable Windows builds this is ``<exe_dir>\\neural\\`` so the
+    multi-hundred-MB torch install moves with the unzipped folder. For
+    pip-installed ffn-dl (or a dev checkout) we keep ``~/.ffn-dl/neural``.
+    ``portable.portable_root()`` picks a writable fallback under
+    %LOCALAPPDATA% when the exe is in a read-only location like
+    Program Files.
     """
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        return Path(base) / "ffn-dl" / "neural"
-    return Path.home() / ".ffn-dl" / "neural"
+    from . import portable as _p
+    return _p.neural_dir()
 
 
 NEURAL_ROOT = _root()

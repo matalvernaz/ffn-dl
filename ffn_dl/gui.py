@@ -1056,7 +1056,11 @@ class MainFrame(wx.Frame):
             self.Hide()
         except Exception:
             pass
-        self_update.restart()
+        # Portable build: the updater .bat writes the new files AFTER
+        # we release file locks, then relaunches ffn-dl itself. Do NOT
+        # call self_update.restart() here — spawning our own child
+        # would race with the batch's relaunch.
+        sys.exit(0)
 
     # ── Download ─────────────────────────────────────────────
 
