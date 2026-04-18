@@ -1220,18 +1220,77 @@ async def _generate_segment_audio(segment, voice, output_path, speech_rate=0):
     return True
 
 
+# Upper bound on the text length handed to edge-tts per call. Above
+# roughly this size edge-tts silently returns empty audio ("No audio was
+# received") instead of synthesising. 2000 chars sits comfortably below
+# that ceiling while still letting the chapter stitcher produce
+# naturally-paced narration spans — smaller caps splinter long prose
+# into choppy fragment joins.
+_MAX_SEGMENT_CHARS = 2000
+
+# Sentence-terminator split: matches whitespace after .!? while keeping
+# the terminator with the preceding sentence. Used to split oversized
+# narrator segments at natural boundaries.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _split_oversized_text(text, max_len=_MAX_SEGMENT_CHARS):
+    """Split a string at sentence boundaries so no piece exceeds
+    ``max_len``. Falls back to a hard whitespace split for pathologically
+    long sentences so edge-tts still gets a bounded payload."""
+    text = text.strip()
+    if len(text) <= max_len:
+        return [text]
+
+    parts = []
+    buf = ""
+    for sentence in _SENTENCE_SPLIT_RE.split(text):
+        if not sentence:
+            continue
+        # Pathological sentence (> max_len on its own): hard-wrap on
+        # word boundaries rather than letting it through oversized.
+        if len(sentence) > max_len:
+            if buf:
+                parts.append(buf)
+                buf = ""
+            words = sentence.split(" ")
+            chunk = ""
+            for w in words:
+                if chunk and len(chunk) + 1 + len(w) > max_len:
+                    parts.append(chunk)
+                    chunk = w
+                else:
+                    chunk = f"{chunk} {w}" if chunk else w
+            if chunk:
+                buf = chunk
+            continue
+        if buf and len(buf) + 1 + len(sentence) > max_len:
+            parts.append(buf)
+            buf = sentence
+        else:
+            buf = f"{buf} {sentence}" if buf else sentence
+    if buf:
+        parts.append(buf)
+    return parts
+
+
 def _merge_small_segments(segments, min_len=30):
     """Merge short segments to reduce API calls and avoid errors.
 
-    Pass 1: merge adjacent narrator segments.
+    Pass 1: merge adjacent narrator segments (bounded by
+    ``_MAX_SEGMENT_CHARS`` so giant prose blocks don't fuse into a
+    single payload edge-tts will reject).
     Pass 2: absorb very short narrator fragments into the nearest
-    narrator segment (even if non-adjacent).
+    narrator segment (also bounded).
     Pass 3: drop anything that's just punctuation.
+    Pass 4: split any remaining oversized segment at sentence
+    boundaries — covers segments that arrived already too big from
+    upstream parsing.
     """
     if not segments:
         return []
 
-    # Pass 1: merge adjacent narration
+    # Pass 1: merge adjacent narration (bounded)
     merged = []
     for seg in segments:
         if seg.scene_break:
@@ -1239,12 +1298,14 @@ def _merge_small_segments(segments, min_len=30):
             continue
         if not seg.text:
             continue
-        if (
+        can_merge = (
             merged
             and not merged[-1].scene_break
             and seg.speaker is None
             and merged[-1].speaker is None
-        ):
+            and len(merged[-1].text) + 1 + len(seg.text) <= _MAX_SEGMENT_CHARS
+        )
+        if can_merge:
             merged[-1].text += " " + seg.text
         else:
             merged.append(Segment(seg.text, seg.speaker, seg.emotion))
@@ -1258,12 +1319,19 @@ def _merge_small_segments(segments, min_len=30):
         if seg.speaker is None and len(seg.text) < min_len:
             # Try to append to the previous narrator segment (but not
             # across a scene-break marker — that would glue two scenes
-            # together and lose the pause).
+            # together and lose the pause). Respect the same size cap
+            # as Pass 1.
             for prev in reversed(cleaned):
                 if prev.scene_break:
                     break
                 if prev.speaker is None:
-                    prev.text += " " + seg.text
+                    if len(prev.text) + 1 + len(seg.text) <= _MAX_SEGMENT_CHARS:
+                        prev.text += " " + seg.text
+                        break
+                    # Previous narrator is already at the cap — keep
+                    # this fragment standalone rather than blowing past
+                    # the limit.
+                    cleaned.append(seg)
                     break
             else:
                 # No previous narrator — keep it, it'll merge forward later
@@ -1273,10 +1341,22 @@ def _merge_small_segments(segments, min_len=30):
 
     # Pass 3: drop empty / punctuation-only segments, but preserve
     # scene-break markers.
-    return [
+    filtered = [
         s for s in cleaned
         if s.scene_break or s.text.strip(".,;:!?-–—' \"")
     ]
+
+    # Pass 4: split any segment still over the cap at sentence
+    # boundaries. Covers oversized inputs (rare) and belt-and-braces
+    # against earlier passes.
+    result = []
+    for seg in filtered:
+        if seg.scene_break or len(seg.text) <= _MAX_SEGMENT_CHARS:
+            result.append(seg)
+            continue
+        for piece in _split_oversized_text(seg.text):
+            result.append(Segment(piece, speaker=seg.speaker, emotion=seg.emotion))
+    return result
 
 
 # Max concurrent edge-tts API calls per chapter
