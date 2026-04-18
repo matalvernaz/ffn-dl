@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.10.1 — 2026-04-17
+
+### Fix
+
+- **Literotica downloads were producing empty EPUBs.** Literotica's
+  current layout wraps the main story body in a div whose class name
+  starts with `_introduction__text_` — historically the class of a
+  short author blurb above the body. The chrome-stripping pass in
+  `extract_body` was decomposing every element whose class contained
+  `_introduction`, which gutted the chapter text and left the reader
+  with a "Report" button and nothing else. `_introduction` is now
+  absent from the strip list, and the summary is pulled from
+  `<meta name="description">` (where the real blurb lives now) instead
+  of the repurposed intro div.
+- **Audiobook (`-f audio`) failed when the output directory was
+  relative.** `build_m4b` wrote bare chapter filenames into its concat
+  list file, then invoked ffmpeg with the list sitting in its own
+  tempdir. ffmpeg resolves concat `file` entries relative to the list
+  file's directory, not process CWD, so `ch_0001.mp3` was looked up
+  inside `/tmp/ffn-m4b-xxxx/` and missed every time. This hit every
+  default invocation: `ffn-dl -f audio <url>` with no `-o` gave an
+  output dir of `Path(".")` and failed unconditionally. Chapter paths
+  are now resolved to absolute before going into the concat list.
+- **Corrupt cache files no longer crash the downloader.** A partial
+  write to `meta.json` or a chapter cache entry used to surface as a
+  `ValueError` from `json.loads` mid-download and leave the user to
+  manually clear `~/.cache/ffn-dl/`. Both cache loaders now tolerate
+  `ValueError` / `UnicodeDecodeError` / `OSError`, log a warning,
+  unlink the bad file, and return `None` so the scraper refetches it
+  cleanly.
+- **Missing EPUB/audio extras no longer waste a full download.** A
+  user without `ebooklib` installed running `ffn-dl -f epub` (the
+  default) used to fetch every chapter before surfacing the install
+  hint. The same held for `-f audio` without `edge-tts`. Both formats
+  now pre-flight their optional dependency at the top of the download
+  handler, so the error arrives in under a second.
+- **Royal Road and other sites without native word counts now show a
+  real number in the console summary.** Exporters already fell back to
+  counting words from the rendered chapter text when the source site
+  didn't expose one, but the CLI's summary line was displaying `Words:
+  ?`. The summary now uses the same fallback path so what prints
+  matches what lands in the exported file.
+
 ## 1.10.0 — 2026-04-18
 
 ### Breaking
