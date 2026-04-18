@@ -1377,3 +1377,130 @@ def search_literotica(query, *, page=1, **filters):
             f"Literotica search failed (HTTP {resp.status_code})."
         )
     return _parse_literotica_results(resp.text)
+
+
+# ── Wattpad ──────────────────────────────────────────────────────
+
+WP_API = "https://api.wattpad.com"
+WP_PAGE_SIZE = 20
+
+
+WP_MATURE = {
+    "any": None,
+    "exclude": "exclude",
+    "only": "only",
+}
+
+
+WP_COMPLETED = {
+    "any": None,
+    "complete": True,
+    "in-progress": False,
+}
+
+
+def search_wattpad(query, *, page=1, **filters):
+    """Search Wattpad via the public v4 stories API.
+
+    Wattpad's web search is JS-rendered and rate-limits aggressively, so
+    we hit ``api.wattpad.com/v4/stories`` instead — the same endpoint
+    the mobile app uses, accepting an unauthenticated GET.
+
+    Keyword filters (optional):
+        mature:    any / exclude / only — client-side filter on the
+                   mature flag; Wattpad's API doesn't expose a filter
+                   param so we filter the returned page.
+        completed: any / complete / in-progress — same, client-side.
+
+    The API uses offset-based paging; page=1 → offset=0, page=2 → offset=20.
+    Returns a list of result dicts compatible with other search_* sites.
+    """
+    import json as _json
+    from curl_cffi import requests as _curl_requests
+
+    q = (query or "").strip()
+    if not q:
+        # Empty query would return a generic random set; be explicit.
+        return []
+
+    try:
+        page_n = max(1, int(page))
+    except (TypeError, ValueError):
+        page_n = 1
+    offset = (page_n - 1) * WP_PAGE_SIZE
+
+    fields = (
+        "stories("
+        "id,title,user,description,cover,completed,mature,numParts,"
+        "url,tags,language,paidModel,isPaywalled,length"
+        ")"
+    )
+    qs = {
+        "query": q,
+        "limit": WP_PAGE_SIZE,
+        "offset": offset,
+        "fields": fields,
+    }
+    url = f"{WP_API}/v4/stories?" + urlencode(qs)
+    session = _curl_requests.Session(impersonate="chrome")
+    resp = session.get(url, timeout=30)
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Wattpad search failed (HTTP {resp.status_code})."
+        )
+    try:
+        data = _json.loads(resp.text)
+    except ValueError as exc:
+        raise RuntimeError("Wattpad returned non-JSON.") from exc
+    stories = data.get("stories") or []
+
+    mature = (filters or {}).get("mature")
+    completed = (filters or {}).get("completed")
+    # Allow natural-case labels ("Complete", "In-Progress") and the
+    # boolean-ish keys from the CLI.
+    def _norm(s):
+        return str(s).strip().lower() if s is not None else None
+    mature = _norm(mature)
+    completed = _norm(completed)
+
+    results = []
+    for s in stories:
+        is_mature = bool(s.get("mature"))
+        is_complete = bool(s.get("completed"))
+        if mature == "exclude" and is_mature:
+            continue
+        if mature == "only" and not is_mature:
+            continue
+        if completed == "complete" and not is_complete:
+            continue
+        if completed == "in-progress" and is_complete:
+            continue
+
+        user = s.get("user") or {}
+        author = user.get("name") or user.get("fullname") or ""
+        length = s.get("length") or 0
+        # Character count → rough word count (5 chars/word). Wattpad
+        # doesn't expose a word field, and we want search cards to
+        # surface something more useful than "length".
+        words_est = f"{max(1, int(length) // 5):,}" if length else ""
+        tags = s.get("tags") or []
+        fandom_str = ", ".join(tags[:3]) if tags else ""
+        paid = s.get("paidModel") or ""
+        rating_bits = []
+        if is_mature:
+            rating_bits.append("Mature")
+        if paid:
+            rating_bits.append("Paid")
+        rating = " / ".join(rating_bits) or "GA"
+        results.append({
+            "title": s.get("title") or "Untitled",
+            "author": author,
+            "url": s.get("url") or f"https://www.wattpad.com/story/{s.get('id')}",
+            "summary": (s.get("description") or "").strip(),
+            "words": words_est,
+            "chapters": str(s.get("numParts") or ""),
+            "rating": rating,
+            "fandom": fandom_str,
+            "status": "Complete" if is_complete else "In-Progress",
+        })
+    return results

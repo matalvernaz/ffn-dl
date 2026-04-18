@@ -1,9 +1,9 @@
 # ffn-dl
 
 Cross-platform fanfiction downloader. Pulls stories from **FanFiction.net**,
-**Archive of Our Own**, **FicWad**, **Royal Road**, **MediaMiner**, and
-**Literotica** and exports them as EPUB, HTML, plain text, or a chaptered
-M4B audiobook.
+**Archive of Our Own**, **FicWad**, **Royal Road**, **MediaMiner**,
+**Literotica**, and **Wattpad** and exports them as EPUB, HTML, plain text,
+or a chaptered M4B audiobook.
 
 Accessible by design — the Windows build and wxPython GUI are tested with
 NVDA, and the CLI produces screen-reader-friendly text output with no
@@ -46,9 +46,9 @@ python -m ffn_dl.gui
 ```
 
 Tabs for Download, FFN Search, AO3 Search, Royal Road Search (with list
-browse for Rising Stars / Best Rated / etc.), and Literotica Search.
-Author / bookmark pickers are multi-select with NVDA-readable check
-state and a summary pane.
+browse for Rising Stars / Best Rated / etc.), Literotica Search, and
+Wattpad Search. Author / bookmark pickers are multi-select with
+NVDA-readable check state and a summary pane.
 
 ### CLI — common tasks
 

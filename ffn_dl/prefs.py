@@ -23,6 +23,7 @@ KEY_SEARCH_STATE_FFN = "search_state_ffn"
 KEY_SEARCH_STATE_AO3 = "search_state_ao3"
 KEY_SEARCH_STATE_ROYALROAD = "search_state_royalroad"
 KEY_SEARCH_STATE_LITEROTICA = "search_state_literotica"
+KEY_SEARCH_STATE_WATTPAD = "search_state_wattpad"
 
 DEFAULTS = {
     KEY_NAME_TEMPLATE: "{title} - {author}",

@@ -20,13 +20,14 @@ _LOG_TRIM_TO_LINES = 4000
 
 
 _FFN_URL_RE = re.compile(
-    r"https?://(?:www\.)?("
+    r"https?://(?:www\.|m\.)?("
     r"fanfiction\.net/s/\d+"
     r"|ficwad\.com/story/\d+"
     r"|(?:archiveofourown\.org|ao3\.org)/works/\d+"
     r"|royalroad\.com/fiction/\d+"
     r"|mediaminer\.org/fanfic/(?:view_st\.php/\d+|s/[^?#\s]+?/\d+)"
     r"|literotica\.com/s/[a-z0-9-]+"
+    r"|wattpad\.com/(?:story/)?\d+"
     r")"
 )
 
@@ -137,6 +138,18 @@ def _literotica_search_spec():
     }
 
 
+def _wattpad_search_spec():
+    from .search import WP_COMPLETED, WP_MATURE, search_wattpad
+    return {
+        "label": "Search Wattpad",
+        "search_fn": search_wattpad,
+        "filters": [
+            ("&Mature:", "mature", list(WP_MATURE)),
+            ("S&tatus:", "completed", list(WP_COMPLETED)),
+        ],
+    }
+
+
 class MainFrame(wx.Frame):
     def __init__(self):
         from . import __version__
@@ -175,6 +188,7 @@ class MainFrame(wx.Frame):
         self._build_search_tab(self.notebook, "ao3", _ao3_search_spec())
         self._build_search_tab(self.notebook, "royalroad", _royalroad_search_spec())
         self._build_search_tab(self.notebook, "literotica", _literotica_search_spec())
+        self._build_search_tab(self.notebook, "wattpad", _wattpad_search_spec())
 
         root_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, pad)
 
@@ -780,6 +794,7 @@ class MainFrame(wx.Frame):
             ("ao3", _p.KEY_SEARCH_STATE_AO3),
             ("royalroad", _p.KEY_SEARCH_STATE_ROYALROAD),
             ("literotica", _p.KEY_SEARCH_STATE_LITEROTICA),
+            ("wattpad", _p.KEY_SEARCH_STATE_WATTPAD),
         ):
             if site_key not in self._tabs:
                 continue
@@ -812,6 +827,7 @@ class MainFrame(wx.Frame):
             ("ao3", _p.KEY_SEARCH_STATE_AO3),
             ("royalroad", _p.KEY_SEARCH_STATE_ROYALROAD),
             ("literotica", _p.KEY_SEARCH_STATE_LITEROTICA),
+            ("wattpad", _p.KEY_SEARCH_STATE_WATTPAD),
         ):
             if site_key not in self._tabs:
                 continue
@@ -1269,6 +1285,7 @@ class MainFrame(wx.Frame):
         site_label = {
             "ao3": "AO3", "ffn": "FFN",
             "royalroad": "Royal Road", "literotica": "Literotica",
+            "wattpad": "Wattpad",
         }.get(site_key, site_key)
         self._log(f"Searching {site_label} for: {query}{filter_str}")
         threading.Thread(
@@ -1651,6 +1668,9 @@ class MainFrame(wx.Frame):
             return MediaMinerScraper()
         if "literotica.com" in text:
             return LiteroticaScraper()
+        if "wattpad.com" in text:
+            from .wattpad import WattpadScraper
+            return WattpadScraper()
         return FFNScraper()
 
     def _export_story(self, story):

@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.11.0 — 2026-04-17
+
+### Add
+
+- **Wattpad support.** New site scraper, CLI dispatcher registration,
+  clipboard-watch URL pattern, and a Search Wattpad tab in the GUI
+  alongside the existing FFN/AO3/RR/Literotica tabs. Metadata is
+  lifted from the server-rendered story page by bracket-matching the
+  embedded JSON blob (Wattpad's Next.js class names rotate between
+  builds), and chapter bodies come from `apiv2/?m=storytext`, the
+  same endpoint the mobile app uses. Accepts story URLs
+  (`/story/<id>`), part URLs (`/<part_id>`), and bare numeric IDs;
+  part URLs are auto-resolved to their owning story via
+  `api/v3/story_parts/<id>`.
+
+  Handles Wattpad's Paid Stories program cleanly: paywalled chapters
+  return a bilingual "This story is part of the Paid Stories
+  program" stub, which the scraper detects, preserves the chapter
+  slot in the output with a short placeholder, and skips caching so
+  a later unlock (or an author-opened preview) refetches the real
+  text. If every requested chapter is paywalled, raises a
+  `WattpadPaidStoryError` with guidance to use `--chapters` for the
+  free preview parts.
+
+  Author pages (`/user/<name>`) enumerate published stories via the
+  mobile API. Search uses `api.wattpad.com/v4/stories` with
+  client-side filters for mature/completed (the v4 search endpoint
+  has no server-side filter params).
+
 ## 1.10.5 — 2026-04-17
 
 ### Fix

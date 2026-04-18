@@ -20,6 +20,7 @@ from .scraper import (
     StoryNotFoundError,
 )
 from .updater import count_chapters, extract_source_url, extract_status
+from .wattpad import WattpadPaidStoryError, WattpadScraper
 
 
 def _detect_site(url):
@@ -35,6 +36,8 @@ def _detect_site(url):
         return MediaMinerScraper
     if "literotica.com" in text:
         return LiteroticaScraper
+    if "wattpad.com" in text:
+        return WattpadScraper
     return FFNScraper
 
 
@@ -47,6 +50,7 @@ def _is_author_url(url):
         or RoyalRoadScraper.is_author_url(url)
         or MediaMinerScraper.is_author_url(url)
         or LiteroticaScraper.is_author_url(url)
+        or WattpadScraper.is_author_url(url)
     )
 
 
@@ -414,6 +418,9 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
     except AO3LockedError as exc:
         print(f"Locked: {exc}", file=sys.stderr)
         return False
+    except WattpadPaidStoryError as exc:
+        print(f"Paywalled: {exc}", file=sys.stderr)
+        return False
     except CloudflareBlockError as exc:
         print(f"Blocked: {exc}", file=sys.stderr)
         return False
@@ -458,6 +465,9 @@ _MM_URL_RE = re.compile(
 _LIT_URL_RE = re.compile(
     r"https?://(?:www\.)?literotica\.com/s/[a-z0-9-]+", re.I
 )
+_WP_URL_RE = re.compile(
+    r"https?://(?:www\.|m\.)?wattpad\.com/(?:story/)?\d+", re.I
+)
 
 
 def _handle_search(args):
@@ -465,6 +475,7 @@ def _handle_search(args):
     from .search import (
         collapse_ao3_series, collapse_literotica_series, fetch_until_limit,
         search_ao3, search_ffn, search_literotica, search_royalroad,
+        search_wattpad,
     )
 
     if args.site == "ao3":
@@ -509,6 +520,13 @@ def _handle_search(args):
         search_fn = search_literotica
         if getattr(args, "lit_page", None):
             args.start_page = max(args.start_page, int(args.lit_page))
+    elif args.site == "wattpad":
+        site_label = "wattpad.com"
+        filters = {
+            "mature": getattr(args, "wp_mature", None),
+            "completed": getattr(args, "wp_completed", None),
+        }
+        search_fn = search_wattpad
     else:
         site_label = "fanfiction.net"
         filters = {
@@ -883,7 +901,8 @@ def _handle_watch(args):
             # Check if clipboard contains a supported URL
             url = None
             for pattern in (_FFN_URL_RE, _FICWAD_URL_RE, _AO3_URL_RE,
-                            _RR_URL_RE, _MM_URL_RE, _LIT_URL_RE):
+                            _RR_URL_RE, _MM_URL_RE, _LIT_URL_RE,
+                            _WP_URL_RE):
                 match = pattern.search(clip)
                 if match:
                     url = match.group(0)
@@ -915,7 +934,7 @@ def main(argv=None):
         epilog=(
             "Supported sites: fanfiction.net, ficwad.com, "
             "archiveofourown.org, royalroad.com, mediaminer.org, "
-            "literotica.com\n"
+            "literotica.com, wattpad.com\n"
             "Name template placeholders: "
             "{title} {author} {id} {words} {status} {rating} {language} {chapters}"
         ),
@@ -1171,7 +1190,7 @@ def main(argv=None):
     )
     parser.add_argument(
         "--site",
-        choices=["ffn", "ao3", "royalroad", "literotica"],
+        choices=["ffn", "ao3", "royalroad", "literotica", "wattpad"],
         default="ffn",
         help=(
             "Which site to search (default: ffn). Literotica's public "
@@ -1358,6 +1377,21 @@ def main(argv=None):
         type=int,
         metavar="N",
         help="Literotica-only: which page of tag results to fetch (default 1)",
+    )
+    parser.add_argument(
+        "--wp-mature",
+        choices=["any", "exclude", "only"],
+        default=None,
+        help=(
+            "Wattpad-only: filter by mature flag. 'exclude' drops mature "
+            "results, 'only' keeps just mature."
+        ),
+    )
+    parser.add_argument(
+        "--wp-completed",
+        choices=["any", "complete", "in-progress"],
+        default=None,
+        help="Wattpad-only: filter by completion state.",
     )
     parser.add_argument(
         "--limit",
