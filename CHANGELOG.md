@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.10.2 — 2026-04-17
+
+### Fix
+
+- **Auto-updater silently failed to replace `ffn-dl.exe` and `_internal`
+  DLLs.** The updater batch tried to detect whether the parent process
+  had released its file locks by renaming `ffn-dl.exe` to a scratch
+  name and back — but a running Windows PE can be renamed freely
+  (rename touches the directory entry, not the mapped image section),
+  so the wait loop exited immediately while the exe was still locked.
+  robocopy then hit ERROR 32 on `ffn-dl.exe` and `libcrypto-3.dll`,
+  exhausted its 4-second retry budget (`/R:2 /W:1`), and gave up —
+  leaving the user on the old version with no error surfaced in the
+  GUI. The batch now polls `tasklist` for the parent PID (passed in
+  from the spawning process) and waits up to 120 seconds for it to
+  exit, with robocopy's per-file retry bumped to `/R:30` as a second
+  line of defence against handle-cleanup races.
+
 ## 1.10.1 — 2026-04-17
 
 ### Fix

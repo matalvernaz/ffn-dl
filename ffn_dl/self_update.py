@@ -168,6 +168,7 @@ def _write_updater_batch(
     exe_path: Path,
     new_dir: Path,
     install_dir: Path,
+    parent_pid: int,
 ) -> None:
     """Write the .bat helper that runs after we exit and swaps files.
 
@@ -175,31 +176,42 @@ def _write_updater_batch(
     better than ``copy`` / ``xcopy``. The /XD flag excludes user data
     dirs so an update preserves the user's settings, chapter cache,
     and any installed neural backends.
+
+    Waiting for the lock to release is the subtle part. A running PE
+    on Windows can still be *renamed* (directory-entry ops don't touch
+    the mapped image section), so the previous rename-probe exited the
+    wait loop immediately while the exe was still locked, and robocopy
+    then failed with ERROR 32 on ffn-dl.exe / _internal DLLs. We now
+    poll ``tasklist`` for the parent PID instead — the image-section
+    lock is dropped in the same kernel path that tears the process
+    record down, so "PID gone" is a sound proxy for "files writable."
     """
     xd = " ".join(f'"{install_dir / d}"' for d in _USER_DATA_DIRS)
     # settings.ini lives at the top level — robocopy's /XF excludes files by name.
     xf = " ".join(f'"{f}"' for f in _USER_DATA_FILES)
-    # Wait loop: try to rename the exe to a scratch name to prove it's no
-    # longer locked. If the rename works we rename it back and proceed.
     script = f"""@echo off
 setlocal
 set "EXE={exe_path}"
 set "INSTALL={install_dir}"
 set "NEW={new_dir}"
-rem Wait up to 30 seconds for ffn-dl.exe to release its lock.
+set "PID={parent_pid}"
+rem Wait up to 120 seconds for the parent ffn-dl.exe process to exit.
+rem A running PE can still be renamed, so probe the PID directly.
 set /a tries=0
 :waitloop
 set /a tries+=1
-if %tries% GTR 30 goto :giveup
-ren "%EXE%" "ffn-dl.exe.locktest" >nul 2>&1
-if errorlevel 1 (
+if %tries% GTR 120 goto :giveup
+tasklist /FI "PID eq %PID%" /NH 2>nul | find "%PID%" >nul
+if not errorlevel 1 (
     timeout /t 1 /nobreak >nul
     goto :waitloop
 )
-ren "%INSTALL%\\ffn-dl.exe.locktest" "ffn-dl.exe" >nul 2>&1
+rem Give the kernel a moment to tear down the image section after
+rem the process record is gone; robocopy's own retries cover the rest.
+timeout /t 1 /nobreak >nul
 
 rem Copy new files over the install, preserving user data.
-robocopy "%NEW%" "%INSTALL%" /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP /XD {xd} /XF {xf} >nul
+robocopy "%NEW%" "%INSTALL%" /E /IS /IT /R:30 /W:1 /NFL /NDL /NJH /NJS /NP /XD {xd} /XF {xf} >nul
 rem robocopy exit codes 0-7 are success; 8+ are failures.
 if errorlevel 8 goto :giveup
 
@@ -269,7 +281,9 @@ def download_and_replace(update_info, progress_cb=None) -> Path:
             src.rmdir()
 
         script_path = workdir / "apply-update.bat"
-        _write_updater_batch(script_path, current_exe, new_dir, install_dir)
+        _write_updater_batch(
+            script_path, current_exe, new_dir, install_dir, os.getpid()
+        )
 
         # Launch the updater detached so it survives our exit.
         creationflags = 0x8 | 0x200  # DETACHED + CREATE_NEW_PROCESS_GROUP
