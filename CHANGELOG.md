@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.13.0 — 2026-04-18
+
+### Change
+
+- **GUI uses a menu bar instead of tabs.** The main window is now just
+  the Download surface (URL, format, save-to folder, audio options,
+  status log). Each site's search lives in its own non-modal window,
+  summoned from the **Search** menu or via Ctrl+1 (FFN), Ctrl+2 (AO3),
+  Ctrl+3 (Royal Road), Ctrl+4 (Literotica), Ctrl+5 (Wattpad). Keep
+  several search windows open at once — arrow through results in one
+  while a download runs from another.
+- **New menus:** File (Exit), Search (per-site), View (Log Level
+  submenu, Save log to file toggle, Open log folder), Help
+  (Check for Updates..., About ffn-dl). The log-level dropdown,
+  save-to-file checkbox, and open-log-folder button moved out of the
+  status row into the View menu.
+- **Help → Check for Updates...** lets you trigger the update check
+  on demand; unlike the silent launch check, it tells you when
+  there's nothing new.
+
 ## 1.12.12 — 2026-04-18
 
 ### Fix

@@ -204,7 +204,8 @@ class MainFrame(wx.Frame):
         self._watching = False
         self._watch_seen = set()
         self._last_clip = ""
-        self._tabs = {}  # site_key → {query_ctrl, results_ctrl, summary_ctrl, search_dl_btn, search_btn, filter_ctrls, text_ctrls, checkbox_ctrls, search_fn, results}
+        # site_key → open SearchFrame (lazy-created on first menu invocation)
+        self._search_frames = {}
         self._log_queue = deque()
         self._log_lock = threading.Lock()
         self._build_ui()
@@ -215,21 +216,12 @@ class MainFrame(wx.Frame):
 
     def _build_ui(self):
         root = wx.Panel(self)
+        self._root_panel = root
         root_sizer = wx.BoxSizer(wx.VERTICAL)
         pad = 6
 
-        # ── Notebook with tabs ───────────────────────────────
-        self.notebook = wx.Notebook(root)
-        self.notebook.SetName("Mode tabs")
-
-        self._build_download_tab(self.notebook)
-        self._build_search_tab(self.notebook, "ffn", _ffn_search_spec())
-        self._build_search_tab(self.notebook, "ao3", _ao3_search_spec())
-        self._build_search_tab(self.notebook, "royalroad", _royalroad_search_spec())
-        self._build_search_tab(self.notebook, "literotica", _literotica_search_spec())
-        self._build_search_tab(self.notebook, "wattpad", _wattpad_search_spec())
-
-        root_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, pad)
+        # ── Download controls (top of frame) ─────────────────
+        self._build_download_controls(root, root_sizer, pad)
 
         # ── Shared options (format / filename / output folder) ─
         opts = wx.BoxSizer(wx.HORIZONTAL)
@@ -353,41 +345,17 @@ class MainFrame(wx.Frame):
         root_sizer.Add(out_sizer, 0, wx.EXPAND | wx.ALL, pad)
 
         # ── Status log ───────────────────────────────────────
-        log_header = wx.BoxSizer(wx.HORIZONTAL)
-        log_header.Add(
+        # Log level, "Save log to file", and "Open log folder" live in
+        # the View menu instead of cluttering the status row.
+        # Backing state is held on these attributes so _apply_logging_config
+        # can stay source-of-truth regardless of where the user toggled.
+        self._log_level_idx = _LOG_LEVELS.index("INFO")
+        self._log_to_file_enabled = False
+
+        root_sizer.Add(
             wx.StaticText(root, label="S&tatus:"),
-            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16,
+            0, wx.LEFT | wx.TOP | wx.RIGHT, pad,
         )
-        log_header.Add(
-            wx.StaticText(root, label="Log level:"),
-            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
-        )
-        self.log_level_ctrl = wx.Choice(root, choices=_LOG_LEVELS)
-        self.log_level_ctrl.SetSelection(_LOG_LEVELS.index("INFO"))
-        self.log_level_ctrl.SetName("Log level")
-        self.log_level_ctrl.SetToolTip(
-            "Controls how chatty the status pane and log file are. "
-            "DEBUG surfaces per-chapter and per-request detail; INFO is "
-            "the default; WARNING and ERROR hide routine progress."
-        )
-        self.log_level_ctrl.Bind(wx.EVT_CHOICE, self._on_log_level_change)
-        log_header.Add(self.log_level_ctrl, 0, wx.RIGHT, 16)
-
-        self.log_to_file_ctrl = wx.CheckBox(root, label="Save log to file")
-        self.log_to_file_ctrl.SetName("Save log to file")
-        self.log_to_file_ctrl.SetToolTip(
-            "Mirror the status pane to ffn-dl.log in your logs folder "
-            "(rotates at 1 MB, keeps the last 3). Useful for bug reports."
-        )
-        self.log_to_file_ctrl.Bind(wx.EVT_CHECKBOX, self._on_log_to_file_toggle)
-        log_header.Add(self.log_to_file_ctrl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
-
-        self.log_open_btn = wx.Button(root, label="Open log folder")
-        self.log_open_btn.SetName("Open log folder")
-        self.log_open_btn.Bind(wx.EVT_BUTTON, self._on_open_log_folder)
-        log_header.Add(self.log_open_btn, 0)
-
-        root_sizer.Add(log_header, 0, wx.EXPAND | wx.LEFT | wx.TOP | wx.RIGHT, pad)
 
         self.log_ctrl = wx.TextCtrl(
             root,
@@ -417,16 +385,19 @@ class MainFrame(wx.Frame):
         ])
         self.SetAcceleratorTable(accel)
 
+        # Menu bar — search sites, log controls, help. Must be built
+        # after the log handlers exist (the View menu toggles them).
+        self._build_menu_bar()
+
         # Timer for clipboard polling (2 second interval)
         self._clip_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._on_clip_timer, self._clip_timer)
 
-    def _build_download_tab(self, notebook):
-        panel = wx.Panel(notebook)
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        pad = 6
-
-        sizer.Add(wx.StaticText(panel, label="Story &URL or ID:"), 0, wx.LEFT | wx.TOP, pad)
+    def _build_download_controls(self, panel, sizer, pad):
+        sizer.Add(
+            wx.StaticText(panel, label="Story &URL or ID:"),
+            0, wx.LEFT | wx.TOP, pad,
+        )
         self.url_ctrl = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
         self.url_ctrl.SetName("Story URL or ID")
         self.url_ctrl.Bind(wx.EVT_TEXT_ENTER, self._on_download)
@@ -454,162 +425,6 @@ class MainFrame(wx.Frame):
         btn_sizer.Add(self.voices_btn, 0)
 
         sizer.Add(btn_sizer, 0, wx.ALL, pad)
-        sizer.AddStretchSpacer(1)
-
-        panel.SetSizer(sizer)
-        notebook.AddPage(panel, "Download")
-
-    def _build_search_tab(self, notebook, site_key, spec):
-        panel = wx.Panel(notebook)
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        pad = 6
-        state = {
-            "search_fn": spec["search_fn"],
-            "filter_ctrls": {},
-            "text_ctrls": {},
-            "checkbox_ctrls": {},
-            "results": [],
-            "site_key": site_key,
-            "next_page": 1,
-            "last_query": None,
-            "last_filters": {},
-        }
-
-        # Query row
-        q_row = wx.BoxSizer(wx.HORIZONTAL)
-        q_row.Add(wx.StaticText(panel, label="&Query:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        state["query_ctrl"] = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
-        state["query_ctrl"].SetName(f"{spec['label']} query")
-        state["query_ctrl"].Bind(
-            wx.EVT_TEXT_ENTER, lambda evt, k=site_key: self._on_search(k)
-        )
-        q_row.Add(state["query_ctrl"], 1, wx.RIGHT, 4)
-
-        state["search_btn"] = wx.Button(panel, label="S&earch")
-        state["search_btn"].Bind(
-            wx.EVT_BUTTON, lambda evt, k=site_key: self._on_search(k)
-        )
-        q_row.Add(state["search_btn"], 0)
-        sizer.Add(q_row, 0, wx.EXPAND | wx.ALL, pad)
-
-        # Choice filters (combo boxes)
-        if spec.get("filters"):
-            fgrid = wx.FlexGridSizer(rows=0, cols=8, hgap=4, vgap=4)
-            for label, key, choices in spec["filters"]:
-                fgrid.Add(
-                    wx.StaticText(panel, label=label),
-                    0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
-                )
-                ctrl = wx.Choice(panel, choices=choices)
-                ctrl.SetSelection(0)
-                ctrl.SetName(label.replace("&", "").rstrip(":"))
-                fgrid.Add(ctrl, 0, wx.RIGHT, 12)
-                state["filter_ctrls"][key] = ctrl
-            sizer.Add(fgrid, 0, wx.EXPAND | wx.ALL, pad)
-
-        # Free-text filters
-        if spec.get("text_filters"):
-            tgrid = wx.FlexGridSizer(rows=0, cols=4, hgap=4, vgap=4)
-            for label, key in spec["text_filters"]:
-                tgrid.Add(
-                    wx.StaticText(panel, label=label),
-                    0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
-                )
-                ctrl = wx.TextCtrl(panel, size=(140, -1))
-                ctrl.SetName(label.replace("&", "").rstrip(":"))
-                tgrid.Add(ctrl, 0, wx.RIGHT, 12)
-                state["text_ctrls"][key] = ctrl
-            sizer.Add(tgrid, 0, wx.EXPAND | wx.ALL, pad)
-
-        # Multi-pickers (checkable list dialogs for tags/genres/warnings)
-        # — each entry contributes a read-only TextCtrl showing the
-        # current picks plus a "Pick..." button that opens MultiPickerDialog.
-        # The TextCtrl is registered in `text_ctrls` so existing collect
-        # / snapshot / restore logic handles persistence unchanged.
-        if spec.get("multi_pickers"):
-            for mp_label, mp_key, mp_title, mp_options in spec["multi_pickers"]:
-                row = wx.BoxSizer(wx.HORIZONTAL)
-                row.Add(
-                    wx.StaticText(panel, label=mp_label),
-                    0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
-                )
-                ctrl = wx.TextCtrl(panel, size=(320, -1))
-                ctrl.SetName(mp_label.replace("&", "").rstrip(":"))
-                row.Add(ctrl, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-                btn = wx.Button(panel, label="Pic&k...")
-                btn.Bind(
-                    wx.EVT_BUTTON,
-                    lambda evt, c=ctrl, t=mp_title, o=mp_options:
-                        self._open_multi_picker(c, t, o),
-                )
-                row.Add(btn, 0)
-                sizer.Add(row, 0, wx.EXPAND | wx.ALL, pad)
-                state["text_ctrls"][mp_key] = ctrl
-
-        # Checkboxes
-        if spec.get("checkboxes"):
-            cb_row = wx.BoxSizer(wx.HORIZONTAL)
-            for label, key in spec["checkboxes"]:
-                ctrl = wx.CheckBox(panel, label=label)
-                cb_row.Add(ctrl, 0, wx.RIGHT, 16)
-                state["checkbox_ctrls"][key] = ctrl
-            sizer.Add(cb_row, 0, wx.EXPAND | wx.ALL, pad)
-
-        # Results list
-        sizer.Add(wx.StaticText(panel, label="&Results:"), 0, wx.LEFT | wx.TOP, pad)
-        state["results_ctrl"] = wx.ListCtrl(
-            panel,
-            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SUNKEN,
-        )
-        state["results_ctrl"].SetName(f"{spec['label']} results")
-        for i, (col_label, width) in enumerate(_SEARCH_COLUMNS):
-            state["results_ctrl"].InsertColumn(i, col_label, width=width)
-        state["results_ctrl"].Bind(
-            wx.EVT_LIST_ITEM_SELECTED,
-            lambda evt, k=site_key: self._on_result_select(evt, k),
-        )
-        state["results_ctrl"].Bind(
-            wx.EVT_LIST_ITEM_ACTIVATED,
-            lambda evt, k=site_key: self._on_result_activated(k),
-        )
-        sizer.Add(state["results_ctrl"], 1, wx.EXPAND | wx.ALL, pad)
-
-        # Summary
-        sizer.Add(wx.StaticText(panel, label="S&ummary:"), 0, wx.LEFT | wx.TOP, pad)
-        state["summary_ctrl"] = wx.TextCtrl(
-            panel,
-            style=wx.TE_MULTILINE | wx.TE_READONLY,
-            size=(-1, 70),
-        )
-        state["summary_ctrl"].SetName(f"{spec['label']} summary")
-        sizer.Add(state["summary_ctrl"], 0, wx.EXPAND | wx.ALL, pad)
-
-        dl_row = wx.BoxSizer(wx.HORIZONTAL)
-        state["search_dl_btn"] = wx.Button(panel, label="Do&wnload Selected")
-        state["search_dl_btn"].Bind(
-            wx.EVT_BUTTON, lambda evt, k=site_key: self._on_search_download(k)
-        )
-        state["search_dl_btn"].Disable()
-        dl_row.Add(state["search_dl_btn"], 0, wx.RIGHT, 8)
-
-        state["show_parts_btn"] = wx.Button(panel, label="Show &Parts...")
-        state["show_parts_btn"].Bind(
-            wx.EVT_BUTTON, lambda evt, k=site_key: self._on_show_parts(k)
-        )
-        state["show_parts_btn"].Disable()
-        dl_row.Add(state["show_parts_btn"], 0, wx.RIGHT, 8)
-
-        state["load_more_btn"] = wx.Button(panel, label="Load &More")
-        state["load_more_btn"].Bind(
-            wx.EVT_BUTTON, lambda evt, k=site_key: self._on_load_more(k)
-        )
-        state["load_more_btn"].Disable()
-        dl_row.Add(state["load_more_btn"], 0)
-        sizer.Add(dl_row, 0, wx.ALL, pad)
-
-        panel.SetSizer(sizer)
-        notebook.AddPage(panel, spec["label"])
-        self._tabs[site_key] = state
 
     # ── Helpers ───────────────────────────────────────────────
 
@@ -632,14 +447,17 @@ class MainFrame(wx.Frame):
         return self._log_dir() / "ffn-dl.log"
 
     def _apply_logging_config(self):
-        """Reconfigure root-logger handlers from the current controls.
+        """Reconfigure root-logger handlers from the current state.
 
         Called after a level change, a file-toggle, and once at
         startup after prefs load. Idempotent: detaches any handlers
         it previously attached before re-attaching fresh ones.
+        Reads ``self._log_level_idx`` / ``self._log_to_file_enabled``
+        rather than wx controls so it works the same whether the user
+        toggled via the View menu or via loaded prefs.
         """
         root = logging.getLogger()
-        level_name = _LOG_LEVELS[self.log_level_ctrl.GetSelection()]
+        level_name = _LOG_LEVELS[self._log_level_idx]
         level = getattr(logging, level_name, logging.INFO)
         root.setLevel(level)
 
@@ -651,7 +469,7 @@ class MainFrame(wx.Frame):
             root.addHandler(self._wx_log_handler)
         self._wx_log_handler.setLevel(level)
 
-        want_file = self.log_to_file_ctrl.GetValue()
+        want_file = self._log_to_file_enabled
         have_file = self._file_log_handler is not None
         if want_file and not have_file:
             try:
@@ -668,7 +486,9 @@ class MainFrame(wx.Frame):
                 self._log(f"(Logging to {self._log_file()})")
             except OSError as exc:
                 self._log(f"(Could not open log file: {exc})")
-                self.log_to_file_ctrl.SetValue(False)
+                self._log_to_file_enabled = False
+                if getattr(self, "_log_to_file_item", None) is not None:
+                    self._log_to_file_item.Check(False)
         elif not want_file and have_file:
             root.removeHandler(self._file_log_handler)
             try:
@@ -693,20 +513,18 @@ class MainFrame(wx.Frame):
                 pass
             setattr(self, attr, None)
 
-    def _on_log_level_change(self, event):
+    def _set_log_level_idx(self, idx):
+        """Common path for View menu clicks and prefs-loaded startup."""
         from . import prefs as _p
+        self._log_level_idx = idx
         self._apply_logging_config()
-        self.prefs.set(
-            _p.KEY_LOG_LEVEL,
-            _LOG_LEVELS[self.log_level_ctrl.GetSelection()],
-        )
+        self.prefs.set(_p.KEY_LOG_LEVEL, _LOG_LEVELS[idx])
 
-    def _on_log_to_file_toggle(self, event):
+    def _set_log_to_file(self, enabled):
         from . import prefs as _p
+        self._log_to_file_enabled = bool(enabled)
         self._apply_logging_config()
-        self.prefs.set_bool(
-            _p.KEY_LOG_TO_FILE, self.log_to_file_ctrl.GetValue(),
-        )
+        self.prefs.set_bool(_p.KEY_LOG_TO_FILE, self._log_to_file_enabled)
 
     def _on_open_log_folder(self, event):
         folder = self._log_dir()
@@ -747,23 +565,13 @@ class MainFrame(wx.Frame):
             self.dl_btn.Enable(not busy)
             self.update_btn.Enable(not busy)
             self.voices_btn.Enable(not busy)
-            for tab in self._tabs.values():
-                tab["search_btn"].Enable(not busy)
-                has_selection = tab["results_ctrl"].GetFirstSelected() != -1
-                selected_is_series = False
-                if has_selection:
-                    idx = tab["results_ctrl"].GetFirstSelected()
-                    if 0 <= idx < len(tab["results"]):
-                        selected_is_series = bool(
-                            tab["results"][idx].get("is_series")
-                        )
-                tab["search_dl_btn"].Enable(not busy and has_selection)
-                tab["show_parts_btn"].Enable(
-                    not busy and has_selection and selected_is_series
-                )
-                tab["load_more_btn"].Enable(
-                    not busy and tab.get("last_query") is not None
-                )
+            # Broadcast to every open search window so their buttons
+            # reflect the main frame's download state.
+            for frame in list(self._search_frames.values()):
+                try:
+                    frame.apply_busy(busy)
+                except Exception:
+                    pass
         wx.CallAfter(_update)
 
     def _on_browse(self, event):
@@ -980,27 +788,17 @@ class MainFrame(wx.Frame):
 
         level = (self.prefs.get(_p.KEY_LOG_LEVEL) or "INFO").upper()
         if level in _LOG_LEVELS:
-            self.log_level_ctrl.SetSelection(_LOG_LEVELS.index(level))
-        self.log_to_file_ctrl.SetValue(self.prefs.get_bool(_p.KEY_LOG_TO_FILE))
+            self._log_level_idx = _LOG_LEVELS.index(level)
+        self._log_to_file_enabled = self.prefs.get_bool(_p.KEY_LOG_TO_FILE)
         self._apply_logging_config()
+        # Sync the View-menu radio/check items to match the restored state.
+        for lvl_name, item in getattr(self, "_log_level_items", {}).items():
+            item.Check(lvl_name == _LOG_LEVELS[self._log_level_idx])
+        if getattr(self, "_log_to_file_item", None) is not None:
+            self._log_to_file_item.Check(self._log_to_file_enabled)
 
-        for site_key, pref_key in (
-            ("ffn", _p.KEY_SEARCH_STATE_FFN),
-            ("ao3", _p.KEY_SEARCH_STATE_AO3),
-            ("royalroad", _p.KEY_SEARCH_STATE_ROYALROAD),
-            ("literotica", _p.KEY_SEARCH_STATE_LITEROTICA),
-            ("wattpad", _p.KEY_SEARCH_STATE_WATTPAD),
-        ):
-            if site_key not in self._tabs:
-                continue
-            raw = self.prefs.get(pref_key)
-            if not raw:
-                continue
-            try:
-                state = json.loads(raw)
-            except (TypeError, ValueError):
-                continue
-            self._apply_search_state(self._tabs[site_key], state)
+        # Search-state prefs are loaded lazily by each SearchFrame on
+        # the first Ctrl+N / menu open — not here.
 
     def _save_prefs(self):
         from . import prefs as _p
@@ -1016,66 +814,30 @@ class MainFrame(wx.Frame):
         self.prefs.set(_p.KEY_SPEECH_RATE, self.speech_rate_ctrl.GetValue())
         self.prefs.set(_p.KEY_ATTRIBUTION_BACKEND, self._selected_attribution_backend())
         self.prefs.set(_p.KEY_ATTRIBUTION_MODEL_SIZE, self._selected_size() or "")
-        self.prefs.set(
-            _p.KEY_LOG_LEVEL,
-            _LOG_LEVELS[self.log_level_ctrl.GetSelection()],
-        )
-        self.prefs.set_bool(_p.KEY_LOG_TO_FILE, self.log_to_file_ctrl.GetValue())
+        self.prefs.set(_p.KEY_LOG_LEVEL, _LOG_LEVELS[self._log_level_idx])
+        self.prefs.set_bool(_p.KEY_LOG_TO_FILE, self._log_to_file_enabled)
 
-        for site_key, pref_key in (
-            ("ffn", _p.KEY_SEARCH_STATE_FFN),
-            ("ao3", _p.KEY_SEARCH_STATE_AO3),
-            ("royalroad", _p.KEY_SEARCH_STATE_ROYALROAD),
-            ("literotica", _p.KEY_SEARCH_STATE_LITEROTICA),
-            ("wattpad", _p.KEY_SEARCH_STATE_WATTPAD),
-        ):
-            if site_key not in self._tabs:
-                continue
-            state = self._snapshot_search_state(self._tabs[site_key])
-            self.prefs.set(pref_key, json.dumps(state))
-
-    @staticmethod
-    def _snapshot_search_state(tab):
-        # `query` is intentionally NOT persisted — a stored search
-        # string reappearing across sessions is more annoying than
-        # useful. Filters, text filters, and checkboxes DO persist
-        # because re-setting language / sort / genre / tag picks on
-        # every launch is painful.
-        return {
-            "filters": {
-                key: ctrl.GetStringSelection()
-                for key, ctrl in tab["filter_ctrls"].items()
-            },
-            "text": {
-                key: ctrl.GetValue()
-                for key, ctrl in tab["text_ctrls"].items()
-            },
-            "checks": {
-                key: bool(ctrl.GetValue())
-                for key, ctrl in tab["checkbox_ctrls"].items()
-            },
-        }
-
-    @staticmethod
-    def _apply_search_state(tab, state):
-        if not isinstance(state, dict):
-            return
-        # Ignore any legacy "query" that older versions wrote — the
-        # field is no longer part of the persisted schema.
-        for key, value in (state.get("filters") or {}).items():
-            ctrl = tab["filter_ctrls"].get(key)
-            if ctrl and isinstance(value, str) and value:
-                ctrl.SetStringSelection(value)
-        for key, value in (state.get("text") or {}).items():
-            ctrl = tab["text_ctrls"].get(key)
-            if ctrl and isinstance(value, str):
-                ctrl.SetValue(value)
-        for key, value in (state.get("checks") or {}).items():
-            ctrl = tab["checkbox_ctrls"].get(key)
-            if ctrl is not None:
-                ctrl.SetValue(bool(value))
+        # Let any open search frames snapshot their own state to prefs.
+        for frame in list(self._search_frames.values()):
+            try:
+                frame.save_state()
+            except Exception:
+                pass
 
     def _on_close(self, event):
+        # Snapshot each open search frame's state to prefs, then destroy
+        # the frames. Destroy() doesn't fire EVT_CLOSE, so the explicit
+        # save_state call is the only thing persisting their filters.
+        for frame in list(self._search_frames.values()):
+            try:
+                frame.save_state()
+            except Exception:
+                pass
+            try:
+                frame.Destroy()
+            except Exception:
+                pass
+        self._search_frames.clear()
         try:
             self._save_prefs()
         except Exception:
@@ -1401,322 +1163,29 @@ class MainFrame(wx.Frame):
             daemon=True,
         ).start()
 
-    # ── Search ───────────────────────────────────────────────
+    # ── Search frames (opened via Search menu or Ctrl+1..5) ──
 
-    def _open_multi_picker(self, ctrl, title, options):
-        """Open the multi-pick dialog, seed it with the comma-separated
-        labels already in `ctrl`, and write the picked labels back on OK.
-        `options` is the ordered label list to show.
+    def _open_search_frame(self, site_key, spec):
+        """Pop up a non-modal search window for one site. Reuses the
+        existing frame if already open so Ctrl+N doesn't spawn duplicates.
         """
-        current = [
-            s.strip() for s in ctrl.GetValue().split(",") if s.strip()
-        ]
-        dlg = MultiPickerDialog(self, title, list(options), initial=current)
-        try:
-            if dlg.ShowModal() == wx.ID_OK:
-                ctrl.SetValue(", ".join(dlg.picked_labels()))
-        finally:
-            dlg.Destroy()
-
-    def _collect_filters(self, tab):
-        filters = {}
-        for key, ctrl in tab["filter_ctrls"].items():
-            idx = ctrl.GetSelection()
-            if idx <= 0:
-                # First entry is always "any"/"all"/"best match" — no filter
-                continue
-            filters[key] = ctrl.GetString(idx)
-        for key, ctrl in tab["text_ctrls"].items():
-            value = ctrl.GetValue().strip()
-            if value:
-                filters[key] = value
-        for key, ctrl in tab["checkbox_ctrls"].items():
-            if ctrl.GetValue():
-                filters[key] = True
-        return filters
-
-    def _on_search(self, site_key):
-        tab = self._tabs[site_key]
-        query = tab["query_ctrl"].GetValue().strip()
-        if self._downloading:
-            return
-        filters = self._collect_filters(tab)
-        # Most searches need a free-text query, but several site/filter
-        # combinations are valid *without* one:
-        #   • RR list browse (Rising Stars, Best Rated, …)
-        #   • RR filter-only browse (tags, genres, warnings, or numeric
-        #     bounds with no title) — RR's /fictions/search accepts
-        #     tagsAdd-only, and that's the whole point of the Pick
-        #     Genres / Pick Tags dialogs.
-        #   • Literotica category browse — the category slug IS the
-        #     browse target.
-        list_browse = (
-            site_key == "royalroad"
-            and filters.get("list")
-            and filters["list"].strip().lower() != "search"
-        )
-        rr_filter_only = (
-            site_key == "royalroad"
-            and any(
-                filters.get(k)
-                for k in (
-                    "tags", "tags_picked", "genres", "warnings",
-                    "status", "type", "order_by",
-                    "min_words", "max_words", "min_pages", "max_pages",
-                    "min_rating",
-                )
-            )
-        )
-        lit_cat_browse = (
-            site_key == "literotica" and filters.get("category")
-        )
-        if not query and not (list_browse or rr_filter_only or lit_cat_browse):
-            self._log("Error: Please enter a search query.")
-            return
-        self._set_busy(True)
-        tab["results_ctrl"].DeleteAllItems()
-        tab["summary_ctrl"].SetValue("")
-        tab["results"] = []
-        tab["_raw_results"] = []
-        tab["next_page"] = 1
-        tab["last_query"] = query
-        tab["last_filters"] = filters
-        filter_str = (
-            " [" + ", ".join(f"{k}={v}" for k, v in filters.items()) + "]"
-            if filters else ""
-        )
-        site_label = {
-            "ao3": "AO3", "ffn": "FFN",
-            "royalroad": "Royal Road", "literotica": "Literotica",
-            "wattpad": "Wattpad",
-        }.get(site_key, site_key)
-        self._log(f"Searching {site_label} for: {query}{filter_str}")
-        threading.Thread(
-            target=self._run_search,
-            args=(site_key, query, filters, 1, False),
-            daemon=True,
-        ).start()
-
-    def _on_load_more(self, site_key):
-        tab = self._tabs[site_key]
-        # last_query may be empty when the user is browsing an RR list
-        # (no free-text query); gate on whether a search has actually
-        # been run, via the presence of last_filters.
-        if self._downloading or tab.get("last_query") is None:
-            return
-        self._set_busy(True)
-        next_page = tab.get("next_page", 2)
-        self._log(f"Loading page {next_page}...")
-        threading.Thread(
-            target=self._run_search,
-            args=(site_key, tab["last_query"], tab["last_filters"], next_page, True),
-            daemon=True,
-        ).start()
-
-    def _run_search(self, site_key, query, filters, page, append):
-        from .search import fetch_until_limit
-        tab = self._tabs[site_key]
-        try:
-            page_results, next_page = fetch_until_limit(
-                tab["search_fn"], query,
-                limit=25, start_page=page, **filters,
-            )
-        except Exception as e:
-            # Surface the error both in the log AND as a message box so
-            # the user doesn't miss it — the status log scrolls and is
-            # easy to overlook when the expected outcome is "results
-            # appear in the list".
-            import traceback
-            tb = traceback.format_exc()
-            self._log(f"Search error: {e}")
-            self._log(tb.rstrip())
-            wx.CallAfter(
-                wx.MessageBox,
-                f"Search failed:\n\n{e}",
-                "Search Error",
-                wx.OK | wx.ICON_ERROR,
-                self,
-            )
-            self._set_busy(False)
-            return
-        wx.CallAfter(
-            self._populate_results, site_key, page_results, next_page, append,
-        )
-        self._set_busy(False)
-
-    def _populate_results(self, site_key, new_results, next_page, append):
-        from .search import collapse_ao3_series, collapse_literotica_series
-        tab = self._tabs[site_key]
-
-        # Keep the raw (uncollapsed) results across load-more so we can
-        # re-run collapse on the full set — otherwise parts of the same
-        # series that span page boundaries (e.g. `Miss Abby` on page 1,
-        # `Miss Abby Pt. 02` on page 2) never find each other.
-        if append:
-            raw = list(tab.get("_raw_results") or []) + list(new_results)
-        else:
-            raw = list(new_results)
-        tab["_raw_results"] = raw
-
-        if site_key == "ao3":
-            processed = collapse_ao3_series(raw)
-        elif site_key == "literotica":
-            processed = collapse_literotica_series(raw)
-        else:
-            processed = list(raw)
-
-        previous_count = len(tab["results"]) if append else 0
-        tab["results"] = processed
-        tab["next_page"] = next_page
-
-        ctrl = tab["results_ctrl"]
-        ctrl.Freeze()
-        try:
-            ctrl.DeleteAllItems()
-            for r in tab["results"]:
-                row = ctrl.InsertItem(ctrl.GetItemCount(), self._result_title(r))
-                ctrl.SetItem(row, 1, r.get("author", "") or "")
-                ctrl.SetItem(row, 2, r.get("fandom", "") or "")
-                ctrl.SetItem(row, 3, str(r.get("words", "")))
-                ctrl.SetItem(row, 4, str(r.get("chapters", "")))
-                ctrl.SetItem(row, 5, r.get("rating", "") or "")
-                ctrl.SetItem(row, 6, r.get("status", "") or "")
-        finally:
-            ctrl.Thaw()
-
-        tab["load_more_btn"].Enable(bool(new_results) and not self._downloading)
-        if not tab["results"]:
-            self._log("No results found." if not append else "No more results.")
-            return
-
-        if append:
-            added = len(tab["results"]) - previous_count
-            focus_row = previous_count if added > 0 else 0
-            self._log(
-                f"Loaded more. Total {len(tab['results'])} rows "
-                f"(+{max(added, 0)})."
-                if added > 0 else "No more results."
-            )
-        else:
-            focus_row = 0
-            self._log(f"Found {len(tab['results'])} results.")
-
-        ctrl.SetFocus()
-        ctrl.Focus(focus_row)
-        ctrl.Select(focus_row)
-
-    @staticmethod
-    def _result_title(r):
-        if r.get("is_series"):
-            parts = len(r.get("series_parts") or [])
-            return f"[Series · {parts} part(s)] {r['title']}"
-        return r.get("title", "")
-
-    def _on_result_select(self, event, site_key):
-        tab = self._tabs[site_key]
-        idx = event.GetIndex()
-        if 0 <= idx < len(tab["results"]):
-            r = tab["results"][idx]
-            summary = r.get("summary", "") or ""
-            if r.get("is_series"):
-                parts = r.get("series_parts") or []
-                part_lines = "\n".join(
-                    f"  - {p.get('title', '(untitled)')}" for p in parts
-                )
-                preview = (
-                    f"[Series of {len(parts)} part(s) from search results]\n"
-                    f"{summary}\n\n{part_lines}"
-                    if part_lines else f"[Series]\n{summary}"
-                )
-                tab["summary_ctrl"].SetValue(preview.strip())
-                tab["show_parts_btn"].Enable(bool(parts))
-            else:
-                tab["summary_ctrl"].SetValue(summary or "(no summary)")
-                tab["show_parts_btn"].Disable()
-            tab["search_dl_btn"].Enable(not self._downloading)
-        event.Skip()
-
-    def _on_search_download(self, site_key):
-        tab = self._tabs[site_key]
-        idx = tab["results_ctrl"].GetFirstSelected()
-        if idx < 0 or idx >= len(tab["results"]):
-            return
-        picked = tab["results"][idx]
-        url = picked.get("url")
-        if not url:
-            self._log("Error: selected result has no URL.")
-            return
-        if self._downloading:
-            return
-        self._set_busy(True)
-        if picked.get("is_series"):
-            self._log(f"Starting series download: {url}")
-            if picked.get("parts_only"):
-                part_urls = [
-                    p.get("url")
-                    for p in (picked.get("series_parts") or [])
-                    if p.get("url")
-                ]
-                series_name = picked.get("title") or "Series"
-                threading.Thread(
-                    target=self._run_series_merge_download,
-                    args=(url,),
-                    kwargs={
-                        "series_name": series_name,
-                        "part_urls": part_urls,
-                    },
-                    daemon=True,
-                ).start()
-            else:
-                threading.Thread(
-                    target=self._run_series_merge_download,
-                    args=(url,), daemon=True,
-                ).start()
-        else:
-            self._log(f"Starting download: {url}")
-            threading.Thread(
-                target=self._run_download, args=(url,), daemon=True
-            ).start()
-
-    def _on_result_activated(self, site_key):
-        # Enter/double-click: for a regular work row, start the download;
-        # for a series row, open the parts dialog so keyboard-only users
-        # can actually see what's inside the series instead of blindly
-        # kicking off a multi-part merge download.
-        tab = self._tabs[site_key]
-        idx = tab["results_ctrl"].GetFirstSelected()
-        if 0 <= idx < len(tab["results"]):
-            if tab["results"][idx].get("is_series"):
-                self._on_show_parts(site_key)
+        frame = self._search_frames.get(site_key)
+        if frame is not None:
+            try:
+                frame.Raise()
+                frame.SetFocus()
                 return
-        self._on_search_download(site_key)
+            except RuntimeError:
+                # Frame was destroyed without unregistering (shouldn't
+                # happen, but don't crash if it did).
+                self._search_frames.pop(site_key, None)
+        frame = SearchFrame(self, site_key, spec)
+        self._search_frames[site_key] = frame
+        frame.Show()
+        frame.Raise()
 
-    def _on_show_parts(self, site_key):
-        tab = self._tabs[site_key]
-        idx = tab["results_ctrl"].GetFirstSelected()
-        if idx < 0 or idx >= len(tab["results"]):
-            return
-        row = tab["results"][idx]
-        if not row.get("is_series"):
-            return
-        parts = row.get("series_parts") or []
-        if not parts:
-            wx.MessageBox(
-                "No parts have been loaded for this series yet.",
-                "Series parts",
-                wx.OK | wx.ICON_INFORMATION, self,
-            )
-            return
-        dlg = SeriesPartsDialog(self, row["title"], parts)
-        if dlg.ShowModal() == wx.ID_OK:
-            picked = dlg.picked_url()
-            if picked and not self._downloading:
-                self._set_busy(True)
-                self._log(f"Starting part download: {picked}")
-                threading.Thread(
-                    target=self._run_download, args=(picked,), daemon=True
-                ).start()
-        dlg.Destroy()
+    def _notify_search_frame_closed(self, site_key):
+        self._search_frames.pop(site_key, None)
 
     def _run_series_merge_download(self, series_url, *, series_name=None, part_urls=None):
         try:
@@ -2112,6 +1581,702 @@ class MainFrame(wx.Frame):
         )
         for u in failed:
             self._log(f"  Failed: {u}")
+
+    # ── Menu bar ──────────────────────────────────────────────
+
+    _SEARCH_MENU_ITEMS = (
+        # (accel, site_key, spec_fn, menu_label)
+        ("Ctrl+1", "ffn", _ffn_search_spec, "Search &FFN..."),
+        ("Ctrl+2", "ao3", _ao3_search_spec, "Search &AO3..."),
+        ("Ctrl+3", "royalroad", _royalroad_search_spec, "Search &Royal Road..."),
+        ("Ctrl+4", "literotica", _literotica_search_spec, "Search &Literotica..."),
+        ("Ctrl+5", "wattpad", _wattpad_search_spec, "Search &Wattpad..."),
+    )
+
+    def _build_menu_bar(self):
+        bar = wx.MenuBar()
+
+        file_menu = wx.Menu()
+        exit_item = file_menu.Append(wx.ID_EXIT, "E&xit")
+        self.Bind(wx.EVT_MENU, lambda e: self.Close(), exit_item)
+        bar.Append(file_menu, "&File")
+
+        search_menu = wx.Menu()
+        for accel, site_key, spec_fn, label in self._SEARCH_MENU_ITEMS:
+            item = search_menu.Append(wx.ID_ANY, f"{label}\t{accel}")
+            # Closure captures site_key / spec_fn, not the loop variables.
+            self.Bind(
+                wx.EVT_MENU,
+                lambda evt, k=site_key, s=spec_fn:
+                    self._open_search_frame(k, s()),
+                item,
+            )
+        bar.Append(search_menu, "&Search")
+
+        view_menu = wx.Menu()
+        log_submenu = wx.Menu()
+        self._log_level_items = {}
+        for lvl in _LOG_LEVELS:
+            item = log_submenu.AppendRadioItem(wx.ID_ANY, lvl)
+            self._log_level_items[lvl] = item
+            self.Bind(
+                wx.EVT_MENU,
+                lambda evt, name=lvl: self._on_log_level_menu(name),
+                item,
+            )
+        view_menu.AppendSubMenu(log_submenu, "Log &Level")
+        self._log_to_file_item = view_menu.AppendCheckItem(
+            wx.ID_ANY, "&Save log to file",
+        )
+        self.Bind(wx.EVT_MENU, self._on_log_to_file_menu, self._log_to_file_item)
+        view_menu.AppendSeparator()
+        open_log = view_menu.Append(wx.ID_ANY, "&Open log folder")
+        self.Bind(wx.EVT_MENU, self._on_open_log_folder, open_log)
+        bar.Append(view_menu, "&View")
+
+        help_menu = wx.Menu()
+        check_item = help_menu.Append(wx.ID_ANY, "&Check for Updates...")
+        self.Bind(wx.EVT_MENU, self._on_check_updates_menu, check_item)
+        help_menu.AppendSeparator()
+        about_item = help_menu.Append(wx.ID_ABOUT, "&About ffn-dl")
+        self.Bind(wx.EVT_MENU, self._on_about, about_item)
+        bar.Append(help_menu, "&Help")
+
+        self.SetMenuBar(bar)
+
+        # Reflect current log-level / log-to-file state. _load_prefs runs
+        # after _build_ui and will re-sync these once prefs are read.
+        current_level = _LOG_LEVELS[self._log_level_idx]
+        self._log_level_items[current_level].Check(True)
+        self._log_to_file_item.Check(self._log_to_file_enabled)
+
+    def _on_log_level_menu(self, level_name):
+        if level_name in _LOG_LEVELS:
+            self._set_log_level_idx(_LOG_LEVELS.index(level_name))
+
+    def _on_log_to_file_menu(self, event):
+        self._set_log_to_file(self._log_to_file_item.IsChecked())
+
+    def _on_check_updates_menu(self, event):
+        """Manual trigger: unlike the silent launch check, this surfaces
+        the 'no update available' case so the user sees their click did
+        something.
+        """
+        from . import self_update
+        self._log("Checking for updates...")
+
+        def worker():
+            try:
+                info = self_update.check_for_update()
+            except Exception as exc:
+                wx.CallAfter(self._log, f"Update check failed: {exc}")
+                wx.CallAfter(
+                    wx.MessageBox,
+                    f"Update check failed:\n\n{exc}",
+                    "Check for Updates",
+                    wx.OK | wx.ICON_WARNING, self,
+                )
+                return
+            if info is None:
+                wx.CallAfter(self._log, "You have the latest version.")
+                wx.CallAfter(
+                    wx.MessageBox,
+                    "You have the latest version of ffn-dl.",
+                    "Check for Updates",
+                    wx.OK | wx.ICON_INFORMATION, self,
+                )
+                return
+            # User asked explicitly — clear any previously-skipped version.
+            from . import prefs as _p
+            self.prefs.set(_p.KEY_SKIPPED_VERSION, "")
+            wx.CallAfter(self._prompt_update, info)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_about(self, event):
+        import wx.adv
+        from . import __version__
+        info = wx.adv.AboutDialogInfo()
+        info.SetName("ffn-dl")
+        info.SetVersion(__version__)
+        info.SetDescription(
+            "Cross-platform fanfiction downloader.\n\n"
+            "Supports FanFiction.Net, Archive of Our Own, FicWad, "
+            "Royal Road, MediaMiner, Literotica, and Wattpad. "
+            "Exports to EPUB, HTML, TXT, and character-voiced audiobooks."
+        )
+        info.SetWebSite("https://github.com/matalvernaz/ffn-dl")
+        info.SetCopyright("(c) Matthew Alvernaz")
+        wx.adv.AboutBox(info, self)
+
+
+class SearchFrame(wx.Frame):
+    """Non-modal per-site search window.
+
+    Opened via the Search menu (Ctrl+1..5). Stays open alongside the
+    main frame so the user can keep one window per site up at once and
+    leave filter state in place while downloads run in the background.
+
+    "Download Selected" / "Show Parts" push work back into the main
+    frame's download pipeline, which owns the format, output folder,
+    and audio settings.
+    """
+
+    _SITE_LABELS = {
+        "ffn": "FFN",
+        "ao3": "AO3",
+        "royalroad": "Royal Road",
+        "literotica": "Literotica",
+        "wattpad": "Wattpad",
+    }
+
+    _PREF_KEY_BY_SITE = {
+        "ffn": "search_state_ffn",
+        "ao3": "search_state_ao3",
+        "royalroad": "search_state_royalroad",
+        "literotica": "search_state_literotica",
+        "wattpad": "search_state_wattpad",
+    }
+
+    def __init__(self, main_frame, site_key, spec):
+        super().__init__(
+            main_frame,
+            title=spec["label"],
+            size=(820, 640),
+            style=wx.DEFAULT_FRAME_STYLE,
+        )
+        self.main_frame = main_frame
+        self.site_key = site_key
+        self.spec = spec
+        self.search_fn = spec["search_fn"]
+        self.filter_ctrls = {}
+        self.text_ctrls = {}
+        self.checkbox_ctrls = {}
+        self.results = []
+        self._raw_results = []
+        self.next_page = 1
+        self.last_query = None
+        self.last_filters = {}
+
+        self._build_ui()
+        self._load_state()
+        self.apply_busy(bool(self.main_frame._downloading))
+        self.Bind(wx.EVT_CLOSE, self._on_close)
+        self.Centre()
+
+    def _build_ui(self):
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        pad = 6
+
+        # Query row
+        q_row = wx.BoxSizer(wx.HORIZONTAL)
+        q_row.Add(
+            wx.StaticText(panel, label="&Query:"),
+            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+        )
+        self.query_ctrl = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
+        self.query_ctrl.SetName(f"{self.spec['label']} query")
+        self.query_ctrl.Bind(wx.EVT_TEXT_ENTER, lambda e: self._on_search())
+        q_row.Add(self.query_ctrl, 1, wx.RIGHT, 4)
+
+        self.search_btn = wx.Button(panel, label="S&earch")
+        self.search_btn.Bind(wx.EVT_BUTTON, lambda e: self._on_search())
+        q_row.Add(self.search_btn, 0)
+        sizer.Add(q_row, 0, wx.EXPAND | wx.ALL, pad)
+
+        # Choice filters
+        if self.spec.get("filters"):
+            fgrid = wx.FlexGridSizer(rows=0, cols=8, hgap=4, vgap=4)
+            for label, key, choices in self.spec["filters"]:
+                fgrid.Add(
+                    wx.StaticText(panel, label=label),
+                    0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+                )
+                ctrl = wx.Choice(panel, choices=choices)
+                ctrl.SetSelection(0)
+                ctrl.SetName(label.replace("&", "").rstrip(":"))
+                fgrid.Add(ctrl, 0, wx.RIGHT, 12)
+                self.filter_ctrls[key] = ctrl
+            sizer.Add(fgrid, 0, wx.EXPAND | wx.ALL, pad)
+
+        # Free-text filters
+        if self.spec.get("text_filters"):
+            tgrid = wx.FlexGridSizer(rows=0, cols=4, hgap=4, vgap=4)
+            for label, key in self.spec["text_filters"]:
+                tgrid.Add(
+                    wx.StaticText(panel, label=label),
+                    0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+                )
+                ctrl = wx.TextCtrl(panel, size=(140, -1))
+                ctrl.SetName(label.replace("&", "").rstrip(":"))
+                tgrid.Add(ctrl, 0, wx.RIGHT, 12)
+                self.text_ctrls[key] = ctrl
+            sizer.Add(tgrid, 0, wx.EXPAND | wx.ALL, pad)
+
+        # Multi-pickers (checkable-list dialogs for tags/genres/warnings)
+        if self.spec.get("multi_pickers"):
+            for mp_label, mp_key, mp_title, mp_options in self.spec["multi_pickers"]:
+                row = wx.BoxSizer(wx.HORIZONTAL)
+                row.Add(
+                    wx.StaticText(panel, label=mp_label),
+                    0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+                )
+                ctrl = wx.TextCtrl(panel, size=(320, -1))
+                ctrl.SetName(mp_label.replace("&", "").rstrip(":"))
+                row.Add(ctrl, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+                btn = wx.Button(panel, label="Pic&k...")
+                btn.Bind(
+                    wx.EVT_BUTTON,
+                    lambda evt, c=ctrl, t=mp_title, o=mp_options:
+                        self._open_multi_picker(c, t, o),
+                )
+                row.Add(btn, 0)
+                sizer.Add(row, 0, wx.EXPAND | wx.ALL, pad)
+                self.text_ctrls[mp_key] = ctrl
+
+        # Checkboxes
+        if self.spec.get("checkboxes"):
+            cb_row = wx.BoxSizer(wx.HORIZONTAL)
+            for label, key in self.spec["checkboxes"]:
+                ctrl = wx.CheckBox(panel, label=label)
+                cb_row.Add(ctrl, 0, wx.RIGHT, 16)
+                self.checkbox_ctrls[key] = ctrl
+            sizer.Add(cb_row, 0, wx.EXPAND | wx.ALL, pad)
+
+        # Results list
+        sizer.Add(
+            wx.StaticText(panel, label="&Results:"),
+            0, wx.LEFT | wx.TOP, pad,
+        )
+        self.results_ctrl = wx.ListCtrl(
+            panel,
+            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SUNKEN,
+        )
+        self.results_ctrl.SetName(f"{self.spec['label']} results")
+        for i, (col_label, width) in enumerate(_SEARCH_COLUMNS):
+            self.results_ctrl.InsertColumn(i, col_label, width=width)
+        self.results_ctrl.Bind(
+            wx.EVT_LIST_ITEM_SELECTED, self._on_result_select,
+        )
+        self.results_ctrl.Bind(
+            wx.EVT_LIST_ITEM_ACTIVATED, lambda e: self._on_result_activated(),
+        )
+        sizer.Add(self.results_ctrl, 1, wx.EXPAND | wx.ALL, pad)
+
+        # Summary
+        sizer.Add(
+            wx.StaticText(panel, label="S&ummary:"),
+            0, wx.LEFT | wx.TOP, pad,
+        )
+        self.summary_ctrl = wx.TextCtrl(
+            panel,
+            style=wx.TE_MULTILINE | wx.TE_READONLY,
+            size=(-1, 70),
+        )
+        self.summary_ctrl.SetName(f"{self.spec['label']} summary")
+        sizer.Add(self.summary_ctrl, 0, wx.EXPAND | wx.ALL, pad)
+
+        dl_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.search_dl_btn = wx.Button(panel, label="Do&wnload Selected")
+        self.search_dl_btn.Bind(
+            wx.EVT_BUTTON, lambda e: self._on_search_download(),
+        )
+        self.search_dl_btn.Disable()
+        dl_row.Add(self.search_dl_btn, 0, wx.RIGHT, 8)
+
+        self.show_parts_btn = wx.Button(panel, label="Show &Parts...")
+        self.show_parts_btn.Bind(
+            wx.EVT_BUTTON, lambda e: self._on_show_parts(),
+        )
+        self.show_parts_btn.Disable()
+        dl_row.Add(self.show_parts_btn, 0, wx.RIGHT, 8)
+
+        self.load_more_btn = wx.Button(panel, label="Load &More")
+        self.load_more_btn.Bind(
+            wx.EVT_BUTTON, lambda e: self._on_load_more(),
+        )
+        self.load_more_btn.Disable()
+        dl_row.Add(self.load_more_btn, 0)
+        sizer.Add(dl_row, 0, wx.ALL, pad)
+
+        panel.SetSizer(sizer)
+
+    # ── Delegates ─────────────────────────────────────────────
+
+    def _log(self, msg):
+        self.main_frame._log(msg)
+
+    # ── State persistence ─────────────────────────────────────
+
+    def _load_state(self):
+        raw = self.main_frame.prefs.get(self._PREF_KEY_BY_SITE[self.site_key])
+        if not raw:
+            return
+        try:
+            state = json.loads(raw)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(state, dict):
+            return
+        # Ignore any legacy "query" a previous version wrote — query is
+        # intentionally not persisted.
+        for key, value in (state.get("filters") or {}).items():
+            ctrl = self.filter_ctrls.get(key)
+            if ctrl and isinstance(value, str) and value:
+                ctrl.SetStringSelection(value)
+        for key, value in (state.get("text") or {}).items():
+            ctrl = self.text_ctrls.get(key)
+            if ctrl and isinstance(value, str):
+                ctrl.SetValue(value)
+        for key, value in (state.get("checks") or {}).items():
+            ctrl = self.checkbox_ctrls.get(key)
+            if ctrl is not None:
+                ctrl.SetValue(bool(value))
+
+    def save_state(self):
+        state = {
+            "filters": {
+                key: ctrl.GetStringSelection()
+                for key, ctrl in self.filter_ctrls.items()
+            },
+            "text": {
+                key: ctrl.GetValue()
+                for key, ctrl in self.text_ctrls.items()
+            },
+            "checks": {
+                key: bool(ctrl.GetValue())
+                for key, ctrl in self.checkbox_ctrls.items()
+            },
+        }
+        self.main_frame.prefs.set(
+            self._PREF_KEY_BY_SITE[self.site_key], json.dumps(state),
+        )
+
+    # ── Busy state, driven from MainFrame._set_busy ──────────
+
+    def apply_busy(self, busy):
+        self.search_btn.Enable(not busy)
+        has_selection = self.results_ctrl.GetFirstSelected() != -1
+        selected_is_series = False
+        if has_selection:
+            idx = self.results_ctrl.GetFirstSelected()
+            if 0 <= idx < len(self.results):
+                selected_is_series = bool(
+                    self.results[idx].get("is_series")
+                )
+        self.search_dl_btn.Enable(not busy and has_selection)
+        self.show_parts_btn.Enable(
+            not busy and has_selection and selected_is_series
+        )
+        self.load_more_btn.Enable(not busy and self.last_query is not None)
+
+    # ── Multi-picker ──────────────────────────────────────────
+
+    def _open_multi_picker(self, ctrl, title, options):
+        current = [
+            s.strip() for s in ctrl.GetValue().split(",") if s.strip()
+        ]
+        dlg = MultiPickerDialog(self, title, list(options), initial=current)
+        try:
+            if dlg.ShowModal() == wx.ID_OK:
+                ctrl.SetValue(", ".join(dlg.picked_labels()))
+        finally:
+            dlg.Destroy()
+
+    # ── Search ────────────────────────────────────────────────
+
+    def _collect_filters(self):
+        filters = {}
+        for key, ctrl in self.filter_ctrls.items():
+            idx = ctrl.GetSelection()
+            if idx <= 0:
+                # First entry is always "any"/"all"/"best match" — no filter
+                continue
+            filters[key] = ctrl.GetString(idx)
+        for key, ctrl in self.text_ctrls.items():
+            value = ctrl.GetValue().strip()
+            if value:
+                filters[key] = value
+        for key, ctrl in self.checkbox_ctrls.items():
+            if ctrl.GetValue():
+                filters[key] = True
+        return filters
+
+    def _on_search(self):
+        query = self.query_ctrl.GetValue().strip()
+        if self.main_frame._downloading:
+            return
+        filters = self._collect_filters()
+        # Most searches need a free-text query, but several site/filter
+        # combinations are valid without one:
+        #   • RR list browse (Rising Stars, Best Rated, …)
+        #   • RR filter-only browse (tags, genres, warnings, numeric bounds)
+        #   • Literotica category browse — the category slug IS the target.
+        list_browse = (
+            self.site_key == "royalroad"
+            and filters.get("list")
+            and filters["list"].strip().lower() != "search"
+        )
+        rr_filter_only = (
+            self.site_key == "royalroad"
+            and any(
+                filters.get(k)
+                for k in (
+                    "tags", "tags_picked", "genres", "warnings",
+                    "status", "type", "order_by",
+                    "min_words", "max_words", "min_pages", "max_pages",
+                    "min_rating",
+                )
+            )
+        )
+        lit_cat_browse = (
+            self.site_key == "literotica" and filters.get("category")
+        )
+        if not query and not (list_browse or rr_filter_only or lit_cat_browse):
+            self._log("Error: Please enter a search query.")
+            return
+        self.main_frame._set_busy(True)
+        self.results_ctrl.DeleteAllItems()
+        self.summary_ctrl.SetValue("")
+        self.results = []
+        self._raw_results = []
+        self.next_page = 1
+        self.last_query = query
+        self.last_filters = filters
+        filter_str = (
+            " [" + ", ".join(f"{k}={v}" for k, v in filters.items()) + "]"
+            if filters else ""
+        )
+        site_label = self._SITE_LABELS.get(self.site_key, self.site_key)
+        self._log(f"Searching {site_label} for: {query}{filter_str}")
+        threading.Thread(
+            target=self._run_search,
+            args=(query, filters, 1, False),
+            daemon=True,
+        ).start()
+
+    def _on_load_more(self):
+        if self.main_frame._downloading or self.last_query is None:
+            return
+        self.main_frame._set_busy(True)
+        self._log(f"Loading page {self.next_page}...")
+        threading.Thread(
+            target=self._run_search,
+            args=(self.last_query, self.last_filters, self.next_page, True),
+            daemon=True,
+        ).start()
+
+    def _run_search(self, query, filters, page, append):
+        from .search import fetch_until_limit
+        try:
+            page_results, next_page = fetch_until_limit(
+                self.search_fn, query,
+                limit=25, start_page=page, **filters,
+            )
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            self._log(f"Search error: {e}")
+            self._log(tb.rstrip())
+            wx.CallAfter(
+                wx.MessageBox,
+                f"Search failed:\n\n{e}",
+                "Search Error",
+                wx.OK | wx.ICON_ERROR, self,
+            )
+            self.main_frame._set_busy(False)
+            return
+        wx.CallAfter(self._populate_results, page_results, next_page, append)
+        self.main_frame._set_busy(False)
+
+    def _populate_results(self, new_results, next_page, append):
+        from .search import collapse_ao3_series, collapse_literotica_series
+
+        # Keep the raw (uncollapsed) results across load-more so we can
+        # re-run collapse on the full set — otherwise parts of the same
+        # series that span page boundaries never find each other.
+        if append:
+            raw = list(self._raw_results or []) + list(new_results)
+        else:
+            raw = list(new_results)
+        self._raw_results = raw
+
+        if self.site_key == "ao3":
+            processed = collapse_ao3_series(raw)
+        elif self.site_key == "literotica":
+            processed = collapse_literotica_series(raw)
+        else:
+            processed = list(raw)
+
+        previous_count = len(self.results) if append else 0
+        self.results = processed
+        self.next_page = next_page
+
+        ctrl = self.results_ctrl
+        ctrl.Freeze()
+        try:
+            ctrl.DeleteAllItems()
+            for r in self.results:
+                row = ctrl.InsertItem(
+                    ctrl.GetItemCount(), self._result_title(r),
+                )
+                ctrl.SetItem(row, 1, r.get("author", "") or "")
+                ctrl.SetItem(row, 2, r.get("fandom", "") or "")
+                ctrl.SetItem(row, 3, str(r.get("words", "")))
+                ctrl.SetItem(row, 4, str(r.get("chapters", "")))
+                ctrl.SetItem(row, 5, r.get("rating", "") or "")
+                ctrl.SetItem(row, 6, r.get("status", "") or "")
+        finally:
+            ctrl.Thaw()
+
+        self.load_more_btn.Enable(
+            bool(new_results) and not self.main_frame._downloading
+        )
+        if not self.results:
+            self._log(
+                "No results found." if not append else "No more results."
+            )
+            return
+
+        if append:
+            added = len(self.results) - previous_count
+            focus_row = previous_count if added > 0 else 0
+            self._log(
+                f"Loaded more. Total {len(self.results)} rows "
+                f"(+{max(added, 0)})."
+                if added > 0 else "No more results."
+            )
+        else:
+            focus_row = 0
+            self._log(f"Found {len(self.results)} results.")
+
+        ctrl.SetFocus()
+        ctrl.Focus(focus_row)
+        ctrl.Select(focus_row)
+
+    @staticmethod
+    def _result_title(r):
+        if r.get("is_series"):
+            parts = len(r.get("series_parts") or [])
+            return f"[Series · {parts} part(s)] {r['title']}"
+        return r.get("title", "")
+
+    def _on_result_select(self, event):
+        idx = event.GetIndex()
+        if 0 <= idx < len(self.results):
+            r = self.results[idx]
+            summary = r.get("summary", "") or ""
+            if r.get("is_series"):
+                parts = r.get("series_parts") or []
+                part_lines = "\n".join(
+                    f"  - {p.get('title', '(untitled)')}" for p in parts
+                )
+                preview = (
+                    f"[Series of {len(parts)} part(s) from search results]\n"
+                    f"{summary}\n\n{part_lines}"
+                    if part_lines else f"[Series]\n{summary}"
+                )
+                self.summary_ctrl.SetValue(preview.strip())
+                self.show_parts_btn.Enable(bool(parts))
+            else:
+                self.summary_ctrl.SetValue(summary or "(no summary)")
+                self.show_parts_btn.Disable()
+            self.search_dl_btn.Enable(not self.main_frame._downloading)
+        event.Skip()
+
+    def _on_search_download(self):
+        idx = self.results_ctrl.GetFirstSelected()
+        if idx < 0 or idx >= len(self.results):
+            return
+        picked = self.results[idx]
+        url = picked.get("url")
+        if not url:
+            self._log("Error: selected result has no URL.")
+            return
+        if self.main_frame._downloading:
+            return
+        self.main_frame._set_busy(True)
+        if picked.get("is_series"):
+            self._log(f"Starting series download: {url}")
+            if picked.get("parts_only"):
+                part_urls = [
+                    p.get("url")
+                    for p in (picked.get("series_parts") or [])
+                    if p.get("url")
+                ]
+                series_name = picked.get("title") or "Series"
+                threading.Thread(
+                    target=self.main_frame._run_series_merge_download,
+                    args=(url,),
+                    kwargs={
+                        "series_name": series_name,
+                        "part_urls": part_urls,
+                    },
+                    daemon=True,
+                ).start()
+            else:
+                threading.Thread(
+                    target=self.main_frame._run_series_merge_download,
+                    args=(url,), daemon=True,
+                ).start()
+        else:
+            self._log(f"Starting download: {url}")
+            threading.Thread(
+                target=self.main_frame._run_download,
+                args=(url,), daemon=True,
+            ).start()
+
+    def _on_result_activated(self):
+        # Enter/double-click: series rows open the parts dialog so
+        # keyboard-only users can actually see what's inside the series
+        # instead of blindly kicking off a multi-part merge.
+        idx = self.results_ctrl.GetFirstSelected()
+        if 0 <= idx < len(self.results):
+            if self.results[idx].get("is_series"):
+                self._on_show_parts()
+                return
+        self._on_search_download()
+
+    def _on_show_parts(self):
+        idx = self.results_ctrl.GetFirstSelected()
+        if idx < 0 or idx >= len(self.results):
+            return
+        row = self.results[idx]
+        if not row.get("is_series"):
+            return
+        parts = row.get("series_parts") or []
+        if not parts:
+            wx.MessageBox(
+                "No parts have been loaded for this series yet.",
+                "Series parts",
+                wx.OK | wx.ICON_INFORMATION, self,
+            )
+            return
+        dlg = SeriesPartsDialog(self, row["title"], parts)
+        if dlg.ShowModal() == wx.ID_OK:
+            picked = dlg.picked_url()
+            if picked and not self.main_frame._downloading:
+                self.main_frame._set_busy(True)
+                self._log(f"Starting part download: {picked}")
+                threading.Thread(
+                    target=self.main_frame._run_download,
+                    args=(picked,), daemon=True,
+                ).start()
+        dlg.Destroy()
+
+    # ── Close ─────────────────────────────────────────────────
+
+    def _on_close(self, event):
+        try:
+            self.save_state()
+        except Exception:
+            pass
+        try:
+            self.main_frame._notify_search_frame_closed(self.site_key)
+        except Exception:
+            pass
+        event.Skip()
 
 
 class VoicePreviewDialog(wx.Dialog):
