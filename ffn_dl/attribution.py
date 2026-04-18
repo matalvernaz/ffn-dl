@@ -304,6 +304,18 @@ def install(backend: str, log_callback=None) -> bool:
 _failed_runs: set[tuple[str, str | None]] = set()
 
 
+def has_failed(backend: str, model_size: str | None = None) -> bool:
+    """True if this backend already fell back to builtin in this run.
+
+    The caller (tts.py audiobook pipeline) consults this after each
+    `refine_speakers` call so it can avoid persisting unrefined builtin
+    segments under the requested-backend's cache key — which would
+    otherwise look like a successful BookNLP/fastcoref result on the
+    next render and skip the real refinement entirely.
+    """
+    return (backend, normalize_size(backend, model_size)) in _failed_runs
+
+
 def refine_speakers(
     segments, full_text: str,
     backend: str = "builtin",

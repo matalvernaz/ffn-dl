@@ -144,6 +144,27 @@ def test_refine_none_backend_is_builtin():
     assert attribution.refine_speakers(segs, "Hi", backend="") is segs
 
 
+def test_has_failed_reports_uninstalled_backend():
+    segs = [Segment("Hi", speaker="Harry")]
+    assert not attribution.has_failed("booknlp", "big")
+    with mock.patch.object(attribution, "is_installed", return_value=False):
+        attribution.refine_speakers(segs, "Hi", backend="booknlp", model_size="big")
+    assert attribution.has_failed("booknlp", "big")
+    # Different size variant tracked separately.
+    assert not attribution.has_failed("booknlp", "small")
+
+
+def test_has_failed_reports_runtime_exception(monkeypatch):
+    segs = [Segment("Hi", speaker="Harry")]
+    monkeypatch.setattr(attribution, "is_installed", lambda b: True)
+    monkeypatch.setattr(
+        attribution, "_refine_with_fastcoref",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    attribution.refine_speakers(segs, "Hi", backend="fastcoref")
+    assert attribution.has_failed("fastcoref")
+
+
 # ── model-size variants ───────────────────────────────────────────
 
 

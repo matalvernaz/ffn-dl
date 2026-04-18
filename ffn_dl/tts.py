@@ -136,6 +136,59 @@ _DIALOGUE_RE = re.compile(
     rf'{_ANY_QUOTE}(?P<speech>[^\"\u201c\u201d]{{2,}}){_ANY_QUOTE}'
 )
 
+
+def _balance_quotes(text):
+    """Strip unbalanced stray quotes that confuse dialogue pairing.
+
+    A single typo like ``leave."`` with no opener (real example: FFN
+    13985352 ch.2) shifts every subsequent dialogue/narration pair
+    by one quote, so narration ends up tagged as speech and vice-versa
+    for the rest of the chapter. This pre-pass classifies each quote
+    as opener or closer from its neighbors and drops orphans before
+    the dialogue regex runs.
+    """
+    chars = list(text)
+    inside = False
+    for i, c in enumerate(chars):
+        if c == '\u201c':
+            kind = 'open'
+        elif c == '\u201d':
+            kind = 'close'
+        elif c == '"':
+            prev = chars[i - 1] if i > 0 else ' '
+            nxt = chars[i + 1] if i + 1 < len(chars) else ' '
+            looks_open = (
+                prev.isspace() and not nxt.isspace()
+                and nxt not in ('"', '\u201c', '\u201d')
+            )
+            looks_close = (
+                (not prev.isspace())
+                and (nxt.isspace() or nxt in '.,;:!?)]}>' or i == len(chars) - 1)
+            )
+            if looks_open and not looks_close:
+                kind = 'open'
+            elif looks_close and not looks_open:
+                kind = 'close'
+            else:
+                kind = 'close' if inside else 'open'
+        else:
+            continue
+        if not inside:
+            if kind == 'close':
+                # Stray closer with no opener — drop it.
+                chars[i] = ''
+                continue
+            inside = True
+        else:
+            if kind == 'open':
+                # New opener while still inside a quote — previous open
+                # never got closed. Drop this orphan; the existing open
+                # state will pair with the next true closer.
+                chars[i] = ''
+                continue
+            inside = False
+    return ''.join(chars)
+
 # After a closing quote: "dialogue," Name verbed  OR  "dialogue," verbed Name
 # Name matches: optional honorific/title ("Mrs.", "Professor", "Aunt", etc.)
 # followed by 1–2 proper-noun tokens — OR a pronoun. This keeps titled
@@ -208,7 +261,8 @@ _SPEECH_VERBS = {
     "lisped", "spluttered", "babbled", "squeaked", "squealed",
     "piped", "chirped", "quipped", "boasted", "bragged", "promised",
     "vowed", "swore", "confided", "asserted", "argued",
-    "cautioned", "reminded",
+    "cautioned", "reminded", "advised", "counseled", "counselled",
+    "encouraged", "lectured", "reproached", "admonished",
     "assured", "reassured", "soothed", "coaxed", "consoled",
     "reasoned", "clarified", "elaborated", "finished", "concluded",
     "corrected", "apologized", "apologised",
@@ -218,7 +272,7 @@ _SPEECH_VERBS = {
     "nodded", "shook",  # "he shook his head"
     "grinned", "smirked", "smiled", "beamed", "frowned", "grimaced",
     "scowled", "pouted", "blinked", "shrugged", "gestured",
-    "nodded", "glared",
+    "nodded", "glared", "motioned",
     "called", "yelled", "crowed", "cackled", "roared",
     "sang", "hummed",
     "wondered", "mused", "speculated", "thought", "pondered",
@@ -324,11 +378,31 @@ _SENTENCE_STARTERS = {
     # Common HP location nouns that aren't characters
     "Hogwarts", "Gryffindor", "Slytherin", "Ravenclaw", "Hufflepuff",
     "Diagon", "Hogsmeade", "Azkaban",
-    # Month / day names
+    # Month / day / holiday names
     "Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
     "Saturday", "Sunday",
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
+    "Halloween", "Christmas", "Easter", "Hanukkah", "Diwali",
+    "Yule", "Samhain", "Beltane", "Imbolc",
+    # Sentence-start prepositions / connectives capitalised mid-narration
+    "Behind", "Beside", "Beneath", "Underneath", "Above", "Below",
+    "Across", "Among", "Amongst", "Around", "Between", "Beyond",
+    "Inside", "Outside", "Toward", "Towards", "Against", "Along",
+    "Onto", "Upon", "Within", "Throughout", "Through",
+    "Without", "Despite", "Although", "Though", "Whereas",
+    # Common interjections / fanfic narration starters
+    "Blimey", "Bloody", "Merlin", "Magic", "Magicals", "Mage", "Magical",
+    "Earth", "Heaven", "Hell", "God", "Lord",  # vocatives, not characters
+    "Box", "Trolley", "Trunk", "Wand", "Owl", "Cake", "Tea",
+    "Breathe", "Breath", "Sigh", "Pause",
+    "Thank", "Thanks", "Sorry", "Please",
+    "Principle", "Aspect", "Charm", "Spell", "Hex", "Jinx", "Curse",
+    # Suspect dangling possessives that often start lines
+    "I'll", "I'd", "I've", "I'm", "Let", "Let's", "You'll", "You'd",
+    "You've", "You're", "We'll", "We'd", "We've", "We're",
+    "He'll", "He'd", "He's", "She'll", "She'd", "She's",
+    "They'll", "They'd", "They've", "They're", "It'll", "It's",
 }
 
 # Honorifics/titles that should NOT be treated as standalone character
@@ -348,6 +422,52 @@ _NAME_SKIP_TITLES = {
 }
 
 
+def _collect_confirmed_speakers(text):
+    """Pre-scan the text for names attributed via explicit speech verbs.
+
+    Returns a set containing both full attribution strings and their
+    individual capitalized tokens. The pre-action heuristic later
+    filters its candidate names against this set so that capitalized
+    common nouns ("Halloween", "Reluctantly", "Magicals", "Behind")
+    are rejected when they happen to fall in the action beat before
+    a quote.
+    """
+    confirmed = set()
+
+    def _add(name):
+        cleaned = _strip_possessive((name or '').strip().rstrip(",.;:!?"))
+        if not cleaned:
+            return
+        if cleaned in _SENTENCE_STARTERS or cleaned in _NAME_SKIP_TITLES:
+            return
+        if cleaned.lower() in _PRONOUNS:
+            return
+        confirmed.add(cleaned)
+        for tok in cleaned.split():
+            tok_clean = _strip_possessive(tok.rstrip(",.;:!?'\u2019"))
+            if (
+                tok_clean
+                and tok_clean[0].isupper()
+                and tok_clean not in _SENTENCE_STARTERS
+                and tok_clean not in _NAME_SKIP_TITLES
+            ):
+                confirmed.add(tok_clean)
+
+    for m in _DIALOGUE_RE.finditer(text):
+        after = text[m.end() : m.end() + 80]
+        am = _AFTER_NAME_VERB.match(after)
+        if am and am.group("verb").lower() in _SPEECH_VERBS:
+            _add(am.group("name"))
+        am = _AFTER_VERB_NAME.match(after)
+        if am and am.group("verb").lower() in _SPEECH_VERBS:
+            _add(am.group("name"))
+        before = text[max(0, m.start() - 80) : m.start()]
+        bm = _BEFORE_ATTRIB.search(before)
+        if bm and bm.group("verb").lower() in _SPEECH_VERBS:
+            _add(bm.group("name"))
+    return confirmed
+
+
 def parse_segments(text):
     """Split story text into narration and dialogue segments.
 
@@ -355,6 +475,9 @@ def parse_segments(text):
     ("she said") and unattributed dialogue in a back-and-forth exchange
     carry forward correctly.
     """
+    text = _balance_quotes(text)
+    confirmed_speakers = _collect_confirmed_speakers(text)
+
     segments = []
     pos = 0
     last_speaker = None
@@ -493,6 +616,21 @@ def parse_segments(text):
                 speaker = _clean_speaker(bm.group("name"))
                 emotion = EMOTION_MAP.get(bm.group("verb").lower())
 
+        # Soft post-attribution: "Name verbed [object]" with a non-speech
+        # action verb. Accept only when Name is a confirmed speaker
+        # elsewhere in the chapter — catches "Sirius ran his hands over
+        # his face." and "Hermione motioned to the timid-looking boy."
+        # without opening the door to every capitalized common noun.
+        if not speaker:
+            am = _AFTER_NAME_VERB.match(after_text)
+            if am:
+                raw_name = am.group("name")
+                if raw_name and raw_name.lower() not in _PRONOUNS:
+                    cleaned = _clean_speaker(raw_name)
+                    if cleaned and cleaned in confirmed_speakers:
+                        speaker = cleaned
+                        attrib_end = match.end() + am.end()
+
         # Pre-action attribution — "Ron looked up. 'Trouble?'" — a
         # very common fanfic pattern where the speaker is named in
         # the immediately-preceding narration but without a speech
@@ -504,15 +642,36 @@ def parse_segments(text):
         if not speaker:
             pre_text = text[pos : match.start()]
             stripped = pre_text.strip()
-            if 0 < len(stripped) <= 200:
+            # Skip pre-action when the orphan tail of a previous post-
+            # attribution starts mid-sentence ("…cradling Harry."): the
+            # only name there is almost always the OBJECT of the prior
+            # speaker's action, not the next speaker.
+            starts_lower = bool(stripped) and stripped[0].islower()
+            if 0 < len(stripped) <= 200 and not starts_lower:
                 def _clean_unique(hay):
                     out = []
                     for n in _PROPER_NAME_RE.findall(hay):
                         n = _strip_possessive(n)
                         if n in _SENTENCE_STARTERS or n in _NAME_SKIP_TITLES:
                             continue
+                        # Adverbs sneak through the proper-noun regex when
+                        # capitalised at sentence start ("Reluctantly,
+                        # Sirius passed…"). Drop -ly tokens unless the
+                        # name was confirmed elsewhere.
+                        if n.endswith("ly") and n not in confirmed_speakers:
+                            continue
                         if n not in out:
                             out.append(n)
+                    # When at least one confirmed speaker is present,
+                    # restrict to confirmed candidates so capitalised
+                    # common nouns (Halloween, Magicals, Box, …) don't
+                    # win the pre-action lottery.
+                    if confirmed_speakers:
+                        confirmed_only = [
+                            n for n in out if n in confirmed_speakers
+                        ]
+                        if confirmed_only:
+                            return confirmed_only
                     return out
 
                 def _apply_title(hay, candidate):
@@ -570,13 +729,21 @@ def parse_segments(text):
                 # keep X, so this is gated on no other names appearing.
                 last_first = last_speaker.split()[0]
                 last_tail = last_speaker.split()[-1]
+                # Possessives count as "other names present" so an action
+                # beat like "…on his cousin Andromeda's home." doesn't
+                # silently keep Sirius as speaker when the next line is
+                # actually Andromeda. The original strict-non-possessive
+                # filter was too generous on long orphan-tail gaps.
+                long_orphan_tail = (
+                    non_ws > 60 and stripped[:1].islower()
+                )
                 other_names = [
                     n for n in _PROPER_NAME_RE.findall(stripped)
-                    if n not in _SENTENCE_STARTERS
-                    and n not in _NAME_SKIP_TITLES
-                    and n != last_first
-                    and n != last_tail
-                    and not _is_possessive(n)
+                    if _strip_possessive(n) not in _SENTENCE_STARTERS
+                    and _strip_possessive(n) not in _NAME_SKIP_TITLES
+                    and _strip_possessive(n) != last_first
+                    and _strip_possessive(n) != last_tail
+                    and (long_orphan_tail or not _is_possessive(n))
                 ]
                 if not other_names:
                     speaker = last_speaker
@@ -2356,6 +2523,16 @@ def generate_audiobook(
                 model_size=attribution_model_size,
             )
             all_segments[idx] = refined
+            # Only persist when the backend actually ran. On fallback
+            # (backend missing or raised) refine_speakers returns the
+            # unrefined builtin segments — saving those under the
+            # requested backend's cache key would make the next render
+            # see a "cache hit" and skip the real refinement forever.
+            if attribution.has_failed(
+                attribution_backend, attribution_model_size,
+            ):
+                misses += 1
+                continue
             # Persist immediately so an interrupted run preserves
             # per-chapter progress — re-running won't repeat completed
             # attribution work.

@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.17.0 — 2026-04-18
+
+### Fix
+
+- **Builtin attribution: capitalised common words no longer become
+  fake speakers.** Pre-action attribution treated the first proper-
+  noun-shaped token in the action beat as the speaker, so words like
+  *Halloween*, *Reluctantly*, *Behind*, *With*, *Magicals*, *Blimey*,
+  *Merlin*, *Earth*, *Box*, *Trevor!*, *Thank*, *Breathe* — anything
+  capitalised at sentence start — could win the speaker assignment.
+  parse_segments now pre-scans the chapter for names confirmed via
+  explicit speech-verb attribution and filters pre-action candidates
+  against that set.
+- **Builtin attribution: orphan-tail name no longer hijacks the next
+  speaker.** When a previous post-attribution clause was consumed
+  (`"…," Sirius breathed`) the leftover tail (`out while gently
+  cradling Harry.`) became the only pre-text for the next dialogue,
+  and pre-action picked *Harry* — the object being held, not the
+  speaker. Pre-action is now skipped when the orphan tail starts with
+  a lowercase word (= continuation of the previous sentence). The
+  consecutive-quote carryforward also bails out on long orphan tails
+  that mention another character (even in possessive form), so
+  `"…," yelled loudly as he beat on the door of his cousin
+  Andromeda's home. …` no longer keeps Sirius as the speaker for
+  Andromeda's reply.
+- **Builtin attribution: action verbs after dialogue now attribute
+  when the name is confirmed elsewhere.** Lines like `"…," Sirius
+  ran his hands over his face.` and `"…," Hermione motioned to the
+  timid-looking boy.` were dropped because `ran`/`motioned` aren't
+  speech verbs. A soft post-attribution path now accepts any verb in
+  `Name verbed` form when *Name* is a confirmed speaker elsewhere
+  in the chapter.
+- **Builtin attribution: stray unbalanced quote no longer desyncs
+  the rest of the chapter.** A single typo like `…to leave."` with
+  no matching opener caused every subsequent dialogue/narration pair
+  to invert for the rest of the chapter. parse_segments now runs a
+  quote-balancing pre-pass that classifies each quote as opener or
+  closer from its neighbors and drops orphans before pairing.
+- **BookNLP / fastcoref fallback no longer poisons the attribution
+  cache.** When the neural backend was uninstalled or raised mid-run
+  the dispatcher silently returned the unrefined builtin segments,
+  and the audiobook pipeline saved those under the requested
+  backend's cache key — so the next render saw a "cache hit" and
+  skipped the real refinement entirely. The pipeline now consults
+  `attribution.has_failed(backend, size)` after each refine call and
+  only persists when the backend actually ran. Existing polluted
+  cache entries can be cleared by deleting
+  `cache/attribution/v1/<backend>/<size>/`.
+
+### Lists expanded
+
+- `_SENTENCE_STARTERS` now includes common holiday names, sentence-
+  start prepositions / connectives (*Behind*, *Beside*, *Without*,
+  *Despite*, *Throughout*, …), fanfic-narration interjections
+  (*Blimey*, *Merlin*, *Magic*, *Box*, …), and the contracted
+  pronouns (*I'll*, *You're*, *We've*, …) that the proper-noun
+  regex would otherwise pick up at line start.
+- `_SPEECH_VERBS` adds `advised`, `counseled`, `encouraged`,
+  `lectured`, `admonished`, `motioned` so the strict post-
+  attribution path catches more standard tags before falling back
+  to the soft confirmed-speaker check.
+
 ## 1.16.3 — 2026-04-18
 
 ### Fix
