@@ -1,6 +1,7 @@
 """Text-to-speech audiobook generation with character voice mapping."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -1183,6 +1184,25 @@ def _combine_rate(base_pct, emotion_rate):
     return _rate_str(total) if total else None
 
 
+def _tts_kwargs_for_segment(segment, voice, speech_rate=0):
+    """Build the edge-tts Communicate kwargs for a segment.
+
+    Shared between the real synthesis path and the failure-diagnostic
+    logger so both see exactly the same parameters.
+    """
+    kwargs = {"voice": voice}
+    emotion_prosody = {}
+    if segment.emotion:
+        emotion_prosody = EMOTION_PROSODY.get(segment.emotion, {})
+    rate = _combine_rate(speech_rate, emotion_prosody.get("rate"))
+    if rate:
+        kwargs["rate"] = rate
+    for key in ("volume", "pitch"):
+        if key in emotion_prosody:
+            kwargs[key] = emotion_prosody[key]
+    return kwargs
+
+
 async def _generate_segment_audio(segment, voice, output_path, speech_rate=0):
     """Generate audio for a single segment using edge-tts.
 
@@ -1194,22 +1214,7 @@ async def _generate_segment_audio(segment, voice, output_path, speech_rate=0):
     if not text or len(text) < 3 or text.strip(".,;:!?-–—' \"") == "":
         return False
 
-    kwargs = {"voice": voice}
-
-    # Apply prosody adjustments for emotional delivery
-    emotion_prosody = {}
-    if segment.emotion:
-        emotion_prosody = EMOTION_PROSODY.get(segment.emotion, {})
-
-    # rate is the one that combines additively with user preference;
-    # volume and pitch stay emotion-only.
-    rate = _combine_rate(speech_rate, emotion_prosody.get("rate"))
-    if rate:
-        kwargs["rate"] = rate
-    for key in ("volume", "pitch"):
-        if key in emotion_prosody:
-            kwargs[key] = emotion_prosody[key]
-
+    kwargs = _tts_kwargs_for_segment(segment, voice, speech_rate=speech_rate)
     comm = _require_edge_tts().Communicate(text, **kwargs)
     await comm.save(str(output_path))
     return True
@@ -1502,16 +1507,22 @@ async def _generate_with_semaphore(sem, seg, voice, path, idx, ch_num, speech_ra
                 if ok and path.exists() and path.stat().st_size > 0:
                     return path
             except Exception as exc:
+                kwargs = _tts_kwargs_for_segment(seg, voice, speech_rate=speech_rate)
+                text_preview = seg.text[:200]
                 if attempt < 3:
                     logger.debug(
-                        "TTS attempt %d/3 failed for segment %d (ch %d): %s",
+                        "TTS attempt %d/3 failed for segment %d (ch %d): %s | "
+                        "speaker=%s emotion=%s kwargs=%s text=%r",
                         attempt, idx, ch_num, exc,
+                        seg.speaker, seg.emotion, kwargs, text_preview,
                     )
                     await asyncio.sleep(2)
                 else:
                     logger.warning(
-                        "TTS failed after 3 attempts for segment %d (ch %d): %s",
+                        "TTS failed after 3 attempts for segment %d (ch %d): %s | "
+                        "speaker=%s emotion=%s kwargs=%s text_len=%d text=%r",
                         idx, ch_num, exc,
+                        seg.speaker, seg.emotion, kwargs, len(seg.text), text_preview,
                     )
     return None
 
@@ -1834,6 +1845,97 @@ def _check_ffmpeg():
         )
 
 
+# ── Attribution cache ─────────────────────────────────────────────
+#
+# BookNLP attribution takes minutes per book and is deterministic in the
+# chapter text + backend + model-size. Caching per-chapter (hash of the
+# chapter text as key) means:
+#   * Re-runs after a TTS crash skip BookNLP entirely for every chapter
+#     whose text hasn't changed.
+#   * Fanfics that grow by one chapter only pay attribution cost for the
+#     new chapter; existing chapters hit cache.
+#   * A chapter edited by the author (typo fix, rewrite) is naturally
+#     re-attributed because its hash no longer matches.
+#
+# The cache lives in the user's home dir (``~/.ffn-dl/attribution-cache/``
+# — redirected into the portable folder on frozen Windows builds by the
+# ``ffn_dl.portable`` bootstrap) so two people who download the same
+# story share attribution results across different output directories.
+# One file per chapter (content-addressed by sha256) means concurrent
+# renders never collide and a single torn write only loses one chapter.
+_ATTR_CACHE_VERSION = 1
+
+
+def _attr_cache_root():
+    """Shared attribution-cache directory, independent of output dir.
+
+    ``Path.home()`` is redirected into the portable folder by
+    ``ffn_dl.portable``, so this is correct for frozen builds too.
+    """
+    return Path.home() / ".ffn-dl" / "attribution-cache" / f"v{_ATTR_CACHE_VERSION}"
+
+
+def _attr_cache_entry_path(backend, model_size, text_hash):
+    size_bucket = model_size if model_size else "_"
+    return _attr_cache_root() / backend / size_bucket / f"{text_hash}.json"
+
+
+def _hash_chapter_text(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _segment_to_dict(seg):
+    return {
+        "text": seg.text,
+        "speaker": seg.speaker,
+        "emotion": seg.emotion,
+        "scene_break": seg.scene_break,
+    }
+
+
+def _segment_from_dict(d):
+    # Segment.__init__ zeroes text when scene_break=True, so pass the
+    # original text through and let it do the right thing.
+    return Segment(
+        d.get("text", ""),
+        speaker=d.get("speaker"),
+        emotion=d.get("emotion"),
+        scene_break=bool(d.get("scene_break", False)),
+    )
+
+
+def _load_attr_entry(backend, model_size, text_hash):
+    """Return the cached segment dict-list for this chapter, or None."""
+    path = _attr_cache_entry_path(backend, model_size, text_hash)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Attribution cache entry unreadable (%s); ignoring", exc)
+        return None
+    if not isinstance(data, list):
+        return None
+    return data
+
+
+def _save_attr_entry(backend, model_size, text_hash, segment_dicts):
+    """Atomically write one chapter's attribution result to the shared cache."""
+    path = _attr_cache_entry_path(backend, model_size, text_hash)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(segment_dicts), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning("Could not write attribution cache entry: %s", exc)
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except (OSError, NameError):
+            pass
+
+
 def generate_audiobook(
     story, output_dir,
     progress_callback=None,
@@ -1915,11 +2017,37 @@ def generate_audiobook(
     if attribution_backend and attribution_backend != "builtin":
         from . import attribution
 
+        hits = 0
+        misses = 0
         for idx, (text, segs) in enumerate(zip(chapter_texts, all_segments)):
-            all_segments[idx] = attribution.refine_speakers(
+            key = _hash_chapter_text(text)
+            cached = _load_attr_entry(
+                attribution_backend, attribution_model_size, key,
+            )
+            if cached is not None:
+                all_segments[idx] = [_segment_from_dict(d) for d in cached]
+                hits += 1
+                continue
+            refined = attribution.refine_speakers(
                 segs, text,
                 backend=attribution_backend,
                 model_size=attribution_model_size,
+            )
+            all_segments[idx] = refined
+            # Persist immediately so an interrupted run preserves
+            # per-chapter progress — re-running won't repeat completed
+            # attribution work.
+            _save_attr_entry(
+                attribution_backend, attribution_model_size, key,
+                [_segment_to_dict(s) for s in refined],
+            )
+            misses += 1
+        if hits or misses:
+            logger.info(
+                "Attribution cache: %d hit%s, %d miss%s (%s)",
+                hits, "" if hits == 1 else "es",
+                misses, "" if misses == 1 else "es",
+                _attr_cache_root(),
             )
 
     # Apply pronunciation overrides to every segment's text before TTS.
