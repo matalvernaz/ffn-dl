@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.9.1 — 2026-04-18
+
+### Fix
+
+- **Install button no longer crashes the standalone .exe build**. In
+  a PyInstaller-frozen exe `sys.executable` points at ffn-dl.exe
+  itself (not at a Python interpreter), so `sys.executable -m pip
+  install booknlp` would route the pip flags into ffn-dl's own
+  argparse and fail with "unrecognized arguments: -m --upgrade
+  booknlp". The .exe's bundled Python is also isolated and read-only,
+  so neural backends can't be imported from it even if the install
+  somehow succeeded. The GUI now detects the frozen state,
+  disables the Install button, and displays "(not available in .exe
+  build)" next to the backend choice. Selecting a neural backend
+  logs a clear explanation pointing at the pip install path
+  (`pip install ffn-dl[gui,audio]` + `pip install fastcoref` /
+  `booknlp`). CLI `--install-attribution` similarly surfaces the
+  explanation instead of attempting the doomed subprocess.
+  Built-in attribution, speech rate, inter-speaker pauses, and the
+  pronunciation override map all still work in the .exe as before.
+
 ## 1.9.0 — 2026-04-17
 
 ### Audiobook — major overhaul

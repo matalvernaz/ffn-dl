@@ -200,3 +200,44 @@ def test_refine_ignores_size_for_fastcoref(monkeypatch):
     segs = [Segment("Hi", speaker="Harry")]
     attribution.refine_speakers(segs, "Hi", backend="fastcoref", model_size="big")
     assert called == {"ok": True}
+
+
+# ── frozen-exe handling ────────────────────────────────────────────
+
+
+def test_install_unsupported_reason_when_frozen(monkeypatch):
+    """Frozen .exe builds can't run `sys.executable -m pip` — the
+    registry must surface a reason instead of returning a bogus
+    install command."""
+    monkeypatch.setattr(attribution, "_is_frozen", lambda: True)
+    assert attribution.install_command("fastcoref") is None
+    assert attribution.install_command("booknlp") is None
+    assert attribution.install_unsupported_reason("fastcoref")
+    assert attribution.install_unsupported_reason("booknlp")
+
+
+def test_install_unsupported_reason_none_when_not_frozen(monkeypatch):
+    monkeypatch.setattr(attribution, "_is_frozen", lambda: False)
+    assert attribution.install_unsupported_reason("fastcoref") is None
+    assert attribution.install_unsupported_reason("booknlp") is None
+
+
+def test_install_refuses_cleanly_when_frozen(monkeypatch):
+    """install() must not Popen sys.executable as a pip runner when
+    frozen — it would route pip flags to the exe's argparse and fail."""
+    monkeypatch.setattr(attribution, "_is_frozen", lambda: True)
+    lines = []
+    ok = attribution.install("fastcoref", log_callback=lines.append)
+    assert ok is False
+    # The first logged line should be the first line of the frozen
+    # explanation — the user gets a clear message, not a confused
+    # argparse traceback.
+    assert lines, "expected a user-facing log message"
+    assert "standalone .exe" in lines[0]
+
+
+def test_install_builtin_noop_when_frozen(monkeypatch):
+    """builtin has nothing to install — the frozen guard must not
+    accidentally start rejecting builtin."""
+    monkeypatch.setattr(attribution, "_is_frozen", lambda: True)
+    assert attribution.install("builtin") is True

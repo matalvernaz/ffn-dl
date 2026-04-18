@@ -591,6 +591,13 @@ class MainFrame(wx.Frame):
             self.attribution_install_btn.Enable(False)
             self.attribution_install_btn.SetLabel("&Install...")
             return
+        # Frozen .exe builds can't install neural deps — be explicit
+        # about why rather than letting the user click and fail.
+        if self._attribution_module.install_unsupported_reason(backend):
+            self.attribution_status.SetLabel("(not available in .exe build)")
+            self.attribution_install_btn.Enable(False)
+            self.attribution_install_btn.SetLabel("&Install...")
+            return
         if self._attribution_module.is_installed(backend):
             self.attribution_status.SetLabel("(installed)")
             self.attribution_install_btn.Enable(True)
@@ -604,7 +611,15 @@ class MainFrame(wx.Frame):
         self._refresh_attribution_status()
         self._refresh_size_choices()
         backend = self._selected_attribution_backend()
-        if backend != "builtin" and not self._attribution_module.is_installed(backend):
+        if backend == "builtin":
+            return
+        reason = self._attribution_module.install_unsupported_reason(backend)
+        if reason:
+            # Frozen .exe — deliver the explanation once, cleanly.
+            for line in reason.splitlines():
+                self._log(line)
+            return
+        if not self._attribution_module.is_installed(backend):
             self._log(
                 f"Attribution backend '{backend}' is not installed. "
                 f"Click Install or run: ffn-dl --install-attribution {backend}"

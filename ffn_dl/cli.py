@@ -1374,6 +1374,12 @@ def main(argv=None):
         from . import attribution as _attr
 
         backend = args.install_attribution
+        reason = _attr.install_unsupported_reason(backend)
+        if reason:
+            # Running as a frozen PyInstaller .exe — surface the
+            # explanation rather than attempting a doomed subprocess.
+            print(reason)
+            return 1
         print(f"Installing {backend} (this may take a minute)...")
         ok = _attr.install(backend, log_callback=print)
         if ok:

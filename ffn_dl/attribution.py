@@ -24,6 +24,25 @@ import subprocess
 import sys
 from typing import Iterable, List
 
+
+def _is_frozen() -> bool:
+    """True when running inside a PyInstaller bundle. In that mode
+    `sys.executable` is the bundled .exe (not a Python interpreter)
+    and the app's site-packages is read-only and isolated — neural
+    backends cannot be installed or imported from it."""
+    return bool(getattr(sys, "frozen", False))
+
+
+_FROZEN_MESSAGE = (
+    "Optional attribution backends can't be installed into the "
+    "standalone .exe build of ffn-dl — the bundled Python is isolated "
+    "and read-only. To use fastcoref or BookNLP, install ffn-dl from "
+    "PyPI instead:\n"
+    "  pip install ffn-dl[gui,audio]\n"
+    "  pip install fastcoref   # or: pip install booknlp\n"
+    "Then run `ffn-dl` from that environment."
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -141,11 +160,28 @@ def is_installed(backend: str) -> bool:
 
 def install_command(backend: str) -> List[str] | None:
     """Return the ``pip install`` argv for a backend, or None if there
-    is nothing to install (builtin) or the backend is unknown."""
+    is nothing to install (builtin), the backend is unknown, or we are
+    running as a frozen .exe where sys.executable isn't a Python
+    interpreter and installation is fundamentally unsupported."""
     info = BACKENDS.get(backend)
     if not info or not info["pip_name"]:
         return None
+    if _is_frozen():
+        return None
     return [sys.executable, "-m", "pip", "install", "--upgrade", info["pip_name"]]
+
+
+def install_unsupported_reason(backend: str) -> str | None:
+    """Return a human-readable reason why `install(backend)` would
+    refuse to run, or None if installation is supported. Lets the UI
+    explain WHY the Install button is disabled instead of silently
+    greying out."""
+    if _is_frozen():
+        return _FROZEN_MESSAGE
+    info = BACKENDS.get(backend) or {}
+    if not info.get("pip_name"):
+        return None  # builtin — no install needed, nothing to explain
+    return None
 
 
 def install(backend: str, log_callback=None) -> bool:
@@ -153,7 +189,16 @@ def install(backend: str, log_callback=None) -> bool:
 
     log_callback(line) is invoked for each line of stdout/stderr so a
     GUI can surface progress. Returns True on success.
+
+    Refuses (returns False with an explanatory log message) when
+    running inside a frozen PyInstaller bundle — see install_command.
     """
+    if _is_frozen() and backend != "builtin":
+        if log_callback:
+            for line in _FROZEN_MESSAGE.splitlines():
+                log_callback(line)
+        return False
+
     cmd = install_command(backend)
     if not cmd:
         return backend == "builtin"
