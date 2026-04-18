@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -238,42 +239,64 @@ def install(backend: str, log_callback=None) -> bool:
             if log_callback:
                 log_callback(f"neural_env unavailable: {exc}")
             return False
-        return neural_env.pip_install(
+        if not neural_env.pip_install(
             [info["pip_name"]],
             log_callback=log_callback,
             extra_args=_EXTRA_ARGS.get(backend),
-        )
+        ):
+            return False
+    else:
+        # Non-frozen path — use sys.executable's pip directly.
+        cmd = install_command(backend)
+        if not cmd:
+            return False
 
-    # Non-frozen path — use sys.executable's pip directly.
-    cmd = install_command(backend)
-    if not cmd:
-        return False
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as exc:
+            if log_callback:
+                log_callback(f"Failed to launch pip: {exc}")
+            return False
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except OSError as exc:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            if log_callback and line:
+                log_callback(line)
+        rc = proc.wait()
+        if rc != 0:
+            if log_callback:
+                log_callback(f"pip install exited with status {rc}")
+            return False
+
+    # BookNLP needs spaCy's en_core_web_sm at runtime; pip won't pull
+    # it transitively. Fetch it now so first use doesn't stall or fail.
+    if backend == "booknlp" and not _ensure_spacy_model(
+        "en_core_web_sm", log_callback=log_callback,
+    ):
         if log_callback:
-            log_callback(f"Failed to launch pip: {exc}")
-        return False
-
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.rstrip()
-        if log_callback and line:
-            log_callback(line)
-    rc = proc.wait()
-    if rc != 0 and log_callback:
-        log_callback(f"pip install exited with status {rc}")
-    return rc == 0
+            log_callback(
+                "Warning: spaCy model en_core_web_sm could not be "
+                "downloaded — BookNLP will fall back to builtin at run time."
+            )
+        # Don't fail the whole install — first-use also retries the
+        # download, and a retry of this button will try again too.
+    return True
 
 
 # ── Dispatcher ──────────────────────────────────────────────────────
+
+# Track backends that have already failed once this run so we don't
+# repeat the same warning for every chapter of a multi-chapter book.
+# Keyed by (backend, size) so a later call with different params can
+# still attempt refinement. Cleared only on process exit.
+_failed_runs: set[tuple[str, str | None]] = set()
 
 
 def refine_speakers(
@@ -293,13 +316,17 @@ def refine_speakers(
     """
     if backend in (None, "", "builtin"):
         return segments
+    size = normalize_size(backend, model_size)
+    key = (backend, size)
+    if key in _failed_runs:
+        return segments  # already reported; stay silent for remaining chapters
     if not is_installed(backend):
         logger.warning(
             "Attribution backend %r is not installed; using builtin parser",
             backend,
         )
+        _failed_runs.add(key)
         return segments
-    size = normalize_size(backend, model_size)
     try:
         if backend == "fastcoref":
             return _refine_with_fastcoref(segments, full_text)
@@ -307,13 +334,94 @@ def refine_speakers(
             return _refine_with_booknlp(segments, full_text, model_size=size)
     except Exception as exc:  # the whole point is to never blow up the render
         logger.warning(
-            "Attribution backend %r failed (%s); falling back to builtin",
+            "Attribution backend %r failed (%s); falling back to builtin "
+            "for the rest of this render",
             backend, exc,
         )
+        _failed_runs.add(key)
         return segments
 
     logger.warning("Unknown attribution backend %r; using builtin", backend)
+    _failed_runs.add(key)
     return segments
+
+
+# ── spaCy model bootstrap ──────────────────────────────────────────
+
+
+# BookNLP imports spaCy and loads ``en_core_web_sm`` on every
+# ``process()`` call. Pip doesn't pull spaCy models automatically, so a
+# fresh ``pip install booknlp`` leaves this missing. We check on first
+# use and attempt a one-shot ``spacy download`` to self-heal existing
+# installs — new installs also get it proactively from ``install()``.
+_spacy_model_checked: set[str] = set()
+
+
+def _spacy_model_available(model_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(model_name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _spacy_download(model_name: str, log_callback=None) -> bool:
+    """Run ``spacy download <model>`` against the right interpreter.
+
+    Frozen builds go through ``neural_env.run_python`` so the command
+    lands in the embedded Python where spaCy is installed. Everything
+    else uses ``sys.executable`` directly.
+    """
+    args = ["-m", "spacy", "download", model_name]
+    if _is_frozen():
+        try:
+            from . import neural_env
+        except ImportError as exc:
+            if log_callback:
+                log_callback(f"neural_env unavailable: {exc}")
+            return False
+        return neural_env.run_python(args, log_callback=log_callback)
+
+    cmd = [sys.executable, *args]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+    except OSError as exc:
+        if log_callback:
+            log_callback(f"Failed to launch spacy: {exc}")
+        return False
+
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip()
+        if line and log_callback:
+            log_callback(line)
+    return proc.wait() == 0
+
+
+def _ensure_spacy_model(model_name: str, log_callback=None) -> bool:
+    """Make sure ``model_name`` is importable; attempt a download once
+    per process if it isn't. Returns True if the model is available
+    afterwards. Repeated calls within a process short-circuit."""
+    if _spacy_model_available(model_name):
+        return True
+    if model_name in _spacy_model_checked:
+        return False
+    _spacy_model_checked.add(model_name)
+
+    msg = f"spaCy model {model_name!r} not found; downloading..."
+    if log_callback:
+        log_callback(msg)
+    else:
+        logger.info(msg)
+
+    ok = _spacy_download(model_name, log_callback=log_callback)
+    # Invalidate importlib's finder cache so the freshly-installed
+    # package is discoverable without restarting the process.
+    importlib.invalidate_caches()
+    return ok and _spacy_model_available(model_name)
 
 
 # ── fastcoref adapter ──────────────────────────────────────────────
@@ -414,6 +522,27 @@ def _refine_with_fastcoref(segments, full_text):
 # ── BookNLP adapter ────────────────────────────────────────────────
 
 
+# BookNLP model construction loads ~150 MB / ~1 GB of weights and
+# several spaCy / PyTorch components. Cache per model_size so a
+# multi-chapter render doesn't reload everything on every chapter.
+_booknlp_cache: dict[str, object] = {}
+
+
+def _get_booknlp_model(model_size: str):
+    if model_size in _booknlp_cache:
+        return _booknlp_cache[model_size]
+    from booknlp.booknlp import BookNLP
+    model = BookNLP(
+        "en",
+        {
+            "pipeline": "entity,quote,coref",
+            "model": model_size,
+        },
+    )
+    _booknlp_cache[model_size] = model
+    return model
+
+
 def _refine_with_booknlp(segments, full_text, model_size="small"):
     """Run BookNLP over the full text, parse its quote + entity output,
     and overwrite segment speakers with BookNLP's canonical character
@@ -430,22 +559,24 @@ def _refine_with_booknlp(segments, full_text, model_size="small"):
     import tempfile
     from pathlib import Path
 
-    from booknlp.booknlp import BookNLP
-
     if model_size not in ("small", "big"):
         model_size = "small"
+
+    # BookNLP loads spaCy's en_core_web_sm inside .process(). pip won't
+    # install it transitively, so older BookNLP installs can be missing
+    # it; fetch on first use as a self-heal.
+    if not _ensure_spacy_model("en_core_web_sm"):
+        raise RuntimeError(
+            "spaCy model en_core_web_sm is not available and the "
+            "automatic download failed — reinstall BookNLP or run "
+            "`python -m spacy download en_core_web_sm` manually."
+        )
+
+    model = _get_booknlp_model(model_size)
 
     tmp = Path(tempfile.mkdtemp(prefix="ffn-booknlp-"))
     infile = tmp / "book.txt"
     infile.write_text(full_text, encoding="utf-8")
-
-    model = BookNLP(
-        "en",
-        {
-            "pipeline": "entity,quote,coref",
-            "model": model_size,
-        },
-    )
     model.process(str(infile), str(tmp), "book")
 
     # Token offsets → character offsets

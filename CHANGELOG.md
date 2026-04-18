@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fix
+
+- **BookNLP attribution now works out of the box.** `pip install
+  booknlp` doesn't pull spaCy's `en_core_web_sm`, so first use failed
+  with `[E050] Can't find model 'en_core_web_sm'` and the dispatcher
+  quietly fell back to the builtin parser — logging the same warning
+  once per chapter (44× for a 44-chapter book). The install flow now
+  runs `spacy download en_core_web_sm` after installing BookNLP, and
+  the runtime path self-heals by attempting the download on first use
+  for installs that predate this change.
+- **BookNLP model loaded once per render, not once per chapter.** The
+  ~150 MB (small) / ~1 GB (big) weights used to reload on every
+  chapter; they're now cached on the module for the lifetime of the
+  process.
+- **Attribution-backend failures no longer spam warnings.** After the
+  first fall-back warning for a given backend/size, subsequent
+  chapters in the same render stay silent instead of re-emitting the
+  same line.
+
 ## 1.12.0 — 2026-04-18
 
 ### Change

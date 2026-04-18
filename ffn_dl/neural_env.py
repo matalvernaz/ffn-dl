@@ -264,6 +264,43 @@ def ensure_embed_python(log_callback=None) -> bool:
 # ── package install via embedded Python ────────────────────────────
 
 
+def run_python(argv, log_callback=None) -> bool:
+    """Run the embedded Python with ``DEPS_DIR`` on ``PYTHONPATH`` so
+    modules we pip-installed there (spaCy, booknlp, …) are importable
+    by the subprocess. Streams stdout to ``log_callback``.
+
+    Used for post-install steps like ``python -m spacy download
+    en_core_web_sm`` where the tool lives inside DEPS_DIR.
+    """
+    if not ensure_embed_python(log_callback=log_callback):
+        return False
+
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(DEPS_DIR) + (os.pathsep + existing if existing else "")
+    )
+    cmd = [str(python_exe()), *argv]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, env=env,
+        )
+    except OSError as exc:
+        if log_callback:
+            log_callback(f"Failed to spawn embedded Python: {exc}")
+        return False
+
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip()
+        if line and log_callback:
+            log_callback(line)
+    return proc.wait() == 0
+
+
 def pip_install(packages, log_callback=None, extra_args=None) -> bool:
     """Install one or more PyPI packages into ``DEPS_DIR`` via the
     embedded Python. Streams pip's stdout/stderr to ``log_callback``.

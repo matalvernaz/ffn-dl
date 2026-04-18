@@ -13,6 +13,20 @@ from ffn_dl.tts import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_attribution_state():
+    """The dispatcher dedupes repeated failures per process; tests need
+    a clean slate so an earlier test's synthetic failure doesn't mute
+    a later test's real call."""
+    attribution._failed_runs.clear()
+    attribution._booknlp_cache.clear()
+    attribution._spacy_model_checked.clear()
+    yield
+    attribution._failed_runs.clear()
+    attribution._booknlp_cache.clear()
+    attribution._spacy_model_checked.clear()
+
+
 # ── speech rate ────────────────────────────────────────────────────
 
 
