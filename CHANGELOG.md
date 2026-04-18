@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.12.6 — 2026-04-18
+
+### Fix
+
+- **BookNLP attribution now actually loads instead of silently falling
+  back to the builtin.** BookNLP's three taggers (entity, coref,
+  quote) were saved against an older ``transformers`` where
+  ``BertEmbeddings`` registered ``position_ids`` as a buffer.
+  Transformers 4.31+ removed that buffer, so
+  ``model.load_state_dict(torch.load(...))`` hit
+  ``Unexpected key(s) in state_dict: "bert.embeddings.position_ids"``
+  and our dispatcher logged a backend failure then reverted to the
+  builtin parser — exactly the bad-voicing case BookNLP is supposed
+  to fix. We now install a per-module ``torch`` shim that strips any
+  ``*.embeddings.position_ids`` keys from the dict returned by
+  ``torch.load`` before ``load_state_dict`` sees it; the global
+  ``torch.load`` is untouched, so nothing else is affected.
+
 ## 1.12.5 — 2026-04-18
 
 ### Fix

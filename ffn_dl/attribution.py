@@ -540,6 +540,7 @@ def _refine_with_fastcoref(segments, full_text):
 # multi-chapter render doesn't reload everything on every chapter.
 _booknlp_cache: dict[str, object] = {}
 _booknlp_windows_patched = False
+_booknlp_state_dict_patched = False
 
 
 def _patch_booknlp_windows_paths() -> None:
@@ -592,10 +593,57 @@ def _patch_booknlp_windows_paths() -> None:
     _booknlp_windows_patched = True
 
 
+def _patch_booknlp_state_dict() -> None:
+    """Strip deprecated ``*.embeddings.position_ids`` keys from BookNLP's
+    saved state_dicts before they reach ``load_state_dict``.
+
+    The shipped BookNLP weights were saved against an older
+    ``transformers`` where ``BertEmbeddings`` registered
+    ``position_ids`` as a buffer. Transformers 4.31+ removed that
+    buffer, so ``model.load_state_dict(torch.load(...))`` raises
+    ``Unexpected key(s) in state_dict: "bert.embeddings.position_ids"``
+    and the backend silently falls back to builtin.
+
+    We wrap ``torch.load`` inside the three BookNLP modules that call
+    ``load_state_dict`` (``entity_tagger``, ``litbank_coref``,
+    ``bert_qa``) so the offending keys are dropped before the model
+    sees them. Other ``torch.load`` calls flow through unchanged.
+    """
+    global _booknlp_state_dict_patched
+    if _booknlp_state_dict_patched:
+        return
+
+    from booknlp.english import entity_tagger, litbank_coref, bert_qa
+
+    def _strip(state):
+        if isinstance(state, dict):
+            for key in [k for k in state
+                        if isinstance(k, str)
+                        and k.endswith(".embeddings.position_ids")]:
+                state.pop(key, None)
+        return state
+
+    class _TorchShim:
+        def __init__(self, real):
+            self._real = real
+
+        def load(self, *a, **k):
+            return _strip(self._real.load(*a, **k))
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    for mod in (entity_tagger, litbank_coref, bert_qa):
+        mod.torch = _TorchShim(mod.torch)
+
+    _booknlp_state_dict_patched = True
+
+
 def _get_booknlp_model(model_size: str):
     if model_size in _booknlp_cache:
         return _booknlp_cache[model_size]
     _patch_booknlp_windows_paths()
+    _patch_booknlp_state_dict()
     from booknlp.booknlp import BookNLP
     model = BookNLP(
         "en",
