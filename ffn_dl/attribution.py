@@ -865,6 +865,7 @@ def _get_booknlp_model(model_size: str):
     _patch_booknlp_state_dict()
     _patch_booknlp_text_encoding()
     from booknlp.booknlp import BookNLP
+    logger.info("BookNLP: constructing model (size=%s)", model_size)
     model = BookNLP(
         "en",
         {
@@ -872,6 +873,7 @@ def _get_booknlp_model(model_size: str):
             "model": model_size,
         },
     )
+    logger.info("BookNLP: model construction complete")
     _booknlp_cache[model_size] = model
     return model
 
@@ -910,7 +912,9 @@ def _refine_with_booknlp(segments, full_text, model_size="small"):
     tmp = Path(tempfile.mkdtemp(prefix="ffn-booknlp-"))
     infile = tmp / "book.txt"
     infile.write_text(full_text, encoding="utf-8")
+    logger.info("BookNLP: processing %d chars (output dir %s)", len(full_text), tmp)
     model.process(str(infile), str(tmp), "book")
+    logger.info("BookNLP: process() returned")
 
     # Token offsets → character offsets
     tokens_file = tmp / "book.tokens"

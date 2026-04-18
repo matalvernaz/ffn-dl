@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.13.1 — 2026-04-18
+
+### Fix
+
+- **BookNLP attribution now logs progress markers around model
+  construction and ``process()``.** The constructor's tail (loading
+  ~1.2 GB of ``.model`` weights into PyTorch) and the inference pass
+  itself were previously invisible in the file log, since BookNLP
+  uses ``print()`` + ``tqdm`` and the GUI Windows build has no
+  attached console. A run that took 5–15 min on Windows CPU looked
+  identical to a real hang. We now emit ``BookNLP: constructing
+  model``, ``model construction complete``, ``processing N chars``,
+  and ``process() returned`` so the log shows where time is being
+  spent and a true hang can be distinguished from slow inference.
+
 ## 1.13.0 — 2026-04-18
 
 ### Change
