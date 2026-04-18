@@ -558,6 +558,150 @@ _booknlp_state_dict_patched = False
 _booknlp_text_encoding_patched = False
 
 
+# BookNLP's own downloader (urllib.request.urlretrieve inside
+# english_booknlp.py) writes straight to the target path with no
+# timeout, no resume, no size check. A partial file — e.g. a
+# half-downloaded 446 MB coref model — looks "present" to its
+# ``if not Path(...).is_file()`` guard and later crashes torch.load
+# with an unexpected-EOF zip error. We size-verify every file and
+# fetch missing/short ones ourselves before letting BookNLP init,
+# so its guard skips the broken downloader entirely.
+#
+# Sizes below are the authoritative Content-Length values from
+# people.ischool.berkeley.edu (Last-Modified 2021-11; files have not
+# been re-issued since). Update if BookNLP ever ships new weights.
+_BOOKNLP_URL_BASE = (
+    "https://people.ischool.berkeley.edu/~dbamman/booknlp_models/"
+)
+_BOOKNLP_MODELS: dict[str, list[tuple[str, int]]] = {
+    "small": [
+        ("entities_google_bert_uncased_L-4_H-256_A-4-v1.0.model", 61_979_735),
+        ("coref_google_bert_uncased_L-2_H-256_A-4-v1.0.model", 40_831_851),
+        ("speaker_google_bert_uncased_L-8_H-256_A-4-v1.0.1.model", 57_586_985),
+    ],
+    "big": [
+        ("entities_google_bert_uncased_L-6_H-768_A-12-v1.0.model", 311_346_637),
+        ("coref_google_bert_uncased_L-12_H-768_A-12-v1.0.model", 446_250_373),
+        ("speaker_google_bert_uncased_L-12_H-768_A-12-v1.0.1.model", 438_641_129),
+    ],
+}
+
+
+def _booknlp_model_dir():
+    from pathlib import Path
+    return Path.home() / "booknlp_models"
+
+
+def _download_booknlp_file(url, dest, expected_size):
+    """Resumable download with size verification. Writes to
+    ``<dest>.part`` and renames atomically on a size match. The server
+    supports ``Range`` (accept-ranges: bytes), so a network blip
+    resumes from the last byte on disk instead of restarting. Retries
+    three times before giving up."""
+    import urllib.error
+    import urllib.request
+    from pathlib import Path
+
+    part = Path(str(dest) + ".part")
+    chunk = 1 << 20  # 1 MiB
+
+    for attempt in range(3):
+        start = part.stat().st_size if part.exists() else 0
+        if start > expected_size:
+            # Over-long partial — must have been from a different file
+            # or a corrupted append. Start fresh.
+            part.unlink()
+            start = 0
+
+        if start == expected_size:
+            part.rename(dest)
+            logger.info("BookNLP: %s already complete", dest.name)
+            return
+
+        logger.info(
+            "BookNLP: downloading %s (%d/%d bytes, attempt %d/3)",
+            dest.name, start, expected_size, attempt + 1,
+        )
+
+        try:
+            req = urllib.request.Request(url)
+            if start:
+                req.add_header("Range", f"bytes={start}-")
+
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                # Server ignored Range (status 200 instead of 206) —
+                # discard and restart from zero.
+                if start and resp.status == 200:
+                    start = 0
+                    part.unlink(missing_ok=True)
+
+                mode = "ab" if start else "wb"
+                bytes_so_far = start
+                next_log = start + 50_000_000
+                with open(part, mode) as f:
+                    while True:
+                        buf = resp.read(chunk)
+                        if not buf:
+                            break
+                        f.write(buf)
+                        bytes_so_far += len(buf)
+                        if bytes_so_far >= next_log:
+                            logger.info(
+                                "BookNLP: %s %.0f%% (%d/%d)",
+                                dest.name,
+                                100 * bytes_so_far / expected_size,
+                                bytes_so_far, expected_size,
+                            )
+                            next_log += 50_000_000
+
+            actual = part.stat().st_size
+            if actual == expected_size:
+                part.rename(dest)
+                logger.info("BookNLP: downloaded %s", dest.name)
+                return
+
+            logger.warning(
+                "BookNLP: %s size %d != expected %d; retrying",
+                dest.name, actual, expected_size,
+            )
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            logger.warning(
+                "BookNLP: %s download interrupted (%s); will retry",
+                dest.name, exc,
+            )
+
+    raise RuntimeError(
+        f"Failed to download BookNLP model {dest.name} after 3 attempts."
+    )
+
+
+def _ensure_booknlp_models(model_size: str) -> None:
+    """Size-verify BookNLP's per-size model files and (re)download any
+    that are missing or truncated. Runs before ``BookNLP(...)`` because
+    its built-in downloader treats any existing file as complete — a
+    partial file slips past the guard and hangs/crashes torch.load."""
+    if model_size not in _BOOKNLP_MODELS:
+        return
+
+    model_dir = _booknlp_model_dir()
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    for fname, expected_size in _BOOKNLP_MODELS[model_size]:
+        target = model_dir / fname
+        if target.exists() and target.stat().st_size == expected_size:
+            continue
+        if target.exists():
+            actual = target.stat().st_size
+            logger.warning(
+                "BookNLP: %s is %d/%d bytes; deleting and re-downloading",
+                fname, actual, expected_size,
+            )
+            target.unlink()
+        _download_booknlp_file(
+            _BOOKNLP_URL_BASE + fname, target, expected_size,
+        )
+
+
 def _basename_any_sep(s: str) -> str:
     """Strip any directory prefix using either ``/`` or ``\\`` as a
     separator, regardless of the host OS. ``os.path.basename`` on POSIX
@@ -716,6 +860,7 @@ def _patch_booknlp_text_encoding() -> None:
 def _get_booknlp_model(model_size: str):
     if model_size in _booknlp_cache:
         return _booknlp_cache[model_size]
+    _ensure_booknlp_models(model_size)
     _patch_booknlp_windows_paths()
     _patch_booknlp_state_dict()
     _patch_booknlp_text_encoding()

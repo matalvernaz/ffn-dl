@@ -168,6 +168,60 @@ def test_default_size_booknlp_is_small():
     assert attribution.default_size("booknlp") == "small"
 
 
+# ── BookNLP model manifest / resumable downloader ─────────────────
+
+
+def test_booknlp_model_manifest_shape():
+    """The manifest is consulted to validate on-disk files before
+    BookNLP's own broken downloader runs; sizes must be stable ints."""
+    assert set(attribution._BOOKNLP_MODELS.keys()) == {"small", "big"}
+    for size, files in attribution._BOOKNLP_MODELS.items():
+        assert len(files) == 3, f"{size} should list 3 model files"
+        for fname, nbytes in files:
+            assert fname.endswith(".model")
+            assert isinstance(nbytes, int) and nbytes > 0
+
+
+def test_ensure_booknlp_models_skips_complete_files(monkeypatch, tmp_path):
+    """If every expected file is already on disk at the right size,
+    we must not re-download."""
+    monkeypatch.setattr(attribution, "_booknlp_model_dir", lambda: tmp_path)
+    for fname, size in attribution._BOOKNLP_MODELS["small"]:
+        (tmp_path / fname).write_bytes(b"\0" * size)
+
+    called = []
+    monkeypatch.setattr(
+        attribution, "_download_booknlp_file",
+        lambda *a, **k: called.append(a),
+    )
+    attribution._ensure_booknlp_models("small")
+    assert called == []
+
+
+def test_ensure_booknlp_models_redownloads_short_file(monkeypatch, tmp_path):
+    """A truncated file (matches BookNLP's ``is_file()`` guard but is
+    smaller than Content-Length) must be deleted and re-fetched — this
+    is the exact hang scenario we're defending against."""
+    monkeypatch.setattr(attribution, "_booknlp_model_dir", lambda: tmp_path)
+    manifest = attribution._BOOKNLP_MODELS["small"]
+    # First file truncated to half its expected size.
+    short_name, short_size = manifest[0]
+    (tmp_path / short_name).write_bytes(b"\0" * (short_size // 2))
+    # Second and third fully present.
+    for fname, size in manifest[1:]:
+        (tmp_path / fname).write_bytes(b"\0" * size)
+
+    called = []
+
+    def fake_download(url, dest, expected_size):
+        called.append((dest.name, expected_size))
+        dest.write_bytes(b"\0" * expected_size)
+
+    monkeypatch.setattr(attribution, "_download_booknlp_file", fake_download)
+    attribution._ensure_booknlp_models("small")
+    assert called == [(short_name, short_size)]
+
+
 def test_default_size_no_variants_returns_none():
     assert attribution.default_size("builtin") is None
     assert attribution.default_size("fastcoref") is None

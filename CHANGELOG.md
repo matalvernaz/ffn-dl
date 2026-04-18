@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.12.12 — 2026-04-18
+
+### Fix
+
+- **BookNLP model downloads no longer hang on a truncated file.**
+  Upstream BookNLP fetches its model weights via
+  ``urllib.request.urlretrieve`` with no timeout, no resume, no size
+  verification, and no atomic rename — so a mid-download
+  interruption leaves a short file at the target path that its
+  ``is_file()`` guard then accepts as "complete", causing torch.load
+  to fail (or, on a stalled socket, the process hangs indefinitely
+  with no progress). We now pre-populate
+  ``~/booknlp_models/`` ourselves with a size-verified, resumable
+  downloader (HTTP ``Range`` requests into ``<file>.part``, atomic
+  rename on a Content-Length match, 60s socket timeout, 3 retries).
+  BookNLP's guard then sees complete files and skips its broken
+  downloader entirely. Logs show per-file progress every ~50 MB.
+
 ## 1.12.11 — 2026-04-18
 
 ### Change
