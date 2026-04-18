@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.10.5 — 2026-04-17
+
+### Fix
+
+- **Auto-updater still left users on the old version after 1.10.2.**
+  The batch helper waited on the parent PID with `tasklist` (the
+  1.10.2 fix) but used `timeout /t 1 /nobreak` between polls. The
+  batch is spawned DETACHED, so its cmd.exe has no console, and
+  `timeout` needs a console input handle even with /nobreak — it
+  fails immediately with "ERROR: Input redirection is not supported,
+  exiting the process immediately." The wait loop spun through all
+  120 iterations in a few seconds while ffn-dl.exe was still alive,
+  hit the `:giveup` branch, and exited without copying the new files
+  or relaunching. Swapped `timeout` for `ping -n 2 127.0.0.1 >nul`,
+  which doesn't depend on a console and is the canonical detached-
+  batch sleep.
+
 ## 1.10.4 — 2026-04-17
 
 ### Change

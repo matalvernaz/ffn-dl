@@ -185,6 +185,15 @@ def _write_updater_batch(
     poll ``tasklist`` for the parent PID instead — the image-section
     lock is dropped in the same kernel path that tears the process
     record down, so "PID gone" is a sound proxy for "files writable."
+
+    We sleep with ``ping`` rather than ``timeout``: this batch is
+    spawned DETACHED (no console), and ``timeout`` needs a console
+    input handle — it fails with "ERROR: Input redirection is not
+    supported, exiting the process immediately" even with /nobreak.
+    Previously that made the wait loop spin through 120 iterations in
+    a few seconds while the parent was still alive, giving up before
+    the exe's lock was ever released. ``ping 127.0.0.1`` has no such
+    dependency.
     """
     xd = " ".join(f'"{install_dir / d}"' for d in _USER_DATA_DIRS)
     # settings.ini lives at the top level — robocopy's /XF excludes files by name.
@@ -203,12 +212,12 @@ set /a tries+=1
 if %tries% GTR 120 goto :giveup
 tasklist /FI "PID eq %PID%" /NH 2>nul | find "%PID%" >nul
 if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
+    ping -n 2 127.0.0.1 >nul
     goto :waitloop
 )
 rem Give the kernel a moment to tear down the image section after
 rem the process record is gone; robocopy's own retries cover the rest.
-timeout /t 1 /nobreak >nul
+ping -n 2 127.0.0.1 >nul
 
 rem Copy new files over the install, preserving user data.
 robocopy "%NEW%" "%INSTALL%" /E /IS /IT /R:30 /W:1 /NFL /NDL /NJH /NJS /NP /XD {xd} /XF {xf} >nul
