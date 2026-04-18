@@ -1458,11 +1458,13 @@ def build_m4b(chapter_files, story, output_path, cover_path=None):
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="ffn-m4b-"))
 
-    # Build ffmpeg concat list
+    # Build ffmpeg concat list. Paths must be absolute: ffmpeg resolves
+    # `file` entries relative to the list file's own directory, so a bare
+    # "ch_0001.mp3" here would be looked up inside tmp_dir.
     list_file = tmp_dir / "chapters.txt"
     with open(list_file, "w") as f:
         for cf in chapter_files:
-            f.write(f"file '{cf}'\n")
+            f.write(f"file '{Path(cf).resolve()}'\n")
 
     # First pass: merge all MP3s into one
     merged = tmp_dir / "merged.mp3"
