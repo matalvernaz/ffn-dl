@@ -44,7 +44,7 @@ def _find_tool(name):
             return str(bundled)
     return shutil.which(name) or name
 
-from .exporters import html_to_text
+from .exporters import html_to_text, strip_note_paragraphs
 from .models import Story
 
 logger = logging.getLogger(__name__)
@@ -249,10 +249,13 @@ _SPEECH_VERBS = {
 class Segment:
     """A piece of text to be spoken."""
 
-    def __init__(self, text, speaker=None, emotion=None):
-        self.text = text.strip()
+    def __init__(self, text, speaker=None, emotion=None, scene_break=False):
+        self.text = "" if scene_break else text.strip()
         self.speaker = speaker  # None = narrator
         self.emotion = emotion  # SSML style name or None
+        # Marker segments don't carry audio of their own — the chapter
+        # stitcher substitutes a longer silence clip at their position.
+        self.scene_break = scene_break
 
 
 _PRONOUNS = {"he", "she", "they", "it"}
@@ -1226,10 +1229,14 @@ def _merge_small_segments(segments, min_len=30):
     # Pass 1: merge adjacent narration
     merged = []
     for seg in segments:
+        if seg.scene_break:
+            merged.append(seg)
+            continue
         if not seg.text:
             continue
         if (
             merged
+            and not merged[-1].scene_break
             and seg.speaker is None
             and merged[-1].speaker is None
         ):
@@ -1240,9 +1247,16 @@ def _merge_small_segments(segments, min_len=30):
     # Pass 2: absorb tiny narrator fragments (< min_len) into neighbors
     cleaned = []
     for i, seg in enumerate(merged):
+        if seg.scene_break:
+            cleaned.append(seg)
+            continue
         if seg.speaker is None and len(seg.text) < min_len:
-            # Try to append to the previous narrator segment
+            # Try to append to the previous narrator segment (but not
+            # across a scene-break marker — that would glue two scenes
+            # together and lose the pause).
             for prev in reversed(cleaned):
+                if prev.scene_break:
+                    break
                 if prev.speaker is None:
                     prev.text += " " + seg.text
                     break
@@ -1252,8 +1266,12 @@ def _merge_small_segments(segments, min_len=30):
         else:
             cleaned.append(seg)
 
-    # Pass 3: drop empty / punctuation-only segments
-    return [s for s in cleaned if s.text.strip(".,;:!?-–—' \"")]
+    # Pass 3: drop empty / punctuation-only segments, but preserve
+    # scene-break markers.
+    return [
+        s for s in cleaned
+        if s.scene_break or s.text.strip(".,;:!?-–—' \"")
+    ]
 
 
 # Max concurrent edge-tts API calls per chapter
@@ -1262,6 +1280,132 @@ _TTS_CONCURRENCY = 5
 # Pause inserted between segments when the speaker changes. Makes
 # multi-voice playback sound less like a rushed relay handoff.
 _SPEAKER_CHANGE_PAUSE_MS = 400
+
+# Longer pause substituted for <hr/> scene breaks so listeners get a
+# recognisable beat between scenes instead of a synthesised "asterisk
+# asterisk asterisk".
+_SCENE_BREAK_PAUSE_MS = 1500
+
+# Sentinel placed in chapter text where a <hr/> scene break appeared.
+# Uses U+241E (SYMBOL FOR INFORMATION SEPARATOR TWO) — outside the range
+# of anything a scraper would emit, so it survives parse_segments cleanly.
+_SCENE_BREAK_MARKER = "\u241e"
+
+# Characters that can appear in a decorative scene-break line. Fanfic
+# authors invent every variation imaginable — ``---``, ``===``, ``* * *``,
+# ``~~~``, ``###``, ``oOo``, ``xXx``, ``o0o``, ``•••``, em-dash runs —
+# so the detector is permissive. Letter ornaments are limited to
+# ``oOxX0`` since those are the only letter-shaped chars routinely used
+# as dividers; broader alphabetic matches would trip on short real words.
+_SCENE_BREAK_DECO_CHARS = set(
+    "-=_~*#+.,;:!?/\\|"
+    " \t"
+    "oOxX0"
+    "•·×"
+    "★☆♦♠♥♣♢♤♡♧"
+    "‡†§❦❧✦✧❖⟡"
+    "⋆⸺⸻—–‒"
+)
+
+# A lone ellipsis paragraph is usually dramatic pause prose, not a
+# divider; excluding it avoids inserting silence for "..." beats.
+_ELLIPSIS_ONLY_RE = re.compile(r"^[\.…\s]+$")
+
+
+def _is_scene_break_line(text):
+    """Detect a line composed entirely of decorative/divider characters.
+
+    Matches ``---``, ``===``, ``* * *``, ``~~~``, ``###``, ``oOo``,
+    ``xXx``, ``o0o``, em-dash runs, and similar. Conservative on length
+    (3–40 chars after stripping) so it doesn't swallow short real prose.
+    """
+    s = text.strip()
+    if not (3 <= len(s) <= 40):
+        return False
+    if _ELLIPSIS_ONLY_RE.match(s):
+        return False
+    if not all(c in _SCENE_BREAK_DECO_CHARS for c in s):
+        return False
+    # Line contains a non-letter symbol (``---``, ``* * *``, ``###``,
+    # etc.) — unambiguously a divider.
+    if any(c not in "oOxX0 \t" for c in s):
+        return True
+    # Pure ornamental-letter line: accept only distinctive patterns —
+    # mixed case (``oOo``, ``xXx``, ``ooOoo``) or containing a digit 0
+    # (``o0o``). This avoids treating a lowercase ``ooo`` (rare prose
+    # laugh) or an uppercase ``OOO`` (rating/label) as a break.
+    has_lower = any(c in "ox" for c in s)
+    has_upper = any(c in "OX" for c in s)
+    has_zero = "0" in s
+    return (has_lower and has_upper) or has_zero
+
+
+def _normalize_scene_break_lines(text):
+    """Scan a block of text and replace any line that consists solely of
+    decorative scene-break characters with the scene-break marker."""
+    if not text:
+        return text
+    lines = text.split("\n")
+    changed = False
+    for i, line in enumerate(lines):
+        if _is_scene_break_line(line):
+            lines[i] = _SCENE_BREAK_MARKER
+            changed = True
+    return "\n".join(lines) if changed else text
+
+
+def _html_to_audiobook_text(html):
+    """HTML → plain text tuned for TTS.
+
+    Always strips paragraph-level author's notes (reading A/Ns aloud is
+    always the wrong behaviour for a listening experience), converts
+    each <hr/> to a scene-break sentinel, and normalises text-based
+    scene breaks (``---``, ``* * *``, ``oOo``, etc.) to the same marker
+    so the chapter stitcher can drop in a pause instead of synthesising
+    the divider as literal speech.
+    """
+    from bs4 import BeautifulSoup, NavigableString, Tag
+
+    cleaned = strip_note_paragraphs(html)
+    soup = BeautifulSoup(cleaned, "html.parser")
+
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+
+    parts = []
+    for child in soup.children:
+        if isinstance(child, NavigableString):
+            text = str(child).strip()
+            if not text:
+                continue
+            parts.append(_normalize_scene_break_lines(text))
+        elif isinstance(child, Tag):
+            if child.name == "hr":
+                parts.append(_SCENE_BREAK_MARKER)
+                continue
+            text = child.get_text().strip()
+            if not text:
+                continue
+            parts.append(_normalize_scene_break_lines(text))
+
+    return "\n\n".join(parts)
+
+
+def _segment_chapter_text(text):
+    """Run parse_segments over each scene of a chapter, separated by the
+    scene-break marker, and splice a scene-break Segment between scenes
+    so the audio stitcher can insert a pause."""
+    if _SCENE_BREAK_MARKER not in text:
+        return parse_segments(text)
+    out = []
+    scenes = text.split(_SCENE_BREAK_MARKER)
+    for i, scene in enumerate(scenes):
+        scene = scene.strip()
+        if scene:
+            out.extend(parse_segments(scene))
+        if i < len(scenes) - 1:
+            out.append(Segment("", scene_break=True))
+    return out
 
 
 def _make_silence_clip(tmp_dir, duration_s):
@@ -1355,48 +1499,82 @@ async def generate_chapter_audio(
     # Pre-generate a silence clip inserted at speaker boundaries so the
     # multi-voice playback isn't a breathless relay.
     silence_clip = _make_silence_clip(tmp_dir, _SPEAKER_CHANGE_PAUSE_MS / 1000)
+    # Longer clip substituted for <hr/> scene breaks so the listener
+    # actually hears a beat between scenes.
+    scene_break_clip = _make_silence_clip(tmp_dir, _SCENE_BREAK_PAUSE_MS / 1000)
 
     # Launch all segment TTS calls concurrently (bounded by semaphore),
     # preserving the speaker for each so we can detect voice changes
-    # when stitching the chapter together.
+    # when stitching the chapter together. Scene-break segments are not
+    # synthesised — they become a silence clip inserted in-place.
     tasks = []
+    plan = []  # [(kind, speaker, task_index_or_None)], preserves order
     for i, seg in enumerate(segments):
+        if seg.scene_break:
+            plan.append(("scene_break", None, None))
+            continue
         if not seg.text:
             continue
         voice = voice_mapper.get(seg.speaker, narrator) if seg.speaker else narrator
         seg_path = tmp_dir / f"seg_{i:06d}.mp3"
+        task_idx = len(tasks)
         tasks.append((i, seg_path, seg.speaker, _generate_with_semaphore(
             sem, seg, voice, seg_path, i, chapter_num, speech_rate=speech_rate,
         )))
+        plan.append(("speech", seg.speaker, task_idx))
 
     results = await asyncio.gather(*(t[3] for t in tasks))
 
-    # Collect (speaker, path) pairs for successful generations, in order.
-    ordered = [
-        (tasks[idx][2], r)
-        for idx, r in enumerate(results)
-        if r is not None
-    ]
+    # Build the ordered playback sequence, dropping failed TTS segments
+    # but keeping scene-break pauses.
+    ordered = []  # [(kind, speaker, path_or_None)]
+    for kind, speaker, task_idx in plan:
+        if kind == "scene_break":
+            if scene_break_clip is not None:
+                ordered.append(("scene_break", None, scene_break_clip))
+            continue
+        r = results[task_idx]
+        if r is not None:
+            ordered.append(("speech", speaker, r))
 
-    if not ordered:
+    # Drop leading/trailing scene-break pauses — a chapter that opens or
+    # closes on silence sounds like a bug, not a beat.
+    while ordered and ordered[0][0] == "scene_break":
+        ordered.pop(0)
+    while ordered and ordered[-1][0] == "scene_break":
+        ordered.pop()
+
+    if not any(kind == "speech" for kind, _, _ in ordered):
         return False
 
     # Merge segments into one chapter file using ffmpeg, inserting the
-    # silence clip between consecutive segments whose speakers differ.
+    # speaker-change silence clip between consecutive segments whose
+    # speakers differ, and the scene-break clip at each marker.
     list_file = tmp_dir / "segments.txt"
     with open(list_file, "w") as f:
         prev_speaker = None
         first = True
-        for speaker, sf in ordered:
+        last_was_scene_break = False
+        for kind, speaker, sf in ordered:
+            if kind == "scene_break":
+                f.write(f"file '{sf}'\n")
+                last_was_scene_break = True
+                # Don't reset prev_speaker — the scene-break pause
+                # already covers the speaker-change gap, so the first
+                # speech segment after it shouldn't get another pause
+                # stacked on top.
+                continue
             if (
                 silence_clip is not None
                 and not first
+                and not last_was_scene_break
                 and speaker != prev_speaker
             ):
                 f.write(f"file '{silence_clip}'\n")
             f.write(f"file '{sf}'\n")
             prev_speaker = speaker
             first = False
+            last_was_scene_break = False
 
     result = subprocess.run(
         [
@@ -1553,9 +1731,9 @@ def detect_voices(story, map_path=None):
     full_text = ""
     all_segments = []
     for ch in story.chapters:
-        text = html_to_text(ch.html)
+        text = _html_to_audiobook_text(ch.html)
         full_text += text + "\n"
-        all_segments.append(parse_segments(text))
+        all_segments.append(_segment_chapter_text(text))
 
     raw_char_counts = Counter()
     for segs in all_segments:
@@ -1673,18 +1851,20 @@ def generate_audiobook(
     if pronunciation_map:
         logger.info("Loaded %d pronunciation overrides", len(pronunciation_map))
 
-    # Gather full text for gender detection
+    # Gather full text for gender detection — uses the audiobook text
+    # helper so author's notes don't pollute the speaker inventory and
+    # <hr/> scene breaks become pause markers instead of literal "* * *".
     full_text = ""
     chapter_texts = []
     for ch in story.chapters:
-        text = html_to_text(ch.html)
+        text = _html_to_audiobook_text(ch.html)
         chapter_texts.append(text)
         full_text += text + "\n"
 
-    # Parse all segments to find character names
+    # Parse all segments to find character names, honouring scene breaks.
     all_segments = []
     for text in chapter_texts:
-        segs = parse_segments(text)
+        segs = _segment_chapter_text(text)
         all_segments.append(segs)
 
     # Optional neural refinement pass — replaces / augments the regex

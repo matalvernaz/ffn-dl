@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.10.3 — 2026-04-17
+
+### Fix
+
+- **Audiobook mode was reading author's notes and scene dividers
+  aloud.** The `generate_audiobook` path called `html_to_text` on
+  chapter HTML with no preprocessing — so any `<p>A/N: ...</p>` note
+  was synthesised as narration, and every `<hr/>` turned into the
+  literal string `* * *` which edge-tts reads as "asterisk asterisk
+  asterisk". The `--strip-notes` and `--hr-as-stars` CLI flags were
+  never threaded through to the audio exporter; they only affected
+  EPUB/HTML/TXT output. The audiobook pipeline now always runs
+  `strip_note_paragraphs` on each chapter (A/Ns are universally wrong
+  for a listening experience) and replaces every divider — real
+  `<hr/>` tags *and* text-based dividers like `---`, `===`, `* * *`,
+  `~~~`, `###`, `oOo`, `xXx`, `o0o`, em-dash runs, and similar — with
+  a 1.5-second silence clip inserted at the right spot in the ffmpeg
+  concat stream. Detection is permissive enough to catch the endless
+  variations fanfic authors invent ("ooOoo", "OoOoO", "•·•·•",
+  "*~*~*", "— — —") while still rejecting real short prose
+  ("Chapter 1", "Oh.", "OK", ellipses).
+
 ## 1.10.2 — 2026-04-17
 
 ### Fix
