@@ -10,7 +10,9 @@ from collections import Counter
 import pytest
 
 from ffn_dl.tts import (
+    _apply_pronunciation_map,
     _guess_gender_from_name,
+    _load_pronunciation_map,
     consolidate_speakers,
     parse_segments,
 )
@@ -221,3 +223,43 @@ def test_emotion_mapping(verb, emotion):
     text = f'"Test," Harry {verb}.'
     segs = [s for s in parse_segments(text) if s.speaker == "Harry"]
     assert segs and segs[0].emotion == emotion
+
+
+# ── pronunciation override map ─────────────────────────────────────
+
+
+def test_pronunciation_map_literal_replacement():
+    m = {"Hermione": "Her-my-oh-nee"}
+    assert _apply_pronunciation_map("Hello Hermione.", m) == "Hello Her-my-oh-nee."
+
+
+def test_pronunciation_map_longest_first():
+    """Longer keys must be applied before shorter prefixes — otherwise
+    'Hermione' would consume part of 'Hermione Granger' before the
+    multi-word replacement gets a chance."""
+    m = {"Hermione": "HER", "Hermione Granger": "HG"}
+    assert _apply_pronunciation_map("Hermione Granger", m) == "HG"
+
+
+def test_pronunciation_map_empty_map_noop():
+    assert _apply_pronunciation_map("anything", {}) == "anything"
+    assert _apply_pronunciation_map("anything", None) == "anything"
+
+
+def test_pronunciation_map_comment_keys_ignored(tmp_path):
+    p = tmp_path / "pron.json"
+    p.write_text(
+        '{"_comment": "ignore me", "Tom": "Tahm"}', encoding="utf-8"
+    )
+    loaded = _load_pronunciation_map(p)
+    assert loaded == {"Tom": "Tahm"}
+
+
+def test_pronunciation_map_bad_json_does_not_crash(tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_text("{not valid json", encoding="utf-8")
+    assert _load_pronunciation_map(p) == {}
+
+
+def test_pronunciation_map_missing_file_returns_empty(tmp_path):
+    assert _load_pronunciation_map(tmp_path / "nope.json") == {}

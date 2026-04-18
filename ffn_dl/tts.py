@@ -1220,6 +1220,64 @@ def _merge_small_segments(segments, min_len=30):
 # Max concurrent edge-tts API calls per chapter
 _TTS_CONCURRENCY = 5
 
+# Pause inserted between segments when the speaker changes. Makes
+# multi-voice playback sound less like a rushed relay handoff.
+_SPEAKER_CHANGE_PAUSE_MS = 400
+
+
+def _make_silence_clip(tmp_dir, duration_s):
+    """Generate a short silent MP3 clip matching edge-tts output format
+    (24 kHz mono MP3) so it can be concat-demuxed with -c copy."""
+    path = tmp_dir / f"silence_{int(duration_s * 1000)}ms.mp3"
+    result = subprocess.run(
+        [
+            FFMPEG, "-y",
+            "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+            "-t", f"{duration_s}",
+            "-ac", "1", "-ar", "24000",
+            "-codec:a", "libmp3lame", "-b:a", "48k",
+            str(path),
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0 or not path.exists() or path.stat().st_size == 0:
+        return None
+    return path
+
+
+def _apply_pronunciation_map(text, pron_map):
+    """Apply literal string replacements from a user pronunciation map.
+
+    Ordering: longest keys first, so "Hermione Granger" matches before
+    "Hermione". Case-sensitive by design — fanfic OC names often collide
+    with common English words when lowercased.
+    """
+    if not pron_map or not text:
+        return text
+    for key in sorted(pron_map.keys(), key=len, reverse=True):
+        if key:
+            text = text.replace(key, pron_map[key])
+    return text
+
+
+def _load_pronunciation_map(path):
+    """Load a pronunciation override map from JSON. Keys starting with
+    '_' are treated as comments and filtered out. Returns empty dict on
+    any parse error so a broken map doesn't break audiobook generation.
+    """
+    try:
+        if path and Path(path).exists():
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {
+                    str(k): str(v)
+                    for k, v in data.items()
+                    if k and not str(k).startswith("_")
+                }
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Pronunciation map at %s unreadable: %s", path, exc)
+    return {}
+
 
 async def _generate_with_semaphore(sem, seg, voice, path, idx, ch_num):
     """Generate one segment with a concurrency limiter (retries up to 3 times)."""
@@ -1252,30 +1310,51 @@ async def generate_chapter_audio(segments, voice_mapper, output_path, chapter_nu
     tmp_dir = Path(tempfile.mkdtemp(prefix="ffn-tts-"))
     sem = asyncio.Semaphore(_TTS_CONCURRENCY)
 
-    # Launch all segment TTS calls concurrently (bounded by semaphore)
+    # Pre-generate a silence clip inserted at speaker boundaries so the
+    # multi-voice playback isn't a breathless relay.
+    silence_clip = _make_silence_clip(tmp_dir, _SPEAKER_CHANGE_PAUSE_MS / 1000)
+
+    # Launch all segment TTS calls concurrently (bounded by semaphore),
+    # preserving the speaker for each so we can detect voice changes
+    # when stitching the chapter together.
     tasks = []
     for i, seg in enumerate(segments):
         if not seg.text:
             continue
         voice = voice_mapper.get(seg.speaker, narrator) if seg.speaker else narrator
         seg_path = tmp_dir / f"seg_{i:06d}.mp3"
-        tasks.append((i, seg_path, _generate_with_semaphore(
+        tasks.append((i, seg_path, seg.speaker, _generate_with_semaphore(
             sem, seg, voice, seg_path, i, chapter_num
         )))
 
-    results = await asyncio.gather(*(t[2] for t in tasks))
+    results = await asyncio.gather(*(t[3] for t in tasks))
 
-    # Collect successful files in order
-    segment_files = [r for r in results if r is not None]
+    # Collect (speaker, path) pairs for successful generations, in order.
+    ordered = [
+        (tasks[idx][2], r)
+        for idx, r in enumerate(results)
+        if r is not None
+    ]
 
-    if not segment_files:
+    if not ordered:
         return False
 
-    # Merge segments into one chapter file using ffmpeg
+    # Merge segments into one chapter file using ffmpeg, inserting the
+    # silence clip between consecutive segments whose speakers differ.
     list_file = tmp_dir / "segments.txt"
     with open(list_file, "w") as f:
-        for sf in segment_files:
+        prev_speaker = None
+        first = True
+        for speaker, sf in ordered:
+            if (
+                silence_clip is not None
+                and not first
+                and speaker != prev_speaker
+            ):
+                f.write(f"file '{silence_clip}'\n")
             f.write(f"file '{sf}'\n")
+            prev_speaker = speaker
+            first = False
 
     result = subprocess.run(
         [
@@ -1517,6 +1596,25 @@ def generate_audiobook(story, output_dir, progress_callback=None, narrator_voice
     map_path = output_dir / f".ffn-voices-{story.id}.json"
     mapper = VoiceMapper(map_path)
 
+    # Pronunciation overrides — optional user-editable JSON map:
+    # {"Tom Riddle": "Tom Rid-ull", "Nym-a-dora": "Nim-fa-dora", ...}
+    # Case-sensitive literal substitution applied before TTS. Per-story
+    # so edits survive re-renders of the same audiobook.
+    pron_path = output_dir / f".ffn-pronunciations-{story.id}.json"
+    pronunciation_map = _load_pronunciation_map(pron_path)
+    if not pron_path.exists():
+        skeleton = {
+            "_comment": (
+                "Pronunciation overrides for TTS. Keys are replaced "
+                "verbatim in every segment before synthesis (case-"
+                "sensitive). Keys starting with '_' are ignored. "
+                "Example: \"Hermione\": \"Her-my-oh-nee\""
+            )
+        }
+        pron_path.write_text(json.dumps(skeleton, indent=2) + "\n", encoding="utf-8")
+    if pronunciation_map:
+        logger.info("Loaded %d pronunciation overrides", len(pronunciation_map))
+
     # Gather full text for gender detection
     full_text = ""
     chapter_texts = []
@@ -1530,6 +1628,12 @@ def generate_audiobook(story, output_dir, progress_callback=None, narrator_voice
     for text in chapter_texts:
         segs = parse_segments(text)
         all_segments.append(segs)
+
+    # Apply pronunciation overrides to every segment's text before TTS.
+    if pronunciation_map:
+        for segs in all_segments:
+            for seg in segs:
+                seg.text = _apply_pronunciation_map(seg.text, pronunciation_map)
 
     # Count character mentions across all chapters
     raw_char_counts = Counter()
