@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.11.1 — 2026-04-17
+
+### Improve
+
+- **`--strip-notes` now catches divider-bracketed author notes on FFN.**
+  The previous heuristic only matched paragraphs that started with an
+  explicit ``A/N`` / ``Author's Note`` label, which missed the common
+  FFN pattern where notes are wholly bolded paragraphs the author
+  fences off with their own text dividers (``-x-x-x-x-...``) and a
+  redundant chapter-title banner (``Chapter 1 - Title``). Added two
+  structural passes, each gated by multiple signals to keep the
+  false-positive rate low:
+
+  - **Top pass**: drops the pre-divider block only when a text /
+    ``<hr>`` divider is immediately followed by a chapter-title
+    banner AND the pre-divider content is either fully bold or
+    contains a narrow note keyword (``patreon``, ``thanks for
+    reading``, ``leave a review``, etc.). A fic that opens with a
+    flashback and a scene break (no banner after it) is left alone.
+  - **Bottom pass**: drops the final divider plus everything after
+    it only when that trailing block contains a note keyword. An
+    ``-End Chapter-`` style banner immediately before the divider is
+    pulled into the drop so the visible chapter doesn't end on it.
+
+- **`--hr-as-stars` now also visualises text-based dividers**
+  (``-x-x-x-x-...``, ``***``, ``===``, ``~~~``, etc.), not just
+  ``<hr>`` tags. Long symbol-only lines (authors often stretch them
+  to 60-80 chars) are recognised regardless of length; ornamental-
+  letter lines (``oOo`` / ``xXx``) stay capped at 40 chars and need
+  a mixed-case or zero-digit pattern to avoid tripping on short
+  words. The TTS scene-break detector got the same length-cap
+  relaxation, so audiobooks render the same dividers as silence.
+
 ## 1.11.0 — 2026-04-17
 
 ### Add

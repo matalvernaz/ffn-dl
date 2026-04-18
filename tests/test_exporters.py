@@ -78,6 +78,156 @@ class TestStripNotes:
             assert out.count("<p>") == html.count("<p>"), f"should keep: {html}"
 
 
+class TestStructuralNoteStripping:
+    """Divider-bracketed author-note detection.
+
+    Two-signal gate at the top (divider + chapter-title banner + either
+    all-bold block or note keyword); one-signal gate at the bottom
+    (divider + note keyword in the post-block). Chapters without a
+    divider, or without the corroborating signal, must pass through
+    unchanged.
+    """
+
+    def _strip(self, html):
+        from ffn_dl.exporters import strip_note_paragraphs
+        return strip_note_paragraphs(html)
+
+    def test_strips_top_block_when_all_bold_and_banner_present(self):
+        # The Kairomaru / Arch Mage pattern: fully-bold intro, then a
+        # text divider, then a ``Chapter 1 - Title`` banner, then the
+        # real prose.
+        html = (
+            "<p><strong>Hello friends!</strong></p>"
+            "<p><strong>Enjoy the chapter.</strong></p>"
+            "<p><strong>-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-</strong></p>"
+            "<p><strong>Chapter 1 - The Start</strong></p>"
+            "<p>Harry walked into the castle.</p>"
+            "<p>He looked up at the towers.</p>"
+        )
+        out = self._strip(html)
+        assert "Hello friends" not in out
+        assert "Enjoy the chapter" not in out
+        assert "Chapter 1 - The Start" not in out
+        assert "-x-x-x-" not in out
+        assert "Harry walked into the castle." in out
+
+    def test_strips_top_block_when_keyword_and_banner_present(self):
+        # Plain-text (not fully bold) note survives the prefix pass but
+        # the keyword ``patreon`` plus the banner trip the structural rule.
+        html = (
+            "<p>Welcome back! Support me on patreon for early access.</p>"
+            "<hr/>"
+            "<p>Chapter 5 - The Aftermath</p>"
+            "<p>The rain began to fall.</p>"
+        )
+        out = self._strip(html)
+        assert "patreon" not in out.lower()
+        assert "Chapter 5" not in out
+        assert "rain began to fall" in out
+
+    def test_does_not_strip_when_no_banner_after_divider(self):
+        # A fic that opens with a flashback and a horizontal rule, no
+        # chapter-title banner — must NOT be stripped.
+        html = (
+            "<p>The memory came back to her.</p>"
+            "<p>She was fifteen again.</p>"
+            "<hr/>"
+            "<p>Back in the present, she shook her head.</p>"
+        )
+        out = self._strip(html)
+        assert "memory came back" in out
+        assert "She was fifteen again" in out
+        assert "Back in the present" in out
+
+    def test_does_not_strip_when_banner_but_no_note_signal(self):
+        # Divider + banner but the pre-block is plain prose with no
+        # keyword and no full-bold styling — inconclusive, keep it.
+        html = (
+            "<p>She opened the letter with trembling hands.</p>"
+            "<hr/>"
+            "<p>Chapter 1 - First Contact</p>"
+            "<p>The next morning was bright.</p>"
+        )
+        out = self._strip(html)
+        assert "trembling hands" in out
+        assert "bright" in out
+
+    def test_strips_bottom_block_when_keyword_present(self):
+        html = (
+            "<p>Harry closed the book.</p>"
+            "<hr/>"
+            "<p>Thanks for reading! Please review and follow.</p>"
+            "<p>See you next chapter!</p>"
+        )
+        out = self._strip(html)
+        assert "closed the book" in out
+        assert "Thanks for reading" not in out
+        assert "Please review" not in out
+        assert "next chapter" not in out.lower()
+
+    def test_strips_bottom_block_including_end_banner(self):
+        # ``-End Chapter-`` banner directly before the closing divider
+        # should get pulled into the outro drop.
+        html = (
+            "<p>The door closed behind him.</p>"
+            "<p><strong>-End Chapter-</strong></p>"
+            "<p><strong>-x-x-x-x-x-x-x-x-x-x-x-x-x-</strong></p>"
+            "<p><strong>Next chapter coming soon on patreon!</strong></p>"
+        )
+        out = self._strip(html)
+        assert "door closed behind him" in out
+        assert "End Chapter" not in out
+        assert "patreon" not in out.lower()
+
+    def test_does_not_strip_bottom_without_keyword(self):
+        # Epilogue-style ending after a scene break — no note keywords,
+        # must be preserved.
+        html = (
+            "<p>The battle ended at dawn.</p>"
+            "<hr/>"
+            "<p>Three years later, she returned to the valley.</p>"
+        )
+        out = self._strip(html)
+        assert "battle ended at dawn" in out
+        assert "Three years later" in out
+
+    def test_chapter_with_no_divider_untouched_structurally(self):
+        # No divider → structural passes are no-ops. Prefix pass still
+        # runs; plain prose with no A/N marker survives intact.
+        html = (
+            "<p>First paragraph.</p>"
+            "<p>Second paragraph.</p>"
+        )
+        assert self._strip(html).count("<p>") == 2
+
+
+class TestDividerAsStars:
+    """Text-based dividers (``-x-x-x-``, long ``***`` runs) get the same
+    ``* * *`` visualisation as real ``<hr>`` tags when ``hr_as_stars``
+    is enabled."""
+
+    def test_long_x_dash_divider_converted(self):
+        long_divider = "-x-" * 25  # 75 chars — over the old 40-char cap
+        html = f"<p>Prose.</p><p>{long_divider}</p><p>More prose.</p>"
+        out = _apply_hr_as_stars(html)
+        assert long_divider not in out
+        assert "scenebreak" in out
+
+    def test_star_divider_converted(self):
+        html = "<p>Prose.</p><p>* * *</p><p>More.</p>"
+        out = _apply_hr_as_stars(html)
+        assert "scenebreak" in out
+        assert "* * *" in out  # survives as the replacement text
+
+    def test_short_prose_not_converted(self):
+        # ``Ox`` / ``OK`` / short words that happen to use divider letters
+        # must survive unchanged.
+        html = "<p>Short prose.</p><p>OK</p><p>More.</p>"
+        out = _apply_hr_as_stars(html)
+        assert "OK" in out
+        assert out.count("scenebreak") == 0
+
+
 class TestHrAsStars:
     def test_substitutes_hr_tags(self):
         out = _apply_hr_as_stars("before<hr/>middle<hr>after")

@@ -1316,20 +1316,33 @@ def _is_scene_break_line(text):
     """Detect a line composed entirely of decorative/divider characters.
 
     Matches ``---``, ``===``, ``* * *``, ``~~~``, ``###``, ``oOo``,
-    ``xXx``, ``o0o``, em-dash runs, and similar. Conservative on length
-    (3–40 chars after stripping) so it doesn't swallow short real prose.
+    ``xXx``, ``o0o``, em-dash runs, and long runs like
+    ``-x-x-x-x-x-...`` that some FFN authors stretch to 60-80
+    characters as a visual barrier.
+
+    Length handling splits by character class:
+
+    * Symbol-containing lines (anything outside ``oOxX0`` + whitespace)
+      are divider-by-construction no matter how long — real prose
+      can't consist solely of punctuation.
+    * Pure ornamental-letter lines (only ``oOxX0`` + whitespace) stay
+      capped at 40 chars and require a mixed-case or zero-digit
+      pattern, so short real words like "ox" or a rating label "OOO"
+      don't trigger.
     """
     s = text.strip()
-    if not (3 <= len(s) <= 40):
+    if len(s) < 3:
         return False
     if _ELLIPSIS_ONLY_RE.match(s):
         return False
     if not all(c in _SCENE_BREAK_DECO_CHARS for c in s):
         return False
     # Line contains a non-letter symbol (``---``, ``* * *``, ``###``,
-    # etc.) — unambiguously a divider.
+    # ``-x-x-x-``, etc.) — unambiguously a divider.
     if any(c not in "oOxX0 \t" for c in s):
         return True
+    if len(s) > 40:
+        return False
     # Pure ornamental-letter line: accept only distinctive patterns —
     # mixed case (``oOo``, ``xXx``, ``ooOoo``) or containing a digit 0
     # (``o0o``). This avoids treating a lowercase ``ooo`` (rare prose

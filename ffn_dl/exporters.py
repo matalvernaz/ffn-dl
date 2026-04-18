@@ -302,11 +302,84 @@ _HR_STARS_REPLACEMENT = (
     'style="text-align:center;margin:1em 0">* * *</div>'
 )
 
+# Characters that legitimately appear in a text scene-break line:
+# dashes, equals, tildes, asterisks, hashes, plus, punctuation, whitespace,
+# and the letter ornaments ``oOxX0`` that fanfic authors type between
+# dashes (``-x-x-x-``, ``oOoOo``). Keep in sync with ``tts._SCENE_BREAK_DECO_CHARS``.
+_SCENE_BREAK_DECO_CHARS = set(
+    "-=_~*#+.,;:!?/\\|"
+    " \t"
+    "oOxX0"
+    "•·×"
+    "★☆♦♠♥♣♢♤♡♧"
+    "‡†§❦❧✦✧❖⟡"
+    "⋆⸺⸻—–‒"
+)
+
+_ELLIPSIS_ONLY_RE = re.compile(r"^[\.…\s]+$")
+
+
+def _is_divider_text(text: str) -> bool:
+    """Detect a paragraph whose visible text is purely a scene-break
+    divider.
+
+    Accepts both short classic forms (``---``, ``***``, ``* * *``,
+    ``oOo``) and the long run forms common on FFN (``-x-x-x-x-...``
+    of 30, 60, 80+ chars). Conservative on ornamental-letter lines
+    (``oOo`` / ``xXx``) so short words like ``ox`` don't trip it.
+    """
+    s = (text or "").strip()
+    if len(s) < 3:
+        return False
+    if _ELLIPSIS_ONLY_RE.match(s):
+        return False
+    if not all(c in _SCENE_BREAK_DECO_CHARS for c in s):
+        return False
+    # Line contains at least one non-letter deco char (``-``, ``=``, ``*``,
+    # ``#``, ``~``, ``.``, ``•``, etc.) — unambiguously a divider no matter
+    # how long; real prose can't consist only of these.
+    if any(c not in "oOxX0 \t" for c in s):
+        # Long but still meaningful: even a 200-char run of ``-x-x-x-`` is
+        # obviously a divider — authors don't type 200 chars of symbols
+        # as prose.
+        return True
+    # Pure ornamental-letter line (only oOxX0 + whitespace): cap length
+    # and require distinctive patterning so we don't eat "oO" or "OxO"
+    # mid-prose.
+    if len(s) > 40:
+        return False
+    has_lower = any(c in "ox" for c in s)
+    has_upper = any(c in "OX" for c in s)
+    has_zero = "0" in s
+    return (has_lower and has_upper) or has_zero
+
 
 def _apply_hr_as_stars(html: str) -> str:
-    """Replace <hr> tags with a centred '* * *' divider for readers whose
-    stylesheet renders rules as a thin line that's easy to miss."""
-    return _HR_RE.sub(_HR_STARS_REPLACEMENT, html)
+    """Replace scene-break dividers with a centred ``* * *`` divider so
+    readers whose stylesheet renders rules as a thin line don't miss
+    them. Covers both ``<hr>`` tags and paragraph-level text dividers
+    like ``-x-x-x-...`` or ``***`` that authors type in lieu of an
+    actual horizontal rule."""
+    from bs4 import BeautifulSoup
+
+    # First pass: plain ``<hr>`` tags via fast regex — bs4 is expensive
+    # and many chapters have no text dividers at all.
+    html = _HR_RE.sub(_HR_STARS_REPLACEMENT, html)
+    # Second pass: text-divider paragraphs. Only parse with bs4 when the
+    # chapter has at least one short-ish paragraph that might be a
+    # divider, keeping the common case cheap.
+    if "<p" not in html.lower():
+        return html
+    soup = BeautifulSoup(html, "html.parser")
+    replaced = False
+    for tag in soup.find_all(["p", "div"]):
+        text = tag.get_text(" ", strip=True)
+        if not text or not _is_divider_text(text):
+            continue
+        new = BeautifulSoup(_HR_STARS_REPLACEMENT, "html.parser")
+        tag.replace_with(new)
+        replaced = True
+    return str(soup) if replaced else html
 
 
 # Phrases that start an author's note paragraph on FFN (where notes are
@@ -328,25 +401,225 @@ _AN_MARKER_RE = re.compile(
 )
 
 
+# A paragraph the author types as a redundant chapter title inside the
+# story body — sits between the intro-note divider and the first line of
+# prose, or between the last line of prose and the outro-note divider.
+# We only use it as a *corroborating* signal, never to strip on its own.
+_TOP_BANNER_RE = re.compile(
+    r"""^\s*
+        (?:
+            chapter\s+\d+(?:\s*[-–—:.]\s*.{0,80})?   # "Chapter 1" / "Chapter 1 - Title"
+            | ch(?:\.|apter)?\s*\d+                  # "Ch 1" / "Ch. 1"
+            | prologue | epilogue
+            | part\s+\d+
+        )\s*[.!]?\s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_END_BANNER_RE = re.compile(
+    r"""^\s*[-–—\s]*
+        (?:
+            end\s*(?:of\s+)?(?:chapter|ch\.?|part|story)?
+            | fin
+            | the\s+end
+            | to\s+be\s+continued | tbc
+        )
+        [-–—\s.!]*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Phrases that almost always appear in an author's note and virtually
+# never appear in narrative prose. Multi-word where possible — single
+# words would misfire (``patron`` shows up in fantasy prose, ``review``
+# in board-meeting scenes). Kept lowercase; the checker lowercases the
+# candidate text once per block.
+_NOTE_KEYWORDS = (
+    "patreon",
+    "pat re on",          # the Kairomaru-style anti-linkify spelling
+    "ko-fi",
+    "kofi",
+    "please review",
+    "please favorite", "please favourite",
+    "please follow",
+    "leave a review",
+    "leave a comment", "drop a comment",
+    "review and", "favorite and", "favourite and",
+    "thanks for reading", "thank you for reading",
+    "hope you enjoyed", "hope you enjoy",
+    "next chapter", "next update", "until next",
+    "keep reading to find out",
+    "let me know what you think",
+    "check out my", "check out my profile", "on my profile",
+    "subscribe", "subscribers",
+    "author's note", "author note", "a/n",  # belt-and-braces: the
+    # prefix pass catches these when they *start* the paragraph, this
+    # list catches them when they're buried mid-paragraph.
+)
+
+
+def _block_has_note_keyword(items):
+    """Return True if any paragraph's text in ``items`` (a slice of the
+    top_level list produced by ``strip_note_paragraphs``) contains a
+    note keyword."""
+    for kind, node in items:
+        text = node.get_text(" ", strip=True) if kind == "tag" else str(node)
+        if not text:
+            continue
+        lower = text.lower()
+        if any(kw in lower for kw in _NOTE_KEYWORDS):
+            return True
+    return False
+
+
+def _is_fully_bold(tag):
+    """True if every visible text node inside ``tag`` has a ``<strong>``
+    or ``<b>`` ancestor *within* the tag. Authors who fence their notes
+    with dividers almost always bold the entire note for emphasis; real
+    prose mixes bold words into plain text, so bare-text presence is a
+    strong negative signal.
+    """
+    bold_names = {"strong", "b"}
+    saw_text = False
+    for text_node in tag.find_all(string=True):
+        s = str(text_node).strip()
+        if not s:
+            continue
+        saw_text = True
+        parent = text_node.parent
+        has_bold = False
+        while parent is not None and parent is not tag:
+            if getattr(parent, "name", None) in bold_names:
+                has_bold = True
+                break
+            parent = parent.parent
+        if not has_bold:
+            return False
+    return saw_text
+
+
+def _block_is_all_bold(items):
+    """True if every tag paragraph in ``items`` is fully bold. Bare
+    NavigableString items count against (can't be bold)."""
+    saw_tag = False
+    for kind, node in items:
+        if kind != "tag":
+            return False
+        saw_tag = True
+        if not _is_fully_bold(node):
+            return False
+    return saw_tag
+
+
 def strip_note_paragraphs(html: str) -> str:
     """Drop paragraph-level author's notes from chapter HTML.
 
-    Heuristic — matches paragraphs (or top-level divs) whose visible text
-    starts with 'A/N', "Author's Note", etc. AO3's structured notes are
-    already outside the chapter content and don't need this. FFN mingles
-    notes with story text so a pattern pass is the best we can do without
-    an LLM.
+    Three passes, each independent:
+
+    1. **Prefix pass** (conservative): paragraphs whose visible text
+       starts with ``A/N``, ``AN:``, ``Author's Note``, etc. Matches
+       only when the author explicitly labelled the paragraph.
+    2. **Top structural pass**: when the chapter has a scene-break
+       divider *and* the paragraph immediately after it is a chapter-
+       title banner (``Chapter 1 - Title``, ``Prologue``), treat the
+       content before the divider as an author-note preamble. Only
+       fires when the pre-divider block also shows a note signal —
+       either every paragraph is fully bold, or at least one
+       paragraph contains a note keyword (``patreon``, ``thanks for
+       reading``, ``leave a review``, etc.). Two-signal gate keeps
+       innocent openings (a fic that starts with a flashback ``<hr>``)
+       intact.
+    3. **Bottom structural pass**: when the last scene-break divider
+       is followed by at least one paragraph *and* that trailing
+       block contains a note keyword, drop the divider and everything
+       after it. Also pulls in a preceding ``-End Chapter-`` style
+       banner so the visible chapter doesn't end on one. Keyword-only
+       gate because outros rarely have a banner analogous to the
+       top's ``Chapter N`` signal.
+
+    Chapters without any divider go through unchanged.
     """
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "html.parser")
-    # Find top-level-ish note blocks
+
+    # Pass 1: prefix-based stripping (safe, label-only).
     for tag in soup.find_all(["p", "div", "blockquote"]):
         text = tag.get_text(" ", strip=True)
         if not text:
             continue
         if _AN_MARKER_RE.match(text):
             tag.decompose()
+
+    # Build a top-level view for the structural passes so we can index
+    # into dividers without re-scanning after deletions.
+    top_level = []
+    for ch in list(soup.children):
+        if isinstance(ch, NavigableString):
+            if ch.strip():
+                top_level.append(("text", ch))
+            continue
+        if isinstance(ch, Tag):
+            top_level.append(("tag", ch))
+
+    def _item_is_divider(item):
+        kind, node = item
+        if kind == "tag" and node.name == "hr":
+            return True
+        if kind == "tag":
+            text = node.get_text(" ", strip=True)
+            if text and _is_divider_text(text):
+                return True
+        return False
+
+    divider_indexes = [i for i, it in enumerate(top_level) if _item_is_divider(it)]
+
+    def _drop(item):
+        kind, node = item
+        if kind == "tag":
+            node.decompose()
+        else:
+            node.extract()
+
+    top_drop_end = -1  # last index the top pass consumed (-1 = untouched)
+
+    # Pass 2: top structural — needs divider + banner + note signal.
+    if divider_indexes:
+        first = divider_indexes[0]
+        banner_idx = None
+        if first + 1 < len(top_level):
+            kind, node = top_level[first + 1]
+            if kind == "tag":
+                banner_text = node.get_text(" ", strip=True)
+                if banner_text and _TOP_BANNER_RE.match(banner_text):
+                    banner_idx = first + 1
+
+        if banner_idx is not None:
+            pre = top_level[:first]
+            if pre and (
+                _block_is_all_bold(pre) or _block_has_note_keyword(pre)
+            ):
+                for item in top_level[: banner_idx + 1]:
+                    _drop(item)
+                top_drop_end = banner_idx
+
+    # Pass 3: bottom structural — needs divider + post-block note keyword.
+    if divider_indexes:
+        last = divider_indexes[-1]
+        # Skip if the top pass already consumed (or overlaps) this divider.
+        if last > top_drop_end:
+            post = top_level[last + 1:]
+            if post and _block_has_note_keyword(post):
+                outro_start = last
+                if last - 1 > top_drop_end:
+                    kind, node = top_level[last - 1]
+                    if kind == "tag":
+                        banner_text = node.get_text(" ", strip=True)
+                        if banner_text and _END_BANNER_RE.match(banner_text):
+                            outro_start = last - 1
+                for item in top_level[outro_start:]:
+                    _drop(item)
+
     return str(soup)
 
 
