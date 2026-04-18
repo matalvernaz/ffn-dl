@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.9.0 — 2026-04-17
+
+### Audiobook — major overhaul
+
+- **Character names are no longer stripped from audiobook narration**.
+  Previously the TTS pipeline consumed "Harry said" after a quote so
+  only Harry's voice would read the line. That meant each character
+  had a unique voice but no way for a listener to tell who was
+  speaking. The narrator now reads attribution text aloud
+  ("Harry said") while the character voice handles the quoted line —
+  exactly how a regular audiobook sounds.
+- **Much better speaker attribution**, driven by a stress-test pass
+  that found 11 distinct categories of bugs:
+  - Titled camelcase surnames ("Professor McGonagall") are detected
+    as a single speaker instead of being split or lost entirely.
+  - Question words ("Where", "Why", "Who", "Which", "Whom") no
+    longer leak into the speaker list.
+  - Pronoun resolution is gender-aware — "he muttered" after
+    "Hermione called" now resolves to the nearest male character
+    rather than picking the most recent name regardless of gender.
+  - Pre-dialogue action attribution ("Ron looked up. 'Trouble?'")
+    is now recognized as Ron speaking.
+  - "paused", "hesitated", "stopped" are treated as dialogue-
+    adjacent verbs so interrupted speech stays attributed.
+  - Back-and-forth unattributed dialogue alternates between the
+    two most recent speakers instead of sticking to one voice.
+  - Unattributed dialogue is read with quote marks preserved so
+    the narrator voice renders it with dialogue intonation rather
+    than sounding like exposition.
+  - "Mr. Dumbledore" and "Mr Dumbledore" merge into a single
+    speaker instead of getting two different voices.
+  - Carry-forward extended to longer narration gaps when no other
+    named character breaks in.
+- **Speech rate control**. New spinbox in the GUI (shown only for
+  audio format) and `--speech-rate PCT` flag for the CLI. Integer
+  percent delta applied to every synthesis call; combines additively
+  with emotion-driven rate shifts so a shout stays a shout at +30%.
+- **Inter-speaker pauses**. A 400 ms silence clip is inserted at
+  every voice change so multi-character scenes stop sounding like
+  a relay handoff.
+- **Per-story pronunciation overrides**. An editable JSON file
+  `.ffn-pronunciations-<id>.json` in the audiobook output folder
+  lets you respell names and invented words that edge-tts mangles.
+  First run writes a skeleton file with instructions.
+- **Optional neural attribution backends**. A new module ships
+  with registry-driven support for alternative attribution models:
+  - **fastcoref** (~90 MB, via `pip install fastcoref`) remaps
+    pronoun-attributed lines to the correct named character using
+    neural coreference.
+  - **BookNLP** (~150 MB small / ~1 GB big, via `pip install
+    booknlp`) replaces attribution with Bamman et al.'s full
+    quote + coref pipeline — most accurate on long works.
+  - Selected in the GUI (dropdown + background pip install) or
+    via `--attribution {builtin,fastcoref,booknlp}`. Install with
+    `ffn-dl --install-attribution BACKEND`.
+  - Missing or failing backends silently fall back to the built-in
+    parser — audiobook renders never crash on a missing dep.
+- **Model size selector** for backends that offer size variants.
+  BookNLP exposes Small and Big; the GUI shows a secondary
+  dropdown next to the backend choice when relevant, hidden
+  otherwise.
+
 ## 1.8.5 — 2026-04-17
 
 ### Fix
