@@ -94,8 +94,12 @@ def test_setup_env_creates_standard_subdirs(monkeypatch, tmp_path):
     monkeypatch.setattr(portable, "is_frozen", lambda: True)
     monkeypatch.setattr(portable, "_exe_dir", lambda: tmp_path)
     portable.setup_env()
-    for sub in ("cache", "neural", "booknlp_models"):
+    for sub in ("cache", "neural"):
         assert (tmp_path / sub).is_dir()
+    # booknlp_models is intentionally NOT pre-created — BookNLP makes
+    # it on first download so users who never run neural attribution
+    # don't end up with a mystery empty folder.
+    assert not (tmp_path / "booknlp_models").exists()
 
 
 def test_setup_env_is_idempotent(monkeypatch, tmp_path):

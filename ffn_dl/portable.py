@@ -121,8 +121,11 @@ def setup_env() -> None:
         return
     root = portable_root()
     # Always ensure the core subdirs exist — cheap and makes the folder
-    # self-explanatory when the user browses into it.
-    for sub in ("cache", "neural", "booknlp_models"):
+    # self-explanatory when the user browses into it. booknlp_models is
+    # omitted: BookNLP creates it itself on first download, and pre-
+    # creating leaves an empty folder for users who never run neural
+    # attribution.
+    for sub in ("cache", "neural"):
         (root / sub).mkdir(parents=True, exist_ok=True)
 
     if is_frozen():
