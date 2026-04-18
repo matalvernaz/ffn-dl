@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.12.11 — 2026-04-18
+
+### Change
+
+- **FFN downloads now use a steady 6s/chapter delay instead of
+  bursting 20 chapters then pausing ~60s.** The old chunk-pause
+  pattern matched what Cloudflare's bot-detection actually flags —
+  fast bursts followed by long silences. FanFicFare's proven default
+  (`slow_down_sleep_time: 6` in its defaults.ini for
+  www.fanfiction.net, applied to every request) is what we now match:
+  a uniform per-chapter pace. Downloads take roughly the same wall
+  time but run continuously, and AIMD still doubles the delay up to
+  60s if a 429/503 slips through. `--chunk-size N` still works for
+  users who want the old behavior.
+
 ## 1.12.10 — 2026-04-18
 
 ### Fix

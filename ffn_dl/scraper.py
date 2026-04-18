@@ -471,14 +471,14 @@ class FFNScraper(BaseScraper):
     site_name = "ffn"
 
     def __init__(self, **kwargs):
-        # FFN rate-limits aggressively on bulk chapter fetches. FicLab's
-        # long-running heuristic of ~20 chapters followed by a ~60s pause
-        # avoids tripping captchas on multi-hundred-chapter fics.
-        kwargs.setdefault("chunk_size", 20)
-        # FFN has Cloudflare + bulk-captcha; start at a known-safe 2s
-        # floor rather than eating a 429 to learn what we already know.
-        kwargs.setdefault("delay_floor", 2.0)
-        kwargs.setdefault("delay_start", 2.0)
+        # Match FanFicFare's defaults.ini for www.fanfiction.net:
+        # `slow_down_sleep_time: 6` applied to every request, jittered.
+        # A steady ~6s/chapter is what's been proven safe against
+        # Cloudflare for 10+ years; the old "fast-burst then 60s pause"
+        # pattern is closer to what bot-detection actually flags.
+        kwargs.setdefault("chunk_size", 0)
+        kwargs.setdefault("delay_floor", 6.0)
+        kwargs.setdefault("delay_start", 6.0)
         super().__init__(**kwargs)
 
     def _check_for_blocks(self, html):

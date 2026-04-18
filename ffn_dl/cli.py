@@ -1117,7 +1117,7 @@ def main(argv=None):
         metavar="N",
         help=(
             "Pause ~60s after every N chapter fetches "
-            "(default: 20 on FFN, disabled on FicWad). "
+            "(default: disabled — FFN now uses a steady 6s/chapter). "
             "Use 0 to disable."
         ),
     )
