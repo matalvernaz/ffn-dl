@@ -315,9 +315,14 @@ class BaseScraper:
         if not self.use_cache:
             return None
         path = self._story_cache_dir(story_id) / "meta.json"
-        if path.exists():
+        if not path.exists():
+            return None
+        try:
             return json.loads(path.read_text(encoding="utf-8"))
-        return None
+        except (ValueError, UnicodeDecodeError, OSError) as exc:
+            logger.warning("Corrupt meta cache %s (%s); will refetch", path, exc)
+            path.unlink(missing_ok=True)
+            return None
 
     def _save_chapter_cache(self, story_id, chapter):
         if not self.use_cache:
@@ -332,10 +337,15 @@ class BaseScraper:
         if not self.use_cache:
             return None
         path = self._story_cache_dir(story_id) / f"ch_{chap_num:04d}.html"
-        if path.exists():
+        if not path.exists():
+            return None
+        try:
             data = json.loads(path.read_text(encoding="utf-8"))
             return Chapter(number=chap_num, title=data["title"], html=data["html"])
-        return None
+        except (ValueError, UnicodeDecodeError, OSError, KeyError) as exc:
+            logger.warning("Corrupt chapter cache %s (%s); will refetch", path, exc)
+            path.unlink(missing_ok=True)
+            return None
 
     def clean_cache(self, story_id):
         if not self.use_cache:

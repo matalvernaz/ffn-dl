@@ -96,9 +96,17 @@ class LiteroticaScraper(BaseScraper):
 
     @staticmethod
     def _intro_div(soup):
-        return soup.find(
-            "div", class_=re.compile(r"^_introduction__text_")
-        )
+        """The summary/blurb. Literotica's current layout has no standalone
+        intro div — the old `_introduction__text_` class is now where the
+        story body lives. Fall back to the meta description tag, which
+        the site still populates with the author-written blurb."""
+        m = soup.find("meta", attrs={"name": "description"})
+        if m and m.get("content"):
+            return m
+        m = soup.find("meta", attrs={"property": "og:description"})
+        if m and m.get("content"):
+            return m
+        return None
 
     @staticmethod
     def _page_count(soup):
@@ -140,7 +148,12 @@ class LiteroticaScraper(BaseScraper):
         author, author_url = self._parse_author(soup)
 
         intro = self._intro_div(soup)
-        summary = intro.get_text(" ", strip=True) if intro else ""
+        if intro is None:
+            summary = ""
+        elif intro.name == "meta":
+            summary = (intro.get("content") or "").strip()
+        else:
+            summary = intro.get_text(" ", strip=True)
 
         num_pages = self._page_count(soup)
 
@@ -297,7 +310,7 @@ class LiteroticaScraper(BaseScraper):
 
         chrome_prefixes = (
             "_widget", "_pager", "_pagination",
-            "_share", "_tags", "_introduction",
+            "_share", "_tags",
             "_rating", "_comments",
         )
 
