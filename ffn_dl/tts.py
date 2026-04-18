@@ -2549,6 +2549,13 @@ def generate_audiobook(
                 _attr_cache_root(),
             )
 
+    # Backend-agnostic post-attribution refinement — runs on both
+    # builtin and neural output (including cache-loaded segments), so
+    # rebuilding audio from an existing attribution cache still picks
+    # up the latest self-intro / junk-speaker passes.
+    from . import attribution as _post_attribution
+    _post_attribution.post_refine(all_segments)
+
     # Apply pronunciation overrides to every segment's text before TTS.
     if pronunciation_map:
         for segs in all_segments:

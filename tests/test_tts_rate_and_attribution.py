@@ -165,6 +165,122 @@ def test_has_failed_reports_runtime_exception(monkeypatch):
     assert attribution.has_failed("fastcoref")
 
 
+# ── post-attribution self-intro & junk-speaker passes ─────────────
+
+
+def test_self_intro_reassigns_carryforward_speaker():
+    """The "I'm Ron, by the way, Ron Weasley." pattern — carryforward
+    from the previous speaker is replaced by the name inside the quote
+    when that name shows up elsewhere as a confirmed speaker."""
+    # Ron must appear as a confirmed speaker (count >= 2) for the
+    # validator to trust the single-token self-intro path.
+    chapter = [
+        Segment("I'm Ron, by the way, Ron Weasley.", speaker="Harry"),
+        Segment("Harry replied and smiled."),
+        Segment("Hmmm...", speaker="Ron"),
+        Segment("Yeah, sure thing.", speaker="Ron"),
+    ]
+    attribution.post_refine([chapter])
+    assert chapter[0].speaker == "Ron"
+
+
+def test_self_intro_does_not_overwrite_distinct_speaker():
+    """A line whose speaker differs from the previous segment's
+    speaker was explicitly attributed by the backend — leave it."""
+    chapter = [
+        Segment("I'm Ron.", speaker="Ron"),
+        Segment("Nice to meet you.", speaker="Harry"),
+        # "I am Sirius", but speaker is Draco (already distinct) — the
+        # guard should skip this since the backend deliberately picked
+        # a different speaker. We don't second-guess them.
+        Segment("I am Sirius, though.", speaker="Draco"),
+        Segment("And I.", speaker="Sirius"),
+        Segment("Another.", speaker="Sirius"),
+    ]
+    attribution.post_refine([chapter])
+    assert chapter[2].speaker == "Draco"
+
+
+def test_self_intro_rejects_common_adjective_after_im():
+    """'I'm Sorry' / 'I'm Cold' must not hijack attribution even on a
+    carryforward — neither is a confirmed speaker in the book."""
+    chapter = [
+        Segment("I'm sorry,", speaker="Harry"),  # lowercase "sorry" — won't match
+        Segment("I'm Cold.", speaker="Harry"),  # single token, not confirmed elsewhere
+        Segment("Next line.", speaker="Harry"),
+    ]
+    attribution.post_refine([chapter])
+    assert chapter[0].speaker == "Harry"
+    assert chapter[1].speaker == "Harry"
+
+
+def test_self_intro_accepts_first_last_name_without_corroboration():
+    """A full "First Last" pair is strong enough to trust even if
+    that character only speaks once. 'I'm Hermione Granger.' —
+    unmistakable even before Hermione speaks again."""
+    chapter = [
+        Segment("I'm Hermione Granger.", speaker="Harry"),
+        Segment("Harry replied."),
+    ]
+    attribution.post_refine([chapter])
+    assert chapter[0].speaker == "Hermione Granger"
+
+
+def test_my_name_is_pattern():
+    chapter = [
+        Segment("My name is Alastor Moody.", speaker="Harry"),
+        Segment("Next.", speaker="Moody"),
+        Segment("And another.", speaker="Moody"),
+    ]
+    attribution.post_refine([chapter])
+    assert chapter[0].speaker == "Alastor Moody"
+
+
+def test_call_me_pattern():
+    chapter = [
+        Segment("Call me Tom.", speaker="Ron"),
+        Segment("Tom nodded."),
+        Segment("Pleasure.", speaker="Tom"),
+        Segment("Absolutely.", speaker="Tom"),
+    ]
+    attribution.post_refine([chapter])
+    assert chapter[0].speaker == "Tom"
+
+
+def test_junk_speaker_demoted_to_narrator():
+    """'Cruciatus' appearing once as a speaker is almost certainly
+    BookNLP mis-tagging a spell name. Demote to narrator."""
+    chapter_a = [
+        Segment("Cast the spell!", speaker="Cruciatus"),
+        Segment("Harry ducked.", speaker="Harry"),
+        Segment("Follow-up.", speaker="Harry"),
+    ]
+    chapter_b = [Segment("Next.", speaker="Harry")]
+    attribution.post_refine([chapter_a, chapter_b])
+    assert chapter_a[0].speaker is None
+
+
+def test_junk_speaker_kept_when_recurring():
+    """Demotion only fires on single-occurrence junk tokens.
+    If 'Wizard' somehow spoke twice — implausible in normal fic but
+    we stay conservative — don't touch them."""
+    chapter = [
+        Segment("Line one.", speaker="Wizard"),
+        Segment("Line two.", speaker="Wizard"),
+    ]
+    attribution.post_refine([chapter])
+    assert chapter[0].speaker == "Wizard"
+    assert chapter[1].speaker == "Wizard"
+
+
+def test_junk_filter_ignores_multi_word_names():
+    """'Captain Hook' is a two-word name — the junk list is a
+    single-word case-insensitive check only."""
+    chapter = [Segment("Yaarr.", speaker="Captain Hook")]
+    attribution.post_refine([chapter])
+    assert chapter[0].speaker == "Captain Hook"
+
+
 # ── model-size variants ───────────────────────────────────────────
 
 

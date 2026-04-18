@@ -363,6 +363,235 @@ def refine_speakers(
     return segments
 
 
+# ── Post-attribution refinement ────────────────────────────────────
+#
+# These passes run on the combined per-chapter segment lists after the
+# chosen backend (builtin or neural) has attributed what it can. They
+# target two pattern classes that both backends struggle with:
+#
+# 1. *Self-introductions* — "I'm Ron, by the way, Ron Weasley." BookNLP
+#    coref can only link quotes to entities it has already seen; the
+#    first line of a new character introducing themselves therefore
+#    tends to get stuck on the previous speaker by carryforward.
+#
+# 2. *Junk speakers* from BookNLP's PROP entity detection — capitalised
+#    spell names / species / places ("Cruciatus", "Veela", "Wizard",
+#    "Barrier", "Scroll", "Unknown"…) occasionally win a quote
+#    attribution in fantasy prose. Anything single-word that only
+#    appears once in the entire book and matches our common-noun
+#    blocklist gets demoted back to narrator.
+
+
+# Common capitalised fanfic-prose nouns BookNLP sometimes mis-tags as
+# speakers. Kept lowercase; check is case-insensitive. Deliberately
+# narrow — names like "Dragon", "Phoenix", "Raven" CAN be real character
+# names (Reyna, Fleur, Percy Jackson fic, DCU fic), so the demotion only
+# fires when the speaker also appears exactly once in the whole book.
+_FANFIC_JUNK_NAMES = frozenset({
+    # Species / classifications
+    "wizard", "witch", "muggle", "squib", "goblin", "dwarf", "elf",
+    "veela", "werewolf", "vampire", "centaur", "giant", "basilisk",
+    "thestral", "nundu", "hippogriff", "niffler", "fwooper", "puffskein",
+    "metamorphmagus", "animagus", "parselmouth", "legilimens", "occlumens",
+    "pureblood", "halfblood", "mudblood", "blood-traitor",
+    "firstyear", "firstyears", "seventhyear",
+    # Roles / titles that fic capitalises
+    "hunter", "seeker", "beater", "keeper", "chaser", "captain",
+    "prefect", "prefects", "headboy", "headgirl",
+    "spellcrafter", "spellmaker", "warder", "duelist", "duelists",
+    "auror", "unspeakable", "dementor", "deatheater",
+    "champion", "champions", "professor", "professors",
+    "first-year", "first-years", "seventh-year", "seventh-years",
+    # BookNLP sentinels / generic narrative nouns
+    "unknown", "stranger", "another", "reading", "writing",
+    "password", "for", "forge", "another",
+    # Objects often capitalised in fantasy prose
+    "barrier", "scroll", "fireball", "fireballs", "portkey", "pensieve",
+    "patronus", "horcrux", "wand", "diary", "beans", "cushioning",
+    "harpoon", "lightning", "expulso", "cruciatus", "disillusionment",
+    "attraction", "principle", "aspect", "metamorphmagus",
+    # Places / institutions
+    "alley", "ministry", "beauxbatons", "durmstrang", "hogwarts",
+    "hogsmeade", "azkaban", "gringotts", "house",
+    # Short connectives the proper-noun regex sometimes grabs
+    "heir", "duelists",
+})
+
+
+_SELF_INTRO_PATTERNS = [
+    # "I'm Ron, by the way, Ron Weasley."  /  "I'm Hermione Granger"
+    re.compile(
+        r"\bI[\'\u2019]m\s+(?P<name>[A-Z][a-zA-Z\']*[a-z]"
+        r"(?:\s+[A-Z][a-zA-Z\']*[a-z])?)\b"
+    ),
+    # "I am Ron" / "I am Ron Weasley"
+    re.compile(
+        r"\bI\s+am\s+(?P<name>[A-Z][a-zA-Z\']*[a-z]"
+        r"(?:\s+[A-Z][a-zA-Z\']*[a-z])?)\b"
+    ),
+    # "My name is X" / "My name's X Y"
+    re.compile(
+        r"\bMy\s+name[\'\u2019]?s?\s+(?:is\s+)?(?P<name>"
+        r"[A-Z][a-zA-Z\']*[a-z](?:\s+[A-Z][a-zA-Z\']*[a-z])?)\b"
+    ),
+    # "The name is Ron" / "The name's Bond, James Bond"
+    re.compile(
+        r"\bThe\s+name[\'\u2019]?s?\s+(?:is\s+)?(?P<name>"
+        r"[A-Z][a-zA-Z\']*[a-z](?:\s+[A-Z][a-zA-Z\']*[a-z])?)\b"
+    ),
+    # "Call me X" / "You can call me X"
+    re.compile(
+        r"\b[Cc]all\s+me\s+(?P<name>[A-Z][a-zA-Z\']*[a-z]"
+        r"(?:\s+[A-Z][a-zA-Z\']*[a-z])?)\b"
+    ),
+    # ", by the way, Ron Weasley." — dangling self-intro appended after
+    # the main utterance. Requires at least a first name + surname to
+    # reduce the risk of over-firing on possessive "my way" phrases.
+    re.compile(
+        r",\s*by\s+the\s+way[,.\s]+(?:my\s+name[\'\u2019]?s?\s+(?:is\s+)?)?"
+        r"(?P<name>[A-Z][a-zA-Z\']*[a-z]\s+[A-Z][a-zA-Z\']*[a-z])\b"
+    ),
+]
+
+
+def _extract_self_intro_name(text: str, known_speakers: Iterable[str]):
+    """If a dialogue line contains an explicit self-introduction,
+    return the name the speaker is claiming. Validation against the
+    book-wide `known_speakers` set prevents misfires on adjective tails
+    after "I'm" ("I'm Cold", "I'm Sorry") — the name only counts when
+    it reappears elsewhere in the book as a confirmed speaker.
+    """
+    known = set(known_speakers)
+    for pat in _SELF_INTRO_PATTERNS:
+        m = pat.search(text)
+        if not m:
+            continue
+        raw = m.group("name").strip()
+        # Validate: must be a name we've seen elsewhere, OR be a two-
+        # token "First Last" pair (which is almost never a false
+        # positive even without corroboration).
+        if raw in known:
+            return raw
+        tokens = raw.split()
+        if len(tokens) == 2 and tokens[0] in known:
+            return raw
+        if len(tokens) == 2:
+            # First-and-last is strong enough to trust on its own.
+            return raw
+        # Single-token candidate that isn't in known_speakers — too
+        # risky to act on ("I'm fine", "I am Sorry" as a name, …).
+        continue
+    return None
+
+
+def _apply_self_introductions(all_segments, known_speakers):
+    """Re-attribute a segment whose text self-identifies the speaker.
+
+    Fires when the current speaker is None OR is the same as the
+    last attributed speaker (carryforward suspect) OR there is no
+    prior attribution in the chapter yet. Leaves distinct explicit
+    attributions from the backend alone so "I am Sirius, though."
+    assigned to Draco isn't rewritten to Sirius.
+
+    A token-overlap guard prevents the common short-to-long rewrite
+    ("Ron" → "Ron Weasley") from being treated as a misattribution.
+    """
+    changed = 0
+    for segs in all_segments:
+        last_attributed = None
+        for seg in segs:
+            if not seg.text:
+                continue
+            name = _extract_self_intro_name(seg.text, known_speakers)
+            if name and seg.speaker != name:
+                overlap = False
+                if seg.speaker:
+                    cur_tokens = set(seg.speaker.split())
+                    new_tokens = set(name.split())
+                    overlap = bool(cur_tokens & new_tokens)
+                if not overlap:
+                    trust_override = (
+                        seg.speaker is None
+                        or last_attributed is None
+                        or seg.speaker == last_attributed
+                    )
+                    if trust_override:
+                        seg.speaker = name
+                        changed += 1
+            if seg.speaker:
+                last_attributed = seg.speaker
+    if changed:
+        logger.info(
+            "Post-attribution: %d segment%s re-attributed via self-introduction",
+            changed, "" if changed == 1 else "s",
+        )
+    return all_segments
+
+
+def _collect_global_speaker_counts(all_segments) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for segs in all_segments:
+        for seg in segs:
+            if seg.speaker:
+                counts[seg.speaker] = counts.get(seg.speaker, 0) + 1
+    return counts
+
+
+def _filter_junk_speakers(all_segments, speaker_counts):
+    """Demote obvious BookNLP PROP mis-classifications back to narrator.
+
+    A speaker is demoted only when all of:
+    - its total count across the whole book is 1,
+    - the name is a single capitalised word,
+    - the name is in `_FANFIC_JUNK_NAMES` (case-insensitive).
+
+    The single-occurrence gate keeps legitimate rarely-speaking
+    characters whose first name collides with the junk list safe —
+    if they speak twice or more, their voice mapping stays.
+    """
+    demoted = 0
+    for segs in all_segments:
+        for seg in segs:
+            sp = seg.speaker
+            if not sp:
+                continue
+            tokens = sp.split()
+            if len(tokens) != 1:
+                continue
+            low = tokens[0].lower().rstrip(".,;:!?'\u2019")
+            if low not in _FANFIC_JUNK_NAMES:
+                continue
+            if speaker_counts.get(sp, 0) > 1:
+                continue
+            seg.speaker = None
+            demoted += 1
+    if demoted:
+        logger.info(
+            "Post-attribution: %d segment%s demoted from junk speakers",
+            demoted, "" if demoted == 1 else "s",
+        )
+    return all_segments
+
+
+def post_refine(all_segments):
+    """Run both post-attribution passes in order.
+
+    Applied after the chosen backend has finished refining every
+    chapter (or after loading the attribution cache). The passes are
+    backend-agnostic and handle patterns both parsers struggle with.
+    """
+    counts = _collect_global_speaker_counts(all_segments)
+    # A speaker counts as "known" if they appear more than once — a
+    # single random match shouldn't seed self-intro validation.
+    known = {name for name, c in counts.items() if c >= 2}
+    _apply_self_introductions(all_segments, known)
+    # Refresh counts before the junk filter — self-intro may have moved
+    # occurrences between speakers.
+    counts = _collect_global_speaker_counts(all_segments)
+    _filter_junk_speakers(all_segments, counts)
+    return all_segments
+
+
 # ── spaCy model bootstrap ──────────────────────────────────────────
 
 

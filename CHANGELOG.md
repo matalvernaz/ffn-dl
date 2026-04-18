@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.18.0 — 2026-04-18
+
+### Add
+
+- **Backend-agnostic post-attribution refinement pass.** Runs after
+  every attribution backend (builtin, BookNLP, fastcoref) and after
+  cache loads, so rebuilding audio from an existing attribution
+  cache picks up the new rules too. Two patterns are handled:
+  - **Self-introductions.** `"I'm Ron, by the way, Ron Weasley."`,
+    `"I am Hermione Granger."`, `"My name is Alastor Moody."`,
+    `"Call me Tom."`, `"…, by the way, Bond, James Bond."` —
+    when the current speaker is None, the first attributed speaker
+    in the chapter, or carryforward from the previous attributed
+    line, and the name inside the quote is a confirmed speaker
+    elsewhere in the book (or a full First-Last pair), the segment
+    is re-attributed to that name. BookNLP coref can't identify a
+    character the first time they name themselves because it only
+    links to entities it has already seen; this pass covers that
+    gap without touching distinct explicit attributions.
+  - **Junk-speaker demotion.** Single-capitalised-word speakers
+    that only occur once in the entire book AND match a narrow
+    fanfic common-noun blocklist (*Wizard*, *Dwarf*, *Veela*,
+    *Cruciatus*, *Expulso*, *Disillusionment*, *Barrier*,
+    *Scroll*, *Password*, *Ministry*, *Beauxbatons*, *Unknown*,
+    …) are demoted back to narrator. On a real 44-chapter HP fic
+    this takes BookNLP big's distinct-speaker count from 237 to
+    211 — all drops are spells, species, places, or BookNLP PROP
+    sentinels, none are real characters.
+
 ## 1.17.0 — 2026-04-18
 
 ### Fix
