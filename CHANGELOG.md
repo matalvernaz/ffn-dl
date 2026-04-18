@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.16.3 — 2026-04-18
+
+### Fix
+
+- **Chapter-audio cache write no longer crashes ffmpeg with "Invalid
+  argument".** The 1.16.0 atomic-write scheme named the in-flight
+  file `<hash>.mp3.tmp`, and ffmpeg picked its muxer from the final
+  extension — `.tmp` is unknown, so every chapter audio render
+  failed at the muxer-init step. The temp file is now
+  `<hash>.tmp.mp3`, which still gives an atomic `os.replace` swap
+  but keeps `.mp3` as the last extension so ffmpeg infers the
+  format correctly.
+
 ## 1.16.2 — 2026-04-18
 
 ### Fix

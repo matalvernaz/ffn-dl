@@ -2434,7 +2434,10 @@ def generate_audiobook(
         if body_path.exists() and body_path.stat().st_size > 0:
             cache_hits += 1
         else:
-            tmp_body = body_path.with_suffix(body_path.suffix + ".tmp")
+            # Keep the .mp3 extension last so ffmpeg can infer the output
+            # format; a trailing ".tmp" confuses the muxer with "Invalid
+            # argument". os.replace still handles the atomic swap.
+            tmp_body = body_path.with_name(body_path.stem + ".tmp" + body_path.suffix)
             success = asyncio.run(
                 generate_chapter_audio(
                     segs, mapper, tmp_body,
