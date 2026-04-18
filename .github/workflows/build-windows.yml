@@ -48,18 +48,28 @@ jobs:
         run: |
           $tag = 'v1.9.2'
           git clone --depth 1 --branch $tag https://github.com/ravibpatel/AutoUpdater.NET.git zipextractor_src
-          # The csproj targets net45, but windows-latest runners only
-          # ship targeting packs for current .NET Framework versions
-          # (4.7.2 / 4.8). Retarget to net48 — shipped with Windows 10
-          # 1803+ (May 2019), i.e. every supported Windows version.
+          # The csproj targets net45 and gates a System.IO.Compression
+          # reference on that target. windows-latest runners only ship
+          # targeting packs for current .NET Framework versions
+          # (4.7.2 / 4.8), so retarget to net48 — present on every
+          # Win10 1803+ (May 2019). Rewrite both the <TargetFramework>
+          # element and the `'net45'` literal in the conditional
+          # ItemGroup so its Reference items (System.IO.Compression,
+          # System.IO.Compression.FileSystem, System.Windows.Forms)
+          # actually resolve.
           $csproj = 'zipextractor_src/ZipExtractor/ZipExtractor.csproj'
-          (Get-Content $csproj) `
-            -replace '<TargetFramework>net45</TargetFramework>', '<TargetFramework>net48</TargetFramework>' `
-            | Set-Content $csproj
+          $text = Get-Content $csproj -Raw
+          $text = $text.Replace('<TargetFramework>net45</TargetFramework>', '<TargetFramework>net48</TargetFramework>')
+          $text = $text.Replace("'net45'", "'net48'")
+          Set-Content $csproj $text
           # /restore runs NuGet restore first — SDK-style csproj needs
           # project.assets.json generated before msbuild can resolve
-          # targets, even when the project has no PackageReferences.
-          msbuild $csproj /restore /p:Configuration=Release /v:minimal
+          # targets, even with no PackageReferences.
+          # SignAssembly=false skips the strong-name signing step; the
+          # repo doesn't ship ZipExtractor.snk, and we don't need a
+          # signed assembly here (the exe's authenticity is already
+          # covered by the main exe's signature path).
+          msbuild $csproj /restore /p:Configuration=Release /p:SignAssembly=false /v:minimal
           New-Item -ItemType Directory -Force -Path zipextractor_bin | Out-Null
           Copy-Item zipextractor_src/AutoUpdater.NET/Resources/ZipExtractor.exe zipextractor_bin/
           Get-ChildItem zipextractor_bin/
