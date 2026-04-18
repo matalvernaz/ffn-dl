@@ -1940,16 +1940,20 @@ def build_m4b(chapter_files, story, output_path, cover_path=None, intro_file=Non
             f.write(f"title={_escape_ffmeta(ch_title)}\n\n")
             offset_ms += duration_ms
 
-    # Convert to M4B (AAC in M4A container) with chapter metadata
+    # Convert to M4B (AAC in M4A container) with chapter metadata.
+    # All -i inputs must come before output options like -map_metadata;
+    # otherwise ffmpeg rejects the cover -i as "input option on output file".
     cmd = [
         FFMPEG, "-y",
         "-i", str(merged),
         "-i", str(chapters_meta),
-        "-map_metadata", "1",
     ]
     if cover_path and Path(cover_path).exists():
-        cmd.extend(["-i", str(cover_path), "-map", "0:a", "-map", "2:v",
+        cmd.extend(["-i", str(cover_path)])
+        cmd.extend(["-map_metadata", "1", "-map", "0:a", "-map", "2:v",
                      "-disposition:v", "attached_pic"])
+    else:
+        cmd.extend(["-map_metadata", "1"])
     cmd.extend([
         "-c:a", "aac", "-b:a", "64k",
         "-movflags", "+faststart",

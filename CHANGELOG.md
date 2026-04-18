@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.15.1 — 2026-04-18
+
+### Fix
+
+- **M4B mux no longer fails when a cover image is present.** The
+  `-map_metadata` flag was emitted before the cover `-i`, which ffmpeg
+  rejects as an input option applied to an output file, aborting the
+  whole audiobook build right after synthesis. All `-i` inputs now
+  precede any output options.
+
 ## 1.15.0 — 2026-04-18
 
 ### Fix
