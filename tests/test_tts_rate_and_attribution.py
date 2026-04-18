@@ -281,3 +281,31 @@ def test_install_builtin_noop_when_frozen(monkeypatch):
     accidentally start rejecting it."""
     monkeypatch.setattr(attribution, "_is_frozen", lambda: True)
     assert attribution.install("builtin") is True
+
+
+def test_install_reactivates_deps_dir_after_pip_install(monkeypatch):
+    """First-ever neural install creates DEPS_DIR *after* startup's
+    activate() already no-oped — so DEPS_DIR isn't on sys.path and the
+    post-install _ensure_spacy_model can't see the model it just
+    downloaded. install() must re-run activate() after pip_install
+    succeeds."""
+    from ffn_dl import neural_env
+
+    monkeypatch.setattr(attribution, "_is_frozen", lambda: True)
+    monkeypatch.setattr(neural_env, "is_supported", lambda: True)
+    monkeypatch.setattr(
+        neural_env, "pip_install",
+        lambda packages, log_callback=None, extra_args=None: True,
+    )
+    # Pretend the spaCy model is already present so install() doesn't
+    # try to download it during this unit test.
+    monkeypatch.setattr(attribution, "_ensure_spacy_model", lambda *a, **k: True)
+
+    activate_calls = []
+    monkeypatch.setattr(
+        neural_env, "activate", lambda: activate_calls.append(True),
+    )
+
+    ok = attribution.install("booknlp", log_callback=lambda _l: None)
+    assert ok is True
+    assert activate_calls, "install() must re-activate neural_env after pip_install"

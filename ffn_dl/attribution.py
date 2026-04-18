@@ -245,6 +245,11 @@ def install(backend: str, log_callback=None) -> bool:
             extra_args=_EXTRA_ARGS.get(backend),
         ):
             return False
+        # First-ever install creates DEPS_DIR after startup's activate()
+        # already no-oped. Re-activate so DEPS_DIR lands on sys.path —
+        # otherwise the post-install _ensure_spacy_model check can't see
+        # the model it just downloaded.
+        neural_env.activate()
     else:
         # Non-frozen path — use sys.executable's pip directly.
         cmd = install_command(backend)
@@ -431,6 +436,15 @@ def _ensure_spacy_model(model_name: str, log_callback=None) -> bool:
     cb(f"spaCy model {model_name!r} not found; downloading...")
 
     ok = _spacy_download(model_name, log_callback=cb)
+    # In frozen builds the model lands in DEPS_DIR, which may not yet
+    # be on sys.path if this is the first neural install of the session.
+    # Re-activate so the new package is importable from the main process.
+    if _is_frozen():
+        try:
+            from . import neural_env
+            neural_env.activate()
+        except ImportError:
+            pass
     # Invalidate importlib's finder cache so the freshly-installed
     # package is discoverable without restarting the process.
     importlib.invalidate_caches()

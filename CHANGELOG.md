@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.12.10 — 2026-04-18
+
+### Fix
+
+- **BookNLP install no longer logs a false "model could not be
+  downloaded" warning.** On a first-ever neural backend install, the
+  spaCy `en_core_web_sm` download into `DEPS_DIR` succeeded but
+  `_ensure_spacy_model`'s post-download `find_spec` check returned
+  `None`, so the install flow warned "BookNLP will fall back to
+  builtin at run time" despite the model being present on disk. Root
+  cause: `neural_env.activate()` runs once at package import and
+  no-ops when `DEPS_DIR` doesn't exist yet. The first install creates
+  `DEPS_DIR` *after* that no-op, so the main process's `sys.path`
+  never picked it up. `install()` now re-activates after
+  `pip_install` succeeds, and `_ensure_spacy_model` re-activates
+  after a frozen-path download for good measure.
+
 ## 1.12.9 — 2026-04-18
 
 ### Fix
