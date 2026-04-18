@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.12.0 — 2026-04-18
+
+### Change
+
+- **Auto-updater rewritten around a bundled `ZipExtractor.exe` helper
+  (the same pattern Libation uses, from ravibpatel/AutoUpdater.NET,
+  MIT).** Replaces the detached batch-script + `tasklist` poll +
+  `robocopy` approach that silently failed in several ways across
+  1.10.x and 1.11.x. The new flow copies the helper to `%TEMP%` to
+  decouple it from the install, spawns it via Win32 `ShellExecuteW`
+  with the `runas` verb only when the install dir isn't
+  user-writable (so no UAC prompt in the common case), and lets the
+  helper block on our PID via `Process.WaitForExit` before it
+  touches any file. The helper uses the Windows Restart Manager API
+  to diagnose locked files and writes a `ZipExtractor.log` next to
+  itself, so future update failures are actually diagnosable.
+- The portable release zip now ships `ZipExtractor.exe` next to
+  `ffn-dl.exe`. The Windows workflow builds it from AutoUpdater.NET
+  v1.9.2 on each release.
+
+### Add
+
+- **GUI: log-level selector and "Save log to file" checkbox** in the
+  Status row. Levels are DEBUG / INFO / WARNING / ERROR; file logs
+  go to `logs/ffn-dl.log` inside the portable root (rotating at
+  1 MB × 3 backups). An "Open log folder" button opens the folder
+  in the platform file browser. Python's root logger is now bridged
+  into the in-app status pane so scraper, updater, and TTS log
+  records appear alongside the hand-written status messages.
+- `cleanup_old_exe()` also sweeps `%TEMP%/ffn-dl-update-*` workdirs
+  older than 24h that the old batch updater left behind.
+
 ## 1.11.3 — 2026-04-17
 
 ### Fix

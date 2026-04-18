@@ -18,6 +18,8 @@ KEY_STRIP_NOTES = "strip_notes"
 KEY_SPEECH_RATE = "speech_rate"
 KEY_ATTRIBUTION_BACKEND = "attribution_backend"
 KEY_ATTRIBUTION_MODEL_SIZE = "attribution_model_size"
+KEY_LOG_LEVEL = "log_level"
+KEY_LOG_TO_FILE = "log_to_file"
 # Per-tab JSON blobs: {"query": "...", "filters": {key: value, ...}}
 KEY_SEARCH_STATE_FFN = "search_state_ffn"
 KEY_SEARCH_STATE_AO3 = "search_state_ao3"
@@ -34,6 +36,8 @@ DEFAULTS = {
     KEY_SPEECH_RATE: "0",
     KEY_ATTRIBUTION_BACKEND: "builtin",
     KEY_ATTRIBUTION_MODEL_SIZE: "",
+    KEY_LOG_LEVEL: "INFO",
+    KEY_LOG_TO_FILE: False,
 }
 
 

@@ -31,6 +31,24 @@ jobs:
           unzip -j ffmpeg.zip "*/bin/ffmpeg.exe" "*/bin/ffprobe.exe" -d ffmpeg_bin/
           ls -la ffmpeg_bin/
 
+      # Build ZipExtractor.exe from ravibpatel/AutoUpdater.NET (MIT). It's
+      # the self-update helper used here and by Libation: waits for our
+      # PID via Process.WaitForExit, extracts the update zip over the
+      # install, uses Windows Restart Manager to diagnose locked files,
+      # and relaunches. Target framework is net45 — preinstalled on every
+      # Windows 8+ machine, so no .NET runtime install for users.
+      - name: Build ZipExtractor.exe
+        shell: pwsh
+        run: |
+          $tag = 'v1.9.2'
+          git clone --depth 1 --branch $tag https://github.com/ravibpatel/AutoUpdater.NET.git zipextractor_src
+          Push-Location zipextractor_src/ZipExtractor
+          dotnet build ZipExtractor.csproj -c Release
+          Pop-Location
+          New-Item -ItemType Directory -Force -Path zipextractor_bin | Out-Null
+          Copy-Item zipextractor_src/AutoUpdater.NET/Resources/ZipExtractor.exe zipextractor_bin/
+          Get-ChildItem zipextractor_bin/
+
       # --onedir (not --onefile) — produces dist\ffn-dl\ with the exe +
       # _internal\ next to it. That folder is what we zip up and ship.
       # Portable install layout: users unzip the archive anywhere, all
@@ -71,6 +89,12 @@ jobs:
 
       - name: Smoke-test executable
         run: dist\ffn-dl\ffn-dl.exe --help
+
+      # Drop the update helper alongside ffn-dl.exe so the auto-updater
+      # in ffn_dl/self_update.py can copy it to %TEMP% and spawn it.
+      - name: Bundle ZipExtractor.exe
+        shell: pwsh
+        run: Copy-Item zipextractor_bin/ZipExtractor.exe dist/ffn-dl/
 
       # Pack the whole dist\ffn-dl\ folder into a zip the user can
       # unpack anywhere. Compress-Archive with a trailing path segment

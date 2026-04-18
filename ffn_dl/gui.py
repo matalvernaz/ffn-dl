@@ -5,7 +5,11 @@ screen readers can read every widget natively.
 """
 
 import json
+import logging
+import logging.handlers
+import os
 import re
+import subprocess
 import sys
 import threading
 import wx
@@ -17,6 +21,41 @@ from pathlib import Path
 _LOG_FLUSH_INTERVAL_MS = 100
 _LOG_MAX_LINES = 5000
 _LOG_TRIM_TO_LINES = 4000
+
+# 1 MB × 3 backups — enough to catch the last handful of downloads
+# when a user needs to share logs for a bug report, small enough that
+# a portable zip on a flash drive doesn't balloon.
+_LOG_FILE_MAX_BYTES = 1 << 20
+_LOG_FILE_BACKUPS = 3
+
+_LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
+
+
+class _WxLogHandler(logging.Handler):
+    """Pipe Python ``logging`` records into the GUI's status pane.
+
+    Logging can fire from worker threads (scrapers, updater, TTS),
+    but wxPython widget calls have to land on the main thread —
+    ``wx.CallAfter`` marshals for us. ``format()`` is called on the
+    calling thread (cheap string work) so the main thread just has
+    to append to the deque.
+    """
+
+    def __init__(self, target):
+        super().__init__()
+        self._target = target
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+        except Exception:
+            return
+        try:
+            wx.CallAfter(self._target, msg)
+        except RuntimeError:
+            # wx.App is already torn down (shutdown race). Nothing
+            # sensible to do — the log line is going to the void.
+            pass
 
 
 _FFN_URL_RE = re.compile(
@@ -314,13 +353,55 @@ class MainFrame(wx.Frame):
         root_sizer.Add(out_sizer, 0, wx.EXPAND | wx.ALL, pad)
 
         # ── Status log ───────────────────────────────────────
-        root_sizer.Add(wx.StaticText(root, label="S&tatus:"), 0, wx.LEFT | wx.TOP, pad)
+        log_header = wx.BoxSizer(wx.HORIZONTAL)
+        log_header.Add(
+            wx.StaticText(root, label="S&tatus:"),
+            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16,
+        )
+        log_header.Add(
+            wx.StaticText(root, label="Log level:"),
+            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+        )
+        self.log_level_ctrl = wx.Choice(root, choices=_LOG_LEVELS)
+        self.log_level_ctrl.SetSelection(_LOG_LEVELS.index("INFO"))
+        self.log_level_ctrl.SetName("Log level")
+        self.log_level_ctrl.SetToolTip(
+            "Controls how chatty the status pane and log file are. "
+            "DEBUG surfaces per-chapter and per-request detail; INFO is "
+            "the default; WARNING and ERROR hide routine progress."
+        )
+        self.log_level_ctrl.Bind(wx.EVT_CHOICE, self._on_log_level_change)
+        log_header.Add(self.log_level_ctrl, 0, wx.RIGHT, 16)
+
+        self.log_to_file_ctrl = wx.CheckBox(root, label="Save log to file")
+        self.log_to_file_ctrl.SetName("Save log to file")
+        self.log_to_file_ctrl.SetToolTip(
+            "Mirror the status pane to ffn-dl.log in your logs folder "
+            "(rotates at 1 MB, keeps the last 3). Useful for bug reports."
+        )
+        self.log_to_file_ctrl.Bind(wx.EVT_CHECKBOX, self._on_log_to_file_toggle)
+        log_header.Add(self.log_to_file_ctrl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+
+        self.log_open_btn = wx.Button(root, label="Open log folder")
+        self.log_open_btn.SetName("Open log folder")
+        self.log_open_btn.Bind(wx.EVT_BUTTON, self._on_open_log_folder)
+        log_header.Add(self.log_open_btn, 0)
+
+        root_sizer.Add(log_header, 0, wx.EXPAND | wx.LEFT | wx.TOP | wx.RIGHT, pad)
+
         self.log_ctrl = wx.TextCtrl(
             root,
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
         )
         self.log_ctrl.SetName("Status log")
         root_sizer.Add(self.log_ctrl, 1, wx.EXPAND | wx.ALL, pad)
+
+        # Logging plumbing: bridge Python's root logger to _log() so
+        # scraper / updater / TTS log records show up in the status pane
+        # and the (optional) file, and detach on shutdown so a closed
+        # app doesn't chase a dead wx.CallAfter.
+        self._wx_log_handler = None
+        self._file_log_handler = None
 
         root.SetSizer(root_sizer)
 
@@ -535,6 +616,114 @@ class MainFrame(wx.Frame):
     def _log(self, msg):
         with self._log_lock:
             self._log_queue.append(msg + "\n")
+
+    # ── Logging controls ─────────────────────────────────────
+
+    def _log_dir(self) -> Path:
+        """Directory for log files. Portable build keeps logs next to
+        the exe so they travel with the install; dev/pip uses the
+        same dotfile root as other ffn-dl state."""
+        from . import portable
+        d = portable.portable_root() / "logs"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _log_file(self) -> Path:
+        return self._log_dir() / "ffn-dl.log"
+
+    def _apply_logging_config(self):
+        """Reconfigure root-logger handlers from the current controls.
+
+        Called after a level change, a file-toggle, and once at
+        startup after prefs load. Idempotent: detaches any handlers
+        it previously attached before re-attaching fresh ones.
+        """
+        root = logging.getLogger()
+        level_name = _LOG_LEVELS[self.log_level_ctrl.GetSelection()]
+        level = getattr(logging, level_name, logging.INFO)
+        root.setLevel(level)
+
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+        if self._wx_log_handler is None:
+            self._wx_log_handler = _WxLogHandler(self._log)
+            self._wx_log_handler.setFormatter(logging.Formatter("%(message)s"))
+            root.addHandler(self._wx_log_handler)
+        self._wx_log_handler.setLevel(level)
+
+        want_file = self.log_to_file_ctrl.GetValue()
+        have_file = self._file_log_handler is not None
+        if want_file and not have_file:
+            try:
+                fh = logging.handlers.RotatingFileHandler(
+                    self._log_file(),
+                    maxBytes=_LOG_FILE_MAX_BYTES,
+                    backupCount=_LOG_FILE_BACKUPS,
+                    encoding="utf-8",
+                )
+                fh.setFormatter(fmt)
+                fh.setLevel(level)
+                root.addHandler(fh)
+                self._file_log_handler = fh
+                self._log(f"(Logging to {self._log_file()})")
+            except OSError as exc:
+                self._log(f"(Could not open log file: {exc})")
+                self.log_to_file_ctrl.SetValue(False)
+        elif not want_file and have_file:
+            root.removeHandler(self._file_log_handler)
+            try:
+                self._file_log_handler.close()
+            except Exception:
+                pass
+            self._file_log_handler = None
+        elif have_file:
+            self._file_log_handler.setLevel(level)
+
+    def _detach_log_handlers(self):
+        """Remove our handlers from the root logger on shutdown."""
+        root = logging.getLogger()
+        for attr in ("_wx_log_handler", "_file_log_handler"):
+            h = getattr(self, attr, None)
+            if h is None:
+                continue
+            root.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass
+            setattr(self, attr, None)
+
+    def _on_log_level_change(self, event):
+        from . import prefs as _p
+        self._apply_logging_config()
+        self.prefs.set(
+            _p.KEY_LOG_LEVEL,
+            _LOG_LEVELS[self.log_level_ctrl.GetSelection()],
+        )
+
+    def _on_log_to_file_toggle(self, event):
+        from . import prefs as _p
+        self._apply_logging_config()
+        self.prefs.set_bool(
+            _p.KEY_LOG_TO_FILE, self.log_to_file_ctrl.GetValue(),
+        )
+
+    def _on_open_log_folder(self, event):
+        folder = self._log_dir()
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(folder))  # noqa: S606
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        except OSError as exc:
+            wx.MessageBox(
+                f"Could not open {folder}: {exc}",
+                "Open log folder",
+                wx.OK | wx.ICON_WARNING,
+                parent=self,
+            )
 
     def _on_log_flush(self, event):
         if not self._log_queue:
@@ -789,6 +978,12 @@ class MainFrame(wx.Frame):
         self._refresh_size_choices(preferred=saved_size)
         self._update_audio_panel_visibility()
 
+        level = (self.prefs.get(_p.KEY_LOG_LEVEL) or "INFO").upper()
+        if level in _LOG_LEVELS:
+            self.log_level_ctrl.SetSelection(_LOG_LEVELS.index(level))
+        self.log_to_file_ctrl.SetValue(self.prefs.get_bool(_p.KEY_LOG_TO_FILE))
+        self._apply_logging_config()
+
         for site_key, pref_key in (
             ("ffn", _p.KEY_SEARCH_STATE_FFN),
             ("ao3", _p.KEY_SEARCH_STATE_AO3),
@@ -821,6 +1016,11 @@ class MainFrame(wx.Frame):
         self.prefs.set(_p.KEY_SPEECH_RATE, self.speech_rate_ctrl.GetValue())
         self.prefs.set(_p.KEY_ATTRIBUTION_BACKEND, self._selected_attribution_backend())
         self.prefs.set(_p.KEY_ATTRIBUTION_MODEL_SIZE, self._selected_size() or "")
+        self.prefs.set(
+            _p.KEY_LOG_LEVEL,
+            _LOG_LEVELS[self.log_level_ctrl.GetSelection()],
+        )
+        self.prefs.set_bool(_p.KEY_LOG_TO_FILE, self.log_to_file_ctrl.GetValue())
 
         for site_key, pref_key in (
             ("ffn", _p.KEY_SEARCH_STATE_FFN),
@@ -882,6 +1082,7 @@ class MainFrame(wx.Frame):
             pass
         if hasattr(self, "_log_timer"):
             self._log_timer.Stop()
+        self._detach_log_handlers()
         event.Skip()
 
     # ── Update check ─────────────────────────────────────────
@@ -1047,10 +1248,10 @@ class MainFrame(wx.Frame):
         )
 
     def _update_succeeded(self, progress, tag):
-        from . import self_update
         progress.Destroy()
         wx.MessageBox(
-            f"Updated to {tag}. The app will now restart.",
+            f"Updated to {tag}. The app will now close and reopen "
+            f"automatically once the new files are in place.",
             "Update Complete",
             wx.OK,
             parent=self,
@@ -1079,10 +1280,12 @@ class MainFrame(wx.Frame):
             self.Hide()
         except Exception:
             pass
-        # Portable build: the updater .bat writes the new files AFTER
-        # we release file locks, then relaunches ffn-dl itself. Do NOT
-        # call self_update.restart() here — spawning our own child
-        # would race with the batch's relaunch.
+        self._detach_log_handlers()
+        # ZipExtractor.exe has already been spawned by
+        # download_and_replace; it's blocked on our PID. Exiting releases
+        # its WaitForExit(), after which it overwrites the install and
+        # relaunches ffn-dl.exe itself — do NOT call self_update.restart()
+        # here, that would race the helper's relaunch.
         sys.exit(0)
 
     # ── Download ─────────────────────────────────────────────

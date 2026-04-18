@@ -1,27 +1,25 @@
 """GitHub-release self-update for the portable Windows build.
 
-The app is unpacked to a folder that contains ``ffn-dl.exe``,
-``_internal/`` (PyInstaller bundle), and user data directories. A
-running ffn-dl.exe holds a lock on itself and on the DLLs inside
-``_internal/``, so we can't replace them while the app is running —
-instead we:
+Uses the ZipExtractor.exe pattern popularised by Libation /
+ravibpatel's AutoUpdater.NET: we ship a tiny signed helper .exe
+next to ffn-dl.exe, copy it to ``%TEMP%`` so it isn't locked in the
+install dir, spawn it via ``ShellExecuteW`` (with UAC elevation only
+when the install dir isn't user-writable), and exit. The helper
+waits for our process handle via ``Process.WaitForExit``, extracts
+the update zip over the install with Windows Restart Manager-based
+locked-file diagnosis, writes a ``ZipExtractor.log`` to its own
+directory, and relaunches ffn-dl.exe.
 
-  1. Download the new ``ffn-dl-portable.zip`` into a temp directory.
-  2. Extract it to ``<temp>/ffn-dl-new/``.
-  3. Write an updater batch script that:
-       - waits for ffn-dl.exe to exit,
-       - copies every file from ``ffn-dl-new/`` over the current install
-         (user data folders are left untouched),
-       - deletes the temp dir,
-       - relaunches ffn-dl.exe,
-       - self-deletes.
-  4. Spawn that batch script detached and exit.
+The old approach (batch script + ``tasklist`` polling + ``robocopy``)
+was fragile for several reasons — silent failures, no logging,
+Defender heuristics on batch-in-%TEMP%-touching-files-elsewhere, no
+UAC path. All of those go away here.
 
-On other platforms or when not running frozen, ``check_for_update`` still
-works — callers should open the release page in a browser instead of
-attempting in-place replacement.
+Helper source: ravibpatel/AutoUpdater.NET v1.9.2 (MIT). Built from
+source in CI; see ``.github/workflows/build-windows.yml``.
 """
 
+import ctypes
 import hashlib
 import logging
 import os
@@ -30,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -41,6 +40,11 @@ logger = logging.getLogger(__name__)
 
 REPO = "matalvernaz/ffn-dl"
 LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+
+# Bundled alongside ffn-dl.exe in the portable zip; built in CI from
+# ravibpatel/AutoUpdater.NET. If it's ever missing we refuse to
+# self-replace and direct the user to the release page instead.
+ZIP_EXTRACTOR_EXE = "ZipExtractor.exe"
 
 
 def _parse_version(tag: str):
@@ -101,8 +105,10 @@ def is_frozen() -> bool:
 
 
 def can_self_replace() -> bool:
-    """True only when running as a frozen Windows executable."""
-    return is_frozen() and sys.platform.startswith("win")
+    """True only when we're a frozen Windows build with the helper bundled."""
+    if not (is_frozen() and sys.platform.startswith("win")):
+        return False
+    return (Path(sys.executable).parent / ZIP_EXTRACTOR_EXE).exists()
 
 
 def _verify_digest(path: Path, digest: str) -> None:
@@ -123,7 +129,12 @@ def _verify_digest(path: Path, digest: str) -> None:
 
 
 def cleanup_old_exe() -> None:
-    """Remove any <name>.exe.old left behind by a previous in-place update."""
+    """Remove debris from earlier update flows.
+
+    - ``<name>.exe.old`` left behind by the pre-1.10 rename-in-place path.
+    - ``%TEMP%/ffn-dl-update-*`` workdirs older than 24 hours that the
+      batch-script updater used to leave on disk.
+    """
     if not is_frozen():
         return
     try:
@@ -134,17 +145,17 @@ def cleanup_old_exe() -> None:
     except OSError as exc:
         logger.debug("Could not remove stale old exe: %s", exc)
 
-
-# User-data directories inside the install folder that MUST survive
-# an update. Keep this list in sync with ffn_dl/portable.py.
-_USER_DATA_DIRS = {
-    "cache",
-    "neural",
-    "booknlp_models",
-}
-_USER_DATA_FILES = {
-    "settings.ini",
-}
+    try:
+        temp = Path(tempfile.gettempdir())
+        cutoff = time.time() - 24 * 3600
+        for d in temp.glob("ffn-dl-update-*"):
+            try:
+                if d.is_dir() and d.stat().st_mtime < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+            except OSError:
+                continue
+    except OSError as exc:
+        logger.debug("Could not sweep stale update workdirs: %s", exc)
 
 
 def _download(url: str, dest: Path, progress_cb=None, expected_size: int = 0) -> None:
@@ -163,98 +174,98 @@ def _download(url: str, dest: Path, progress_cb=None, expected_size: int = 0) ->
                 progress_cb(done, total)
 
 
-def _write_updater_batch(
-    script_path: Path,
-    exe_path: Path,
-    new_dir: Path,
-    install_dir: Path,
-    parent_pid: int,
-) -> None:
-    """Write the .bat helper that runs after we exit and swaps files.
+def _is_writable(path: Path) -> bool:
+    """Probe whether the current process can create/remove a file in ``path``.
 
-    robocopy-based because it's stock Windows and handles locked files
-    better than ``copy`` / ``xcopy``. The /XD flag excludes user data
-    dirs so an update preserves the user's settings, chapter cache,
-    and any installed neural backends.
-
-    Waiting for the lock to release is the subtle part. A running PE
-    on Windows can still be *renamed* (directory-entry ops don't touch
-    the mapped image section), so the previous rename-probe exited the
-    wait loop immediately while the exe was still locked, and robocopy
-    then failed with ERROR 32 on ffn-dl.exe / _internal DLLs. We now
-    poll ``tasklist`` for the parent PID instead — the image-section
-    lock is dropped in the same kernel path that tears the process
-    record down, so "PID gone" is a sound proxy for "files writable."
-
-    We sleep with ``ping`` rather than ``timeout``: this batch is
-    spawned DETACHED (no console), and ``timeout`` needs a console
-    input handle — it fails with "ERROR: Input redirection is not
-    supported, exiting the process immediately" even with /nobreak.
-    Previously that made the wait loop spin through 120 iterations in
-    a few seconds while the parent was still alive, giving up before
-    the exe's lock was ever released. ``ping 127.0.0.1`` has no such
-    dependency.
+    If the user unzipped into ``C:\\Program Files\\`` we need to elevate
+    via UAC; in the common case (Downloads, Desktop, their home) we
+    don't, and skipping the prompt makes the update one-click.
     """
-    xd = " ".join(f'"{install_dir / d}"' for d in _USER_DATA_DIRS)
-    # settings.ini lives at the top level — robocopy's /XF excludes files by name.
-    xf = " ".join(f'"{f}"' for f in _USER_DATA_FILES)
-    script = f"""@echo off
-setlocal
-set "EXE={exe_path}"
-set "INSTALL={install_dir}"
-set "NEW={new_dir}"
-set "PID={parent_pid}"
-rem Wait up to 120 seconds for the parent ffn-dl.exe process to exit.
-rem A running PE can still be renamed, so probe the PID directly.
-set /a tries=0
-:waitloop
-set /a tries+=1
-if %tries% GTR 120 goto :giveup
-tasklist /FI "PID eq %PID%" /NH 2>nul | find "%PID%" >nul
-if not errorlevel 1 (
-    ping -n 2 127.0.0.1 >nul
-    goto :waitloop
-)
-rem Give the kernel a moment to tear down the image section after
-rem the process record is gone; robocopy's own retries cover the rest.
-ping -n 2 127.0.0.1 >nul
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".ffn-dl-update-probe-{os.getpid()}"
+        probe.write_bytes(b"")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
 
-rem Copy new files over the install, preserving user data.
-robocopy "%NEW%" "%INSTALL%" /E /IS /IT /R:30 /W:1 /NFL /NDL /NJH /NJS /NP /XD {xd} /XF {xf} >nul
-rem robocopy exit codes 0-7 are success; 8+ are failures.
-if errorlevel 8 goto :giveup
 
-rem Clean up and relaunch.
-rmdir /S /Q "%NEW%" >nul 2>&1
-start "" "%EXE%"
-del "%~f0"
-exit /b 0
+def _repack_flat(src_dir: Path, dest_zip: Path) -> None:
+    """Re-zip ``src_dir``'s *contents* at the archive root.
 
-:giveup
-rem Leave the new files for the user to inspect; don't relaunch.
-echo Update failed. New version is at: %NEW%
-del "%~f0"
-exit /b 1
-"""
-    script_path.write_text(script, encoding="utf-8")
+    The release zip has ``ffn-dl/`` as the top-level entry so humans
+    who double-click to extract get a tidy folder. ZipExtractor
+    unpacks the archive as-is into the install dir, though, so if
+    we handed it the wrapped zip we'd end up with
+    ``install/ffn-dl/ffn-dl.exe``. Re-packing flat is a few seconds
+    on a 30 MB archive and keeps both paths working from one release.
+    """
+    with zipfile.ZipFile(
+        dest_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3,
+    ) as zf:
+        for path in src_dir.rglob("*"):
+            if path.is_file():
+                zf.write(path, path.relative_to(src_dir))
+
+
+def _shell_execute(verb: str, file: Path, params: str, cwd: Path) -> None:
+    """Thin wrapper around ``ShellExecuteW`` that raises on failure.
+
+    ``subprocess.Popen`` can't request the ``runas`` verb; Win32
+    ``ShellExecuteW`` is the only stdlib-accessible way to trigger a
+    UAC elevation prompt from Python.
+    """
+    SW_SHOWNORMAL = 1
+    rc = ctypes.windll.shell32.ShellExecuteW(
+        None, verb, str(file), params, str(cwd), SW_SHOWNORMAL,
+    )
+    # ShellExecuteW returns > 32 on success; values <= 32 are Win32
+    # error codes (2 = ENOENT, 5 = access denied, 1223 = UAC cancelled
+    # — though the UAC-cancel case usually returns SE_ERR_ACCESSDENIED).
+    if rc <= 32:
+        raise RuntimeError(f"ShellExecuteW failed (code {rc}) launching {file}")
+
+
+def _spawn_extractor(
+    extractor: Path, zip_path: Path, install_dir: Path, exe: Path,
+) -> None:
+    """Launch the bundled helper to swap files + relaunch ffn-dl.
+
+    Uses ``runas`` only when the install dir isn't writable — the
+    common case (user unzipped to Downloads, Desktop, home) doesn't
+    need elevation and skipping the prompt makes the flow one-click.
+    """
+    def _q(p):
+        return f'"{p}"'
+
+    params = (
+        f"--input {_q(zip_path)} "
+        f"--output {_q(install_dir)} "
+        f"--current-exe {_q(exe)}"
+    )
+    verb = "open" if _is_writable(install_dir) else "runas"
+    # ZipExtractor writes its log (ZipExtractor.log) to AppDomain.
+    # CurrentDomain.BaseDirectory — i.e. its own folder. Point it at
+    # the per-update workdir so the log lives next to the binary.
+    _shell_execute(verb, extractor, params, extractor.parent)
 
 
 def download_and_replace(update_info, progress_cb=None) -> Path:
-    """Download the new portable zip and spawn the updater script.
+    """Download the new portable zip and spawn the update helper.
 
     Returns the install directory (for logging). Caller MUST exit
-    shortly after — the updater batch waits for the process to release
-    its file locks before it can proceed.
+    shortly after — the helper blocks on our PID before it touches
+    any file in the install.
     """
     if not can_self_replace():
         raise RuntimeError(
-            "In-place update is only supported for the Windows portable build."
+            "In-place update is only supported for the Windows portable "
+            "build with ZipExtractor.exe bundled. Please download the "
+            "new version manually from the release page."
         )
 
     if not update_info.get("is_zip"):
-        # A prior-release .exe asset — we can't swap a single exe into a
-        # one-folder install safely, so fall back to directing the user
-        # at the release page.
         raise RuntimeError(
             "Update asset is not a portable zip. Please download the new "
             "version manually from the release page."
@@ -262,9 +273,12 @@ def download_and_replace(update_info, progress_cb=None) -> Path:
 
     current_exe = Path(sys.executable).resolve()
     install_dir = current_exe.parent
+    extractor_src = install_dir / ZIP_EXTRACTOR_EXE
+
     workdir = Path(tempfile.mkdtemp(prefix="ffn-dl-update-"))
     zip_path = workdir / "ffn-dl-portable.zip"
-    new_dir = workdir / "ffn-dl-new"
+    extracted = workdir / "extracted"
+    flat_zip = workdir / "ffn-dl-flat.zip"
 
     try:
         _download(
@@ -275,36 +289,27 @@ def download_and_replace(update_info, progress_cb=None) -> Path:
         )
         _verify_digest(zip_path, update_info.get("digest"))
 
-        new_dir.mkdir()
+        # Unwrap the top-level folder so ZipExtractor can extract
+        # straight into install_dir.
+        extracted.mkdir()
         with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(new_dir)
+            zf.extractall(extracted)
         zip_path.unlink(missing_ok=True)
 
-        # The release zip's top-level is "ffn-dl/" — unwrap one level if
-        # present so new_dir mirrors install_dir's layout directly.
-        inner = list(new_dir.iterdir())
-        if len(inner) == 1 and inner[0].is_dir():
-            src = inner[0]
-            for item in src.iterdir():
-                item.rename(new_dir / item.name)
-            src.rmdir()
-
-        script_path = workdir / "apply-update.bat"
-        _write_updater_batch(
-            script_path, current_exe, new_dir, install_dir, os.getpid()
+        inner = list(extracted.iterdir())
+        src_for_repack = (
+            inner[0] if len(inner) == 1 and inner[0].is_dir() else extracted
         )
+        _repack_flat(src_for_repack, flat_zip)
+        shutil.rmtree(extracted, ignore_errors=True)
 
-        # Launch the updater detached so it survives our exit.
-        creationflags = 0x8 | 0x200  # DETACHED + CREATE_NEW_PROCESS_GROUP
-        subprocess.Popen(
-            ["cmd.exe", "/c", str(script_path)],
-            close_fds=True,
-            creationflags=creationflags,
-            cwd=str(workdir),
-        )
+        # Copy the extractor out of the install dir so it isn't locked
+        # when it tries to overwrite its own binary inside install_dir.
+        extractor_tmp = workdir / ZIP_EXTRACTOR_EXE
+        shutil.copy2(extractor_src, extractor_tmp)
+
+        _spawn_extractor(extractor_tmp, flat_zip, install_dir, current_exe)
     except Exception:
-        # Clean up workdir on any pre-spawn failure so we don't leave
-        # partial downloads accumulating in %TEMP%.
         shutil.rmtree(workdir, ignore_errors=True)
         raise
 
@@ -320,13 +325,13 @@ def restart() -> None:
     the bootloader cleans that dir on exit — if the child's extraction
     races with the parent's cleanup (both touching %TEMP% at once),
     DLLs and data files can end up half-written. Detaching the child
-    plus letting the parent finish its `sys.exit` keeps the two
+    plus letting the parent finish its ``sys.exit`` keeps the two
     processes' teardown / startup from stepping on each other, which
     otherwise shows up as "app restarted but network/search is broken"
     on the first post-update launch.
 
-    On POSIX we use os.execv, which replaces the current process image
-    in place — same PID, no race, nothing to detach.
+    On POSIX we use ``os.execv``, which replaces the current process
+    image in place — same PID, no race, nothing to detach.
     """
     args = [sys.executable] + sys.argv[1:]
 
@@ -356,9 +361,6 @@ def restart() -> None:
             )
         sys.exit(0)
 
-    # POSIX: replace the running image with the new exe. Same PID, no
-    # second process, no race. The `flush` call matches what the
-    # wxPython shutdown would normally do via its atexit hooks.
     sys.stdout.flush()
     sys.stderr.flush()
     os.execv(sys.executable, args)
