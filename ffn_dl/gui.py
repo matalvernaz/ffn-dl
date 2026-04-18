@@ -249,6 +249,15 @@ class MainFrame(wx.Frame):
         self.attribution_ctrl.Bind(wx.EVT_CHOICE, self._on_attribution_change)
         audio_sizer.Add(self.attribution_ctrl, 0, wx.RIGHT, 4)
 
+        # Secondary dropdown for backends with size variants (BookNLP).
+        # Paired with a caption StaticText so both can be hidden together.
+        self.size_label = wx.StaticText(self.audio_panel, label="Si&ze:")
+        audio_sizer.Add(self.size_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.attribution_size_ctrl = wx.Choice(self.audio_panel, choices=[])
+        self.attribution_size_ctrl.SetName("Attribution model size")
+        self.attribution_size_ctrl.Bind(wx.EVT_CHOICE, self._on_size_change)
+        audio_sizer.Add(self.attribution_size_ctrl, 0, wx.RIGHT, 8)
+
         self.attribution_status = wx.StaticText(self.audio_panel, label="")
         self.attribution_status.SetName("Attribution status")
         audio_sizer.Add(self.attribution_status, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
@@ -258,6 +267,10 @@ class MainFrame(wx.Frame):
         )
         self.attribution_install_btn.Bind(wx.EVT_BUTTON, self._on_install_attribution)
         audio_sizer.Add(self.attribution_install_btn, 0)
+
+        # Track the currently-displayed size keys so we can map the
+        # Choice's selection index back to a backend-specific size name.
+        self._size_keys_shown = []
 
         self.audio_panel.SetSizer(audio_sizer)
         root_sizer.Add(self.audio_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
@@ -589,12 +602,57 @@ class MainFrame(wx.Frame):
 
     def _on_attribution_change(self, event):
         self._refresh_attribution_status()
+        self._refresh_size_choices()
         backend = self._selected_attribution_backend()
         if backend != "builtin" and not self._attribution_module.is_installed(backend):
             self._log(
                 f"Attribution backend '{backend}' is not installed. "
                 f"Click Install or run: ffn-dl --install-attribution {backend}"
             )
+
+    def _on_size_change(self, event):
+        # Purely cosmetic — value is read on demand via _selected_size().
+        pass
+
+    def _refresh_size_choices(self, preferred=None):
+        """Populate the size dropdown from the selected backend's sizes
+        registry. Hides the size row entirely when the backend offers
+        no size variants. `preferred` lets callers (e.g. prefs load)
+        force a specific option if it exists in the new size list."""
+        backend = self._selected_attribution_backend()
+        sizes = self._attribution_module.sizes_for(backend) or {}
+        if not sizes:
+            self._size_keys_shown = []
+            self.attribution_size_ctrl.Clear()
+            self.size_label.Hide()
+            self.attribution_size_ctrl.Hide()
+            self.audio_panel.Layout()
+            return
+
+        keys = list(sizes.keys())
+        labels = [sizes[k]["display"] for k in keys]
+        self._size_keys_shown = keys
+        self.attribution_size_ctrl.Set(labels)
+        default = preferred if preferred in keys else self._attribution_module.default_size(backend)
+        if default in keys:
+            self.attribution_size_ctrl.SetSelection(keys.index(default))
+        else:
+            self.attribution_size_ctrl.SetSelection(0)
+        self.size_label.Show()
+        self.attribution_size_ctrl.Show()
+        self.audio_panel.Layout()
+
+    def _selected_size(self):
+        """Return the backend-specific size key (e.g. 'small', 'big')
+        or None if the current backend has no size variants."""
+        if not self._size_keys_shown:
+            return None
+        idx = self.attribution_size_ctrl.GetSelection()
+        if idx < 0 or idx >= len(self._size_keys_shown):
+            return self._attribution_module.default_size(
+                self._selected_attribution_backend()
+            )
+        return self._size_keys_shown[idx]
 
     def _on_install_attribution(self, event):
         backend = self._selected_attribution_backend()
@@ -666,7 +724,9 @@ class MainFrame(wx.Frame):
             self.attribution_ctrl.SetSelection(
                 self._attribution_choices.index(backend)
             )
+        saved_size = self.prefs.get(_p.KEY_ATTRIBUTION_MODEL_SIZE) or None
         self._refresh_attribution_status()
+        self._refresh_size_choices(preferred=saved_size)
         self._update_audio_panel_visibility()
 
         for site_key, pref_key in (
@@ -699,6 +759,7 @@ class MainFrame(wx.Frame):
         self.prefs.set_bool(_p.KEY_STRIP_NOTES, self.strip_notes_ctrl.GetValue())
         self.prefs.set(_p.KEY_SPEECH_RATE, self.speech_rate_ctrl.GetValue())
         self.prefs.set(_p.KEY_ATTRIBUTION_BACKEND, self._selected_attribution_backend())
+        self.prefs.set(_p.KEY_ATTRIBUTION_MODEL_SIZE, self._selected_size() or "")
 
         for site_key, pref_key in (
             ("ffn", _p.KEY_SEARCH_STATE_FFN),
@@ -1556,15 +1617,18 @@ class MainFrame(wx.Frame):
                 self._log(f"  Synthesizing [{current}/{total}] {title}")
 
             backend = self._selected_attribution_backend()
+            size = self._selected_size()
             rate = self.speech_rate_ctrl.GetValue()
+            size_note = f", size={size}" if size else ""
             self._log(
-                f"\nGenerating audiobook (attribution={backend}, rate={rate:+d}%)..."
+                f"\nGenerating audiobook (attribution={backend}{size_note}, rate={rate:+d}%)..."
             )
             return generate_audiobook(
                 story, output_dir,
                 progress_callback=audio_progress,
                 speech_rate=rate,
                 attribution_backend=backend,
+                attribution_model_size=size,
             )
 
         from .exporters import EXPORTERS

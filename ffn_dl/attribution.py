@@ -42,6 +42,8 @@ BACKENDS = {
             "The default parser. No extra models or downloads. "
             "Works well for clearly-attributed dialogue."
         ),
+        "sizes": None,       # no size variants for this backend
+        "default_size": None,
     },
     "fastcoref": {
         "pip_name": "fastcoref",
@@ -53,19 +55,65 @@ BACKENDS = {
             "remaps pronoun-attributed lines ('he said') to the "
             "correct named character from the coref chain."
         ),
+        "sizes": None,
+        "default_size": None,
     },
     "booknlp": {
         "pip_name": "booknlp",
         "import_name": "booknlp",
-        "display": "BookNLP (full attribution, ~400 MB first-run download)",
-        "size_hint": "~400 MB",
+        "display": "BookNLP (full attribution)",
+        "size_hint": "~150 MB small / ~1 GB big",
         "description": (
             "Replaces our attribution with BookNLP's quote + coref "
             "models (Bamman et al.). Most accurate on long novels. "
-            "First run downloads ~150-400 MB of model weights."
+            "Models are downloaded on first use — see Model size."
         ),
+        "sizes": {
+            "small": {
+                "display": "Small (faster, ~150 MB)",
+                "size_hint": "~150 MB",
+                "description": (
+                    "Distilled models — several minutes per novel "
+                    "on CPU, solid accuracy for most stories."
+                ),
+            },
+            "big": {
+                "display": "Big (most accurate, ~1 GB)",
+                "size_hint": "~1 GB",
+                "description": (
+                    "Full-size BERT-base models — slower (~15 min "
+                    "per 100k-token novel on CPU) but highest "
+                    "speaker-attribution accuracy."
+                ),
+            },
+        },
+        "default_size": "small",
     },
 }
+
+
+def sizes_for(backend: str) -> dict | None:
+    """Return the sizes dict for a backend, or None if it has no size
+    variants. UI uses this to decide whether to show a size dropdown."""
+    info = BACKENDS.get(backend) or {}
+    return info.get("sizes") or None
+
+
+def default_size(backend: str) -> str | None:
+    info = BACKENDS.get(backend) or {}
+    return info.get("default_size")
+
+
+def normalize_size(backend: str, size: str | None) -> str | None:
+    """Clamp `size` to one this backend supports. Returns None when the
+    backend has no size variants. Falls back to the backend's default
+    when `size` is unknown or missing."""
+    sizes = sizes_for(backend)
+    if not sizes:
+        return None
+    if size and size in sizes:
+        return size
+    return default_size(backend)
 
 
 def available() -> List[str]:
@@ -137,8 +185,16 @@ def install(backend: str, log_callback=None) -> bool:
 # ── Dispatcher ──────────────────────────────────────────────────────
 
 
-def refine_speakers(segments, full_text: str, backend: str = "builtin"):
+def refine_speakers(
+    segments, full_text: str,
+    backend: str = "builtin",
+    model_size: str | None = None,
+):
     """Apply the chosen backend's refinement to `segments` (in order).
+
+    `model_size` picks a size variant for backends that expose them
+    (currently only BookNLP: "small" or "big"). Ignored for backends
+    without size variants.
 
     Returns the possibly-updated segment list. On any error the
     builtin no-op is used and a warning is logged — audiobook
@@ -152,11 +208,12 @@ def refine_speakers(segments, full_text: str, backend: str = "builtin"):
             backend,
         )
         return segments
+    size = normalize_size(backend, model_size)
     try:
         if backend == "fastcoref":
             return _refine_with_fastcoref(segments, full_text)
         if backend == "booknlp":
-            return _refine_with_booknlp(segments, full_text)
+            return _refine_with_booknlp(segments, full_text, model_size=size)
     except Exception as exc:  # the whole point is to never blow up the render
         logger.warning(
             "Attribution backend %r failed (%s); falling back to builtin",
@@ -266,7 +323,7 @@ def _refine_with_fastcoref(segments, full_text):
 # ── BookNLP adapter ────────────────────────────────────────────────
 
 
-def _refine_with_booknlp(segments, full_text):
+def _refine_with_booknlp(segments, full_text, model_size="small"):
     """Run BookNLP over the full text, parse its quote + entity output,
     and overwrite segment speakers with BookNLP's canonical character
     names.
@@ -274,12 +331,18 @@ def _refine_with_booknlp(segments, full_text):
     BookNLP returns quotes keyed by token offsets; we remap to character
     offsets through its tokens TSV and then align to our segments by
     substring position.
+
+    model_size is "small" (~150 MB, default) or "big" (~1 GB, higher
+    accuracy). BookNLP downloads model weights lazily on first use.
     """
     import csv
     import tempfile
     from pathlib import Path
 
     from booknlp.booknlp import BookNLP
+
+    if model_size not in ("small", "big"):
+        model_size = "small"
 
     tmp = Path(tempfile.mkdtemp(prefix="ffn-booknlp-"))
     infile = tmp / "book.txt"
@@ -289,7 +352,7 @@ def _refine_with_booknlp(segments, full_text):
         "en",
         {
             "pipeline": "entity,quote,coref",
-            "model": "small",  # ~150 MB; big is >1 GB
+            "model": model_size,
         },
     )
     model.process(str(infile), str(tmp), "book")

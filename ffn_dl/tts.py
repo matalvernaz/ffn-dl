@@ -1628,6 +1628,7 @@ def generate_audiobook(
     narrator_voice=None,
     speech_rate=0,
     attribution_backend="builtin",
+    attribution_model_size=None,
 ):
     """Generate an M4B audiobook from a Story with character voice mapping.
 
@@ -1637,6 +1638,8 @@ def generate_audiobook(
     attribution_backend selects the speaker-attribution refinement pass:
     "builtin" (regex only), "fastcoref", or "booknlp". Unknown or
     uninstalled backends silently fall back to builtin.
+    attribution_model_size picks a size variant for backends that
+    expose one (BookNLP: "small" or "big"; ignored otherwise).
     progress_callback(current_chapter, total_chapters, title) is called
     after each chapter is synthesized.
     """
@@ -1690,7 +1693,9 @@ def generate_audiobook(
 
         for idx, (text, segs) in enumerate(zip(chapter_texts, all_segments)):
             all_segments[idx] = attribution.refine_speakers(
-                segs, text, backend=attribution_backend,
+                segs, text,
+                backend=attribution_backend,
+                model_size=attribution_model_size,
             )
 
     # Apply pronunciation overrides to every segment's text before TTS.

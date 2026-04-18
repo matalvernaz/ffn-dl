@@ -128,3 +128,75 @@ def test_refine_none_backend_is_builtin():
     segs = [Segment("Hi", speaker="Harry")]
     assert attribution.refine_speakers(segs, "Hi", backend=None) is segs
     assert attribution.refine_speakers(segs, "Hi", backend="") is segs
+
+
+# ── model-size variants ───────────────────────────────────────────
+
+
+def test_sizes_for_builtin_is_none():
+    assert attribution.sizes_for("builtin") is None
+
+
+def test_sizes_for_fastcoref_is_none():
+    assert attribution.sizes_for("fastcoref") is None
+
+
+def test_sizes_for_booknlp_has_small_and_big():
+    sizes = attribution.sizes_for("booknlp")
+    assert sizes is not None
+    assert set(sizes.keys()) == {"small", "big"}
+    # Every size entry carries a user-facing display label.
+    for v in sizes.values():
+        assert "display" in v
+
+
+def test_default_size_booknlp_is_small():
+    assert attribution.default_size("booknlp") == "small"
+
+
+def test_default_size_no_variants_returns_none():
+    assert attribution.default_size("builtin") is None
+    assert attribution.default_size("fastcoref") is None
+
+
+def test_normalize_size_clamps_unknown_to_default():
+    assert attribution.normalize_size("booknlp", "enormous") == "small"
+    assert attribution.normalize_size("booknlp", None) == "small"
+    assert attribution.normalize_size("booknlp", "big") == "big"
+
+
+def test_normalize_size_for_no_variant_backend_is_none():
+    assert attribution.normalize_size("builtin", "small") is None
+    assert attribution.normalize_size("fastcoref", "big") is None
+
+
+def test_refine_passes_size_through_to_booknlp(monkeypatch):
+    """model_size should reach the BookNLP adapter after normalization."""
+    seen = {}
+
+    def fake(segments, full_text, model_size="small"):
+        seen["size"] = model_size
+        return segments
+
+    monkeypatch.setattr(attribution, "is_installed", lambda b: True)
+    monkeypatch.setattr(attribution, "_refine_with_booknlp", fake)
+
+    segs = [Segment("Hi", speaker="Harry")]
+    attribution.refine_speakers(segs, "Hi", backend="booknlp", model_size="big")
+    assert seen == {"size": "big"}
+
+
+def test_refine_ignores_size_for_fastcoref(monkeypatch):
+    """Sizes-less backends must be invoked without a size argument."""
+    called = {}
+
+    def fake(segments, full_text):
+        called["ok"] = True
+        return segments
+
+    monkeypatch.setattr(attribution, "is_installed", lambda b: True)
+    monkeypatch.setattr(attribution, "_refine_with_fastcoref", fake)
+
+    segs = [Segment("Hi", speaker="Harry")]
+    attribution.refine_speakers(segs, "Hi", backend="fastcoref", model_size="big")
+    assert called == {"ok": True}

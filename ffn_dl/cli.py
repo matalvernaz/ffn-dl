@@ -182,6 +182,7 @@ def _handle_merge_series(series_urls, args, output_dir):
                 progress_callback=audio_progress,
                 speech_rate=args.speech_rate,
                 attribution_backend=args.attribution,
+                attribution_model_size=args.attribution_model_size,
             )
         else:
             exporter = EXPORTERS[args.format]
@@ -257,6 +258,7 @@ def _handle_merge_parts(series_name, series_url, work_urls, args, output_dir):
             progress_callback=audio_progress,
             speech_rate=args.speech_rate,
             attribution_backend=args.attribution,
+            attribution_model_size=args.attribution_model_size,
         )
     else:
         exporter = EXPORTERS[args.format]
@@ -352,6 +354,7 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
                 progress_callback=audio_progress,
                 speech_rate=args.speech_rate,
                 attribution_backend=args.attribution,
+                attribution_model_size=args.attribution_model_size,
             )
         else:
             exporter = EXPORTERS[args.format]
@@ -1007,6 +1010,16 @@ def main(argv=None):
             "default regex parser. 'fastcoref' and 'booknlp' are optional "
             "neural models you must pip-install separately — see "
             "`ffn-dl --install-attribution BACKEND`."
+        ),
+    )
+    parser.add_argument(
+        "--attribution-model-size",
+        choices=["small", "big"],
+        default=None,
+        help=(
+            "Size variant for attribution backends that offer them "
+            "(BookNLP: 'small' ~150 MB or 'big' ~1 GB). Ignored "
+            "for 'builtin' and 'fastcoref'."
         ),
     )
     parser.add_argument(
