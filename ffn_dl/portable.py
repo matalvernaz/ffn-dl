@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -45,25 +44,61 @@ def _exe_dir() -> Path:
     return Path.home() / ".ffn-dl"  # dev fallback — never used in practice
 
 
-def _is_writable(p: Path) -> bool:
-    """True if we can create and remove a probe file inside ``p``.
+# Windows folders where unprivileged processes can't write by policy.
+# We fall back to %LOCALAPPDATA% only when the exe actually lives
+# inside one of these — NOT based on a probe file, because post-update
+# the exe dir can be briefly "un-writable" (AV scanning the freshly
+# extracted ffn-dl.exe, OneDrive sync, residual handles from
+# ZipExtractor). A transient probe failure used to trip the fallback
+# and leave a ghost ``%LOCALAPPDATA%\ffn-dl\`` with empty ``cache/``
+# and ``neural/`` subdirs next to an otherwise-healthy portable
+# install.
+_SYSTEM_PROTECTED_ENV_ROOTS = (
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "SystemRoot",
+)
 
-    The portable layout puts user data next to the exe, but nothing
-    stops a user from unzipping into ``C:\\Program Files\\ffn-dl\\``
-    where non-admin writes fail. Detecting that here lets us fall
-    back to a writable location instead of crashing on first save.
-    """
+
+def _system_protected_roots() -> list[str]:
+    """List of normalized Windows system directory prefixes that are
+    read-only for unprivileged users. Empty on non-Windows."""
+    if sys.platform != "win32":
+        return []
+    roots: list[str] = []
+    for env in _SYSTEM_PROTECTED_ENV_ROOTS:
+        v = os.environ.get(env)
+        if v:
+            roots.append(os.path.normcase(os.path.normpath(v)))
+    # WindowsApps (Microsoft Store sandbox) — writes fail silently or
+    # are redirected to a per-package virtualized location. Not
+    # somewhere a portable unzip would normally land, but users do
+    # surprising things.
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if localappdata:
+        roots.append(os.path.normcase(os.path.normpath(
+            str(Path(localappdata) / "Microsoft" / "WindowsApps")
+        )))
+    return roots
+
+
+def _is_system_protected(p: Path) -> bool:
+    """True when ``p`` lives inside a path where unprivileged writes
+    fail by OS policy rather than by transient locks."""
     try:
-        p.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=p, delete=True):
-            pass
-        return True
+        here = os.path.normcase(os.path.normpath(str(p.resolve())))
     except OSError:
-        return False
+        here = os.path.normcase(os.path.normpath(str(p)))
+    for root in _system_protected_roots():
+        root_trim = root.rstrip("\\/")
+        if here == root_trim or here.startswith(root_trim + os.sep):
+            return True
+    return False
 
 
 def _fallback_root() -> Path:
-    """Used when the exe dir isn't writable (e.g. Program Files)."""
+    """Used only when the exe dir is inside a system-protected path."""
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
         return Path(base) / "ffn-dl"
@@ -80,7 +115,7 @@ def portable_root() -> Path:
         return _cached_root
     if is_frozen():
         here = _exe_dir()
-        _cached_root = here if _is_writable(here) else _fallback_root()
+        _cached_root = _fallback_root() if _is_system_protected(here) else here
     else:
         _cached_root = Path.home() / ".ffn-dl"
     _cached_root.mkdir(parents=True, exist_ok=True)

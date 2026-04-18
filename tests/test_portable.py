@@ -37,20 +37,43 @@ def test_frozen_writable_exe_dir_wins(monkeypatch, tmp_path):
     assert root == exe_dir
 
 
-def test_frozen_readonly_exe_falls_back(monkeypatch, tmp_path):
-    """If the exe dir isn't writable (e.g. Program Files), fall back
-    to the user-local app data dir so the app can still save settings."""
-    fake_exe_dir = tmp_path / "readonly"
+def test_frozen_system_protected_exe_falls_back(monkeypatch, tmp_path):
+    """If the exe dir is inside a Windows system-protected root (e.g.
+    Program Files), fall back to %LOCALAPPDATA% so the app can still
+    save settings."""
+    fake_exe_dir = tmp_path / "program-files" / "ffn-dl"
     fallback = tmp_path / "local-appdata" / "ffn-dl"
 
     monkeypatch.setattr(portable, "is_frozen", lambda: True)
     monkeypatch.setattr(portable, "_exe_dir", lambda: fake_exe_dir)
-    monkeypatch.setattr(portable, "_is_writable", lambda p: p != fake_exe_dir)
+    monkeypatch.setattr(
+        portable, "_is_system_protected",
+        lambda p: p == fake_exe_dir,
+    )
     monkeypatch.setattr(portable, "_fallback_root", lambda: fallback)
 
     root = portable.portable_root()
     assert root == fallback
     assert fallback.exists()
+
+
+def test_frozen_ordinary_location_never_falls_back(monkeypatch, tmp_path):
+    """Regression: a portable install in Downloads/Desktop/Tools must
+    always use the exe dir, even if a write probe would transiently
+    fail (AV scan, OneDrive sync, post-update handle residue). Silent
+    fallback created a ghost %LOCALAPPDATA%\\ffn-dl\\ folder next to
+    the real install — we no longer probe, we check the path."""
+    exe_dir = tmp_path / "Downloads" / "ffn-dl"
+    exe_dir.mkdir(parents=True)
+    fallback = tmp_path / "local-appdata" / "ffn-dl"
+
+    monkeypatch.setattr(portable, "is_frozen", lambda: True)
+    monkeypatch.setattr(portable, "_exe_dir", lambda: exe_dir)
+    monkeypatch.setattr(portable, "_fallback_root", lambda: fallback)
+
+    root = portable.portable_root()
+    assert root == exe_dir
+    assert not fallback.exists()
 
 
 def test_subpaths_rooted_at_portable_root(monkeypatch, tmp_path):

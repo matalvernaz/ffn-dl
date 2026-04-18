@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.12.2 — 2026-04-18
+
+### Fix
+
+- **Auto-update no longer leaves a ghost `%LOCALAPPDATA%\ffn-dl\`
+  folder next to the real portable install.** Portable-root resolution
+  used a probe file (`tempfile.NamedTemporaryFile` inside the exe dir)
+  to decide whether to fall back to AppData. Right after an update,
+  the freshly-extracted `ffn-dl.exe` can be briefly non-writable
+  (Defender scan, OneDrive indexing, residual handles from
+  ZipExtractor), the probe failed, and the fallback path silently
+  created empty `cache/` + `neural/` subdirs under `%LOCALAPPDATA%`
+  while the real install kept working out of the exe dir. Root
+  resolution now checks the exe path against the known
+  system-protected roots (`%ProgramFiles%`, `%ProgramFiles(x86)%`,
+  `%ProgramW6432%`, `%SystemRoot%`, WindowsApps) and only falls back
+  when the install actually lives inside one of them. Ordinary
+  locations (Downloads, Desktop, Tools folders) always use the exe
+  dir. Users who already have the ghost folder can delete it safely —
+  nothing writes to it anymore.
+
 ## 1.12.1 — 2026-04-18
 
 ### Fix
