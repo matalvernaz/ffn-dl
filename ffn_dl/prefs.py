@@ -59,12 +59,22 @@ class Prefs:
     """Thin wrapper over wx.Config with string and bool accessors."""
 
     def __init__(self):
-        import wx
         from . import portable
 
         # Portable frozen build: keep settings.ini next to the exe
         # (or in the writable-fallback dir). Pip-installed / dev mode
         # uses the platform default so users keep their existing prefs.
+        #
+        # CLI-only installs may not have wxPython — the tool still works
+        # with a read-only fallback that returns DEFAULTS and quietly
+        # swallows set()/set_bool() calls. The GUI install path always
+        # has wx, so users never hit this branch in practice.
+        self._cfg = None
+        try:
+            import wx
+        except ImportError:
+            return
+
         if portable.is_frozen():
             self._cfg = wx.FileConfig(
                 appName="ffn-dl",
@@ -75,19 +85,27 @@ class Prefs:
             self._cfg = wx.Config("ffn-dl")
 
     def get(self, key: str, default=None):
+        if self._cfg is None:
+            return default if default is not None else DEFAULTS.get(key)
         val = self._cfg.Read(key, "")
         return val if val else (default if default is not None else DEFAULTS.get(key))
 
     def set(self, key: str, value) -> None:
+        if self._cfg is None:
+            return
         self._cfg.Write(key, "" if value is None else str(value))
         self._cfg.Flush()
 
     def get_bool(self, key: str, default: bool = None) -> bool:
         if default is None:
             default = DEFAULTS.get(key, False)
+        if self._cfg is None:
+            return default
         return self._cfg.ReadBool(key, default)
 
     def set_bool(self, key: str, value: bool) -> None:
+        if self._cfg is None:
+            return
         self._cfg.WriteBool(key, bool(value))
         self._cfg.Flush()
 
@@ -99,6 +117,8 @@ class Prefs:
         restart path so the child can't race ahead and read stale
         values that we just wrote.
         """
+        if self._cfg is None:
+            return
         try:
             self._cfg.Flush()
         except Exception:

@@ -862,9 +862,12 @@ def _handle_scan_library(args):
         sys.exit(1)
 
     print(f"Scanning {root}...")
+    # Library scans always recurse — a library is by definition a tree.
+    # The --recursive flag is kept only for --update-all's existing
+    # per-folder semantics.
     result = scan(
         root,
-        recursive=args.recursive,
+        recursive=True,
         clear_existing=args.clear_library,
     )
     print(
@@ -877,10 +880,69 @@ def _handle_scan_library(args):
     if result.error_files:
         print("Errors:")
         for path, msg in result.error_files[:20]:
-            rel = path.relative_to(root) if args.recursive else path.name
+            try:
+                rel = path.relative_to(root.resolve())
+            except ValueError:
+                rel = path
             print(f"  {rel}: {msg}")
         if len(result.error_files) > 20:
             print(f"  ... and {len(result.error_files) - 20} more")
+    sys.exit(0 if result.errors == 0 else 1)
+
+
+def _handle_reorganize(args):
+    """Plan (and optionally apply) file moves to match the library template."""
+    from .library.reorganizer import apply as apply_moves
+    from .library.reorganizer import plan
+    from .library.template import DEFAULT_MISC_FOLDER, DEFAULT_TEMPLATE
+    from .prefs import (
+        KEY_LIBRARY_MISC_FOLDER,
+        KEY_LIBRARY_PATH_TEMPLATE,
+        Prefs,
+    )
+
+    root = Path(args.reorganize)
+    if not root.is_dir():
+        print(f"Error: {root} is not a directory.", file=sys.stderr)
+        sys.exit(1)
+
+    prefs = Prefs()
+    template = prefs.get(KEY_LIBRARY_PATH_TEMPLATE) or DEFAULT_TEMPLATE
+    misc_folder = prefs.get(KEY_LIBRARY_MISC_FOLDER) or DEFAULT_MISC_FOLDER
+
+    moves = plan(root, template=template, misc_folder=misc_folder)
+
+    if not moves:
+        print(f"Library at {root} is already organized — no moves needed.")
+        sys.exit(0)
+
+    root_resolved = root.resolve()
+    print(f"{len(moves)} move(s) planned for {root_resolved}:\n")
+    for op in moves:
+        src_rel = op.source.relative_to(root_resolved) if op.source.is_relative_to(
+            root_resolved
+        ) else op.source
+        tgt_rel = op.target.relative_to(root_resolved)
+        arrow = "renamed to" if op.is_rename else "->"
+        print(f"  {src_rel}  {arrow}  {tgt_rel}")
+
+    if not args.apply:
+        print(
+            "\nDry run. Re-run with --apply to execute these moves."
+        )
+        sys.exit(0)
+
+    print("\nApplying...")
+    result = apply_moves(root, moves)
+    print(
+        f"Applied {result.applied}, skipped {result.skipped}, "
+        f"errors {result.errors}."
+    )
+    if result.messages:
+        for msg in result.messages[:20]:
+            print(f"  {msg}")
+        if len(result.messages) > 20:
+            print(f"  ... and {len(result.messages) - 20} more")
     sys.exit(0 if result.errors == 0 else 1)
 
 
@@ -1020,6 +1082,25 @@ def main(argv=None):
         help=(
             "With --scan-library: drop this library's existing index entries "
             "before scanning, so orphan files (deleted off disk) are removed."
+        ),
+    )
+    parser.add_argument(
+        "--reorganize",
+        metavar="DIR",
+        help=(
+            "Plan the moves that would bring DIR into alignment with the "
+            "library path template (default: <fandom>/<title> - "
+            "<author>.<ext>). Reads from the library index; run "
+            "--scan-library first. Dry-run by default — use --apply to "
+            "actually move files."
+        ),
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "With --reorganize: execute the planned moves instead of just "
+            "listing them."
         ),
     )
     parser.add_argument(
@@ -1522,6 +1603,11 @@ def main(argv=None):
     # --- Library scan mode ---
     if args.scan_library:
         _handle_scan_library(args)
+        return
+
+    # --- Library reorganize mode ---
+    if args.reorganize:
+        _handle_reorganize(args)
         return
 
     # --- Update-all folder mode ---

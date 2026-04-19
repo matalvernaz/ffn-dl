@@ -177,11 +177,17 @@ _NON_FANDOM_PREFIXES = ("rated ", "rating:", "status:")
 
 def _looks_like_fandom(subject: str) -> bool:
     """Heuristic: a dc:subject entry is a fandom unless it looks like
-    genre/rating/status metadata. Keeps ffn-dl-written rating/status
-    subjects out of the fandom list without dropping real fandoms
-    named things like 'Complete Works'."""
+    genre/rating/status metadata or a relationship tag. FanFicFare
+    mixes fandoms with relationships ("Harry/Hermione") in the same
+    dc:subject field; the slash is a near-perfect discriminator since
+    fandom names almost never contain one."""
     s = subject.strip()
     if not s:
+        return False
+    if "/" in s:
+        # Relationship tags. Rare genuine crossovers like "Fandom A/B"
+        # also get filtered, but those are inherently multi-fandom and
+        # the Misc fallback handles them correctly anyway.
         return False
     lower = s.lower()
     if lower in _NON_FANDOM_LABELS:
@@ -235,8 +241,13 @@ def _fill_from_epub(path: Path, md: "FileMetadata") -> None:
 
     md.fandoms = [s[0] for s in subjects if _looks_like_fandom(s[0])]
 
-    # ffn-dl's own EPUBs don't embed fandom as dc:subject — they embed
-    # it in the title page's metadata table as "Category". Read it back.
+    # ffn-dl's own EPUBs embed genre/characters/rating/status as
+    # dc:subject entries alongside (sometimes) real fandom tags.
+    # When the title page has a structured Category field, treat it
+    # as authoritative — it's what the originating scraper decided
+    # to call the fandom — and drop the looser subject-derived list
+    # for this file. Foreign EPUBs (FFF/FicHub) have no title page
+    # in our format, so they keep the subject-derived fandoms.
     for item in book.get_items():
         if not hasattr(item, "file_name"):
             continue
@@ -245,8 +256,8 @@ def _fill_from_epub(path: Path, md: "FileMetadata") -> None:
         body = item.content.decode("utf-8", errors="replace")
         kv = _parse_kv_table(body)
         category = kv.get("Category")
-        if category and category not in md.fandoms:
-            md.fandoms.insert(0, category)
+        if category:
+            md.fandoms = [category]
         if not md.status:
             md.status = kv.get("Status")
         if not md.rating:
