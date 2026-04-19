@@ -431,7 +431,17 @@ class LibraryDialog(wx.Dialog):
         # dialog and bails instead of touching destroyed controls.
         self._alive = False
         self._save_prefs()
-        event.Skip()
+        # The dialog is opened via ShowModal() (see gui.MainFrame's
+        # library menu handler), so the Close button / window X /
+        # Escape key all need to end the modal loop explicitly —
+        # ``event.Skip()`` on its own lets wx destroy the window but
+        # leaves the caller's ShowModal() blocked, which is what made
+        # the Close button feel inert. EndModal is a no-op for
+        # modeless callers, so this path stays safe either way.
+        if self.IsModal():
+            self.EndModal(wx.ID_CLOSE)
+        else:
+            event.Skip()
 
 
 class ReorganizePreviewDialog(wx.Dialog):

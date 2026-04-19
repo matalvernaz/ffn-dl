@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.20.5 — 2026-04-19
+
+### Fix
+
+- **Library dialog's Close button and window X now actually close
+  the dialog.** LibraryDialog is opened modally via ShowModal() but
+  its EVT_CLOSE handler only called event.Skip(), which lets wx
+  destroy the widgets without ending the modal loop — ShowModal()
+  stayed blocked and the dialog appeared stuck on screen. The
+  handler now calls EndModal(wx.ID_CLOSE) when the dialog is modal,
+  matching the already-correct pattern in ReviewDialog right below
+  it. Covers Close button, the window X, and the Escape key.
+
 ## 1.20.4 — 2026-04-19
 
 ### Fix
