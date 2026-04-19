@@ -100,9 +100,29 @@ def default_refresh_args(
     workers: int = 5,
 ) -> Namespace:
     """Namespace with sensible defaults for callers that need to drive
-    cli._build_scraper / cli._download_one without having gone through
-    argparse. Used by the GUI's Check for Updates button.
+    ``cli._build_scraper`` / ``cli._download_one`` without having gone
+    through argparse. Used by the GUI's Check for Updates button.
+
+    Anything ``_download_one`` reads off ``args`` has to be present on
+    this Namespace — missing attributes raise ``AttributeError`` at
+    download time, which the GUI would then surface as an opaque
+    "Update failed" message. Read user-configurable fields (filename
+    template, strip-notes / hr-as-stars flags) from :class:`Prefs` so
+    the GUI-driven update path honours the same settings as the
+    CLI, with the CLI's argparse defaults as a secondary fallback.
     """
+    # Imported locally so this helper is safe to call from environments
+    # where wxPython isn't installed (``Prefs`` gracefully no-ops when
+    # wx is unavailable). Same rationale as the lazy import in cli.py.
+    from ..exporters import DEFAULT_TEMPLATE
+    from ..prefs import (
+        KEY_HR_AS_STARS,
+        KEY_NAME_TEMPLATE,
+        KEY_STRIP_NOTES,
+        Prefs,
+    )
+
+    prefs = Prefs()
     return Namespace(
         # Scraper tuning
         max_retries=5,
@@ -115,10 +135,21 @@ def default_refresh_args(
         dry_run=dry_run,
         skip_complete=skip_complete,
         probe_workers=workers,
-        # Export path knobs
+        # Export path knobs. ``name`` is the filename template; without
+        # it, ``_download_one``'s export branch raises AttributeError.
         format=None,
         output=None,
         chapters=None,
-        hr_as_stars=False,
-        strip_notes=False,
+        name=prefs.get(KEY_NAME_TEMPLATE) or DEFAULT_TEMPLATE,
+        hr_as_stars=prefs.get_bool(KEY_HR_AS_STARS),
+        strip_notes=prefs.get_bool(KEY_STRIP_NOTES),
+        # Library updates never re-generate audiobooks, but the audio
+        # branch still reads these — set plausible defaults so a
+        # future code path that does hit them doesn't crash.
+        speech_rate="0",
+        attribution="builtin",
+        attribution_model_size="",
+        # Misc download-time flags accessed by _download_one.
+        send_to_kindle=None,
+        clean_cache=False,
     )

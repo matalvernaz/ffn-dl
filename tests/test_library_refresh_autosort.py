@@ -34,6 +34,29 @@ def test_build_refresh_queue_empty_library(tmp_path: Path):
     assert skipped == []
 
 
+def test_default_refresh_args_has_every_attribute_download_reads():
+    """Regression for "Update failed: 'Namespace' object has no attribute
+    'name'". The GUI's Check for Updates button builds this Namespace
+    and passes it straight to ``_download_one``, so any attribute
+    ``_download_one`` reads unconditionally has to exist here."""
+    args = default_refresh_args()
+    required_attrs = (
+        # Scraper / HTTP tuning (read by _build_scraper)
+        "max_retries", "no_cache", "delay_min", "delay_max",
+        "chunk_size", "use_wayback",
+        # Run orchestration (read by _run_update_queue + _download_one)
+        "dry_run", "probe_workers", "format", "output", "chapters",
+        # Export path knobs that _download_one dereferences without a
+        # getattr fallback — these are what crashed Matt's run.
+        "name", "hr_as_stars", "strip_notes",
+        # Audio-branch and post-export flags _download_one reads.
+        "speech_rate", "attribution", "attribution_model_size",
+        "send_to_kindle", "clean_cache",
+    )
+    missing = [a for a in required_attrs if not hasattr(args, a)]
+    assert not missing, f"default_refresh_args missing: {missing}"
+
+
 def test_build_refresh_queue_from_indexed_library(tmp_path: Path):
     lib = tmp_path / "lib"
     lib.mkdir()

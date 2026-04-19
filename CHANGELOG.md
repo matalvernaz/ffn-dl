@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.20.4 — 2026-04-19
+
+### Fix
+
+- **GUI Check for Updates no longer crashes with "Update failed:
+  'Namespace' object has no attribute 'name'".** The shared
+  ``_download_one`` code path reads ``args.name`` (filename template),
+  ``args.hr_as_stars``, ``args.strip_notes`` and ``args.clean_cache``
+  unconditionally. ``library.refresh.default_refresh_args`` — used by
+  the GUI's library update button — didn't set any of them, so the
+  first story with new chapters raised AttributeError which the GUI
+  caught and surfaced as an opaque "Update failed" message. All four
+  are now populated, with ``name`` / ``hr_as_stars`` / ``strip_notes``
+  pulled from Prefs so the GUI update honours the user's configured
+  filename template and export flags the same way the CLI does.
+  Audio-branch and kindle-send attributes are set too for defence in
+  depth. A regression test asserts every attribute ``_download_one``
+  reads is present on the Namespace.
+
 ## 1.20.3 — 2026-04-19
 
 ### Add
