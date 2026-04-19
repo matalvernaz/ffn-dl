@@ -862,7 +862,10 @@ class MainFrame(wx.Frame):
         try:
             info = self_update.check_for_update()
         except Exception as exc:
-            # Silent — a failed check shouldn't bug the user
+            # Route to the file logger too — the GUI panel is gone the
+            # moment the user closes the window, so a pane-only message
+            # leaves no trail to debug curl/TLS/rate-limit failures from.
+            logger.warning("Update check failed", exc_info=True)
             wx.CallAfter(self._log, f"(Update check failed: {exc})")
             return
         if info is None:
@@ -1668,6 +1671,7 @@ class MainFrame(wx.Frame):
             try:
                 info = self_update.check_for_update()
             except Exception as exc:
+                logger.warning("Update check failed", exc_info=True)
                 wx.CallAfter(self._log, f"Update check failed: {exc}")
                 wx.CallAfter(
                     wx.MessageBox,

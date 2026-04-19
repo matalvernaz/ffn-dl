@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.20.6 — 2026-04-19
+
+### Fix
+
+- **Self-update failures now land in `ffn-dl.log`.** The background
+  update check and the manual *Check for Updates* menu both caught
+  exceptions from `self_update.check_for_update()` and wrote the
+  message only to the GUI output panel — so once the window closed,
+  the curl/TLS/rate-limit error was gone. Both handlers now also
+  call `logger.warning(..., exc_info=True)` so the traceback survives
+  in the rotating file log and the failure is diagnosable after the
+  fact.
+
 ## 1.20.5 — 2026-04-19
 
 ### Fix
