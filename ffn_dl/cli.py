@@ -791,6 +791,12 @@ def _handle_update_all(args: argparse.Namespace) -> None:
         print(f"Error: {folder} is not a directory.", file=sys.stderr)
         sys.exit(1)
 
+    try:
+        check_format_deps(args.format)
+    except ImportError as exc:
+        print(f"Missing dependency: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     iterator = folder.rglob("*") if args.recursive else folder.iterdir()
     files = sorted(
         p for p in iterator
@@ -1114,6 +1120,12 @@ def _handle_update_library(args: argparse.Namespace) -> None:
         print(f"Error: {root} is not a directory.", file=sys.stderr)
         sys.exit(1)
     root_resolved = root.resolve()
+
+    try:
+        check_format_deps(args.format)
+    except ImportError as exc:
+        print(f"Missing dependency: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     workers = max(1, int(args.probe_workers or 5))
     mode_bits = []

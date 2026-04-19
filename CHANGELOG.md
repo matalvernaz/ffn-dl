@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.19.2 — 2026-04-19
+
+### Fix
+
+- **Bulk-update commands now pre-flight format dependencies.**
+  `--update-all` and `--update-library` previously skipped the
+  `check_format_deps` guard that every other download entry point
+  calls, so a user missing `ebooklib` or `edge_tts` would have every
+  story in a library downloaded and then fail at export time. Both
+  handlers now abort up front with a clear "Missing dependency"
+  message, matching `_download_one`, `_handle_merge_series`, and
+  `_handle_merge_parts`.
+- **Surfaced silent failures in the package bootstrap.** The
+  `portable.setup_env()` and `neural_env.activate()` calls in
+  `ffn_dl/__init__.py` were wrapped in bare `except Exception: pass`,
+  so if the portable-root redirect failed, user data would quietly
+  land in `~/.ffn-dl` instead of the exe folder with no indication
+  anything had gone wrong. Both catches now call `logger.exception`
+  so the traceback reaches the log file when either bootstrap step
+  fails, without blocking the import.
+
 ## 1.19.1 — 2026-04-19
 
 ### Change
