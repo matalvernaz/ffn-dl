@@ -45,6 +45,12 @@ class LibraryDialog(wx.Dialog):
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
         self._prefs = prefs
+        # _alive guards worker-thread callbacks — they fire through
+        # wx.CallAfter and can land after the dialog is destroyed
+        # (user closed it mid-scan). EVT_CLOSE flips the flag before
+        # wx tears down the widgets.
+        self._alive = True
+        self.Bind(wx.EVT_CLOSE, self._on_close_event)
         self._build_ui()
         self._load_prefs()
 
@@ -217,6 +223,8 @@ class LibraryDialog(wx.Dialog):
         threading.Thread(target=worker, daemon=True).start()
 
     def _scan_finished(self, result) -> None:
+        if not self._alive:
+            return
         self._append_status(
             f"Scanned {result.total_files} file(s): "
             f"{result.identified_via_url} tracked by URL, "
@@ -233,6 +241,8 @@ class LibraryDialog(wx.Dialog):
         self._set_busy(False)
 
     def _scan_failed(self, exc: Exception) -> None:
+        if not self._alive:
+            return
         self._append_status(f"Scan failed: {exc}")
         self._set_busy(False)
 
@@ -294,6 +304,8 @@ class LibraryDialog(wx.Dialog):
         threading.Thread(target=worker, daemon=True).start()
 
     def _apply_finished(self, result) -> None:
+        if not self._alive:
+            return
         self._append_status(
             f"Applied {result.applied}, skipped {result.skipped}, "
             f"errors {result.errors}."
@@ -305,14 +317,18 @@ class LibraryDialog(wx.Dialog):
         self._set_busy(False)
 
     def _apply_failed(self, exc: Exception) -> None:
+        if not self._alive:
+            return
         self._append_status(f"Reorganize failed: {exc}")
         self._set_busy(False)
 
-    # Persist prefs on close, not just on each action, so a user who
-    # typed a new template and closed without scanning still keeps it.
-    def Close(self, force: bool = False) -> bool:  # noqa: N802 (wx API)
+    def _on_close_event(self, event: wx.Event) -> None:
+        # Flip the alive flag before wx starts tearing down widgets so
+        # any worker callback queued through wx.CallAfter sees a dead
+        # dialog and bails instead of touching destroyed controls.
+        self._alive = False
         self._save_prefs()
-        return super().Close(force)
+        event.Skip()
 
 
 class ReorganizePreviewDialog(wx.Dialog):

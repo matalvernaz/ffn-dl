@@ -35,10 +35,52 @@ DEFAULT_MISC_FOLDER = "Misc"
 # then split on `/` to recover the template-intended separators.
 _UNSAFE = re.compile(r'[/<>:"\\|?*\x00-\x1f]')
 
+# Windows reserves these device names — a file called "CON.epub" fails
+# to create on NTFS. Comparison is case-insensitive and covers the
+# base name before any dot.
+_WINDOWS_RESERVED = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
+
+# Per-component cap. Most filesystems allow 255 bytes; leaving headroom
+# keeps us safe with multibyte UTF-8 characters and lets the extension
+# survive when we have to truncate. Full-path limits (Windows' 260-char
+# default) are the user's concern once they pick a deep library root.
+_MAX_SEGMENT_LEN = 200
+
 
 def _safe(value: str) -> str:
     cleaned = _UNSAFE.sub("_", value).strip(". ")
     return cleaned or "_"
+
+
+def _final_segment(s: str) -> str:
+    """Post-split sanitizer applied to every path component.
+
+    Handles two concerns _safe() can't, because they're properties of
+    the whole segment rather than any one substituted value:
+
+    * Length cap (preserves the file extension where it can)
+    * Windows reserved device names (CON, PRN, etc.) — prefix an
+      underscore so the final name isn't e.g. "CON.epub"
+    """
+    if len(s) > _MAX_SEGMENT_LEN:
+        base, sep, ext = s.rpartition(".")
+        # Only treat the trailing part as an extension if it looks
+        # like one: short, alphanumeric, and non-empty. Otherwise
+        # truncate the raw string so we don't cleave a title at a
+        # coincidental dot.
+        if sep and base and 1 <= len(ext) <= 10 and ext.isalnum():
+            budget = max(1, _MAX_SEGMENT_LEN - len(sep) - len(ext))
+            s = base[:budget] + sep + ext
+        else:
+            s = s[:_MAX_SEGMENT_LEN]
+    base_for_reserved = s.split(".", 1)[0].lower()
+    if base_for_reserved in _WINDOWS_RESERVED:
+        s = "_" + s
+    return s
 
 
 def _pick_fandom(fandoms: list[str], misc_folder: str) -> str:
@@ -72,5 +114,13 @@ def render(
             f"Available: {', '.join('{' + k + '}' for k in fields)}"
         ) from None
 
-    parts = [p for p in rendered.split("/") if p]
+    # Drop empty, "." and ".." segments. Empty handles a leading "/";
+    # "." and ".." stop a poorly-templated or hostile metadata value
+    # from escaping the library root when the caller joins the result
+    # onto the root path.
+    parts = [
+        _final_segment(p)
+        for p in rendered.split("/")
+        if p and p not in (".", "..")
+    ]
     return Path(*parts) if parts else Path("_")

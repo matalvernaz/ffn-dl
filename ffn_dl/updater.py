@@ -1,10 +1,13 @@
 """Update mode — count chapters in existing files, detect new chapters."""
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -219,11 +222,15 @@ def _fill_from_epub(path: Path, md: "FileMetadata") -> None:
     try:
         from ebooklib import epub
     except ImportError:
+        logger.warning(
+            "ebooklib not installed; EPUB metadata unavailable for %s", path
+        )
         return
 
     try:
         book = epub.read_epub(str(path))
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to read EPUB %s: %s", path, exc)
         return
 
     dc = book.metadata.get("http://purl.org/dc/elements/1.1/", {})

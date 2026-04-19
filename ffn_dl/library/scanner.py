@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterator
 
 from ..updater import extract_metadata
 from .candidate import Confidence
@@ -12,6 +14,31 @@ from .index import LibraryIndex
 
 
 _EXTS = (".epub", ".html", ".txt")
+
+
+def _walk_files(root: Path, recursive: bool) -> Iterator[Path]:
+    """Yield every file under ``root`` without following symlinks.
+
+    Using ``os.walk(followlinks=False)`` instead of ``Path.rglob``
+    protects against two failure modes: self-referential symlinks
+    that would loop forever, and unintended double-indexing when a
+    user's library contains convenience symlinks to files that
+    already live elsewhere in the tree.
+    """
+    if not recursive:
+        for entry in root.iterdir():
+            if entry.is_file() and not entry.is_symlink():
+                yield entry
+        return
+    for dirpath, _dirnames, filenames in os.walk(str(root), followlinks=False):
+        for fname in filenames:
+            candidate = Path(dirpath) / fname
+            # Still skip symlink files even when walking without
+            # following — they could point outside the library or
+            # duplicate indexed content.
+            if candidate.is_symlink():
+                continue
+            yield candidate
 
 
 @dataclass
@@ -46,10 +73,9 @@ def scan(
         index.clear_library(root)
 
     result = ScanResult(root=root)
-    iterator = root.rglob("*") if recursive else root.iterdir()
 
-    for path in iterator:
-        if not path.is_file() or path.suffix.lower() not in _EXTS:
+    for path in _walk_files(root, recursive):
+        if path.suffix.lower() not in _EXTS:
             continue
         result.total_files += 1
         try:
