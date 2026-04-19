@@ -141,7 +141,10 @@ def test_index_save_load_roundtrip(tmp_path: Path):
     entries = list(idx2.stories_in(library))
     assert len(entries) == 1
     url, entry = entries[0]
-    assert url == "https://www.fanfiction.net/s/12345/1/"
+    # Index keys are canonical form (sites.canonical_url) — FFN's /1/
+    # chapter suffix and any title slug are stripped so files embedding
+    # different URL shapes of the same story collapse to one entry.
+    assert url == "https://www.fanfiction.net/s/12345"
     assert entry["title"] == "The Sample Fic"
     assert entry["adapter"] == "ffn"
     assert entry["confidence"] == "high"

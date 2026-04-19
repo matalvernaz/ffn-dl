@@ -45,8 +45,11 @@ def test_build_refresh_queue_from_indexed_library(tmp_path: Path):
     assert len(queue) == 2
     assert skipped == []
     urls = {entry["url"] for entry in queue}
+    # Keys are the canonical URL form — FFN's /1/ suffix is stripped by
+    # sites.canonical_url so files carrying different URL shapes of the
+    # same story collapse to one entry.
     assert urls == {
-        "https://www.fanfiction.net/s/1/1/",
+        "https://www.fanfiction.net/s/1",
         "https://archiveofourown.org/works/2",
     }
     # Each entry has the shape _run_update_queue needs

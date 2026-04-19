@@ -7,6 +7,7 @@ each maintaining their own copies.
 
 import re
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from .ao3 import AO3Scraper
 from .ficwad import FicWadScraper
@@ -117,3 +118,110 @@ def extract_story_url(text: str) -> Optional[str]:
         if match:
             return match.group(0)
     return None
+
+
+# ---------------------------------------------------------------------------
+# URL canonicalisation
+#
+# Two files embedding different URL forms of the same story must collapse
+# to one index entry — otherwise the library scanner records two stale
+# copies and duplicate detection misses them. Observed variation in real
+# libraries (from one 817-file sample):
+#
+#   https://www.fanfiction.net/s/12345        ← canonical
+#   http://www.fanfiction.net/s/12345         ← http
+#   https://www.fanfiction.net/s/12345/       ← trailing slash
+#   https://www.fanfiction.net/s/12345/1/     ← chapter suffix
+#   https://www.fanfiction.net/s/12345/1/Title-Slug  ← chapter + slug
+#   http://archiveofourown.org/works/12345    ← http AO3
+#   https://archiveofourown.org/works/12345   ← canonical AO3
+#
+# ``canonical_url`` maps all of these to a single per-site canonical
+# form, so the library index and the watchlist store can rely on a
+# byte-identical key for the "same" story.
+# ---------------------------------------------------------------------------
+
+# Per-site rewrite rules. Each tuple is
+#   (hostname_fragment, canonical_hostname, id_path_regex, canonical_path_template)
+# ``id_path_regex`` matches the path portion of the URL and captures the
+# story identifier; the canonical form is ``canonical_path_template``
+# interpolated with that capture.
+_CANONICAL_RULES: list[tuple[str, str, re.Pattern[str], str]] = [
+    (
+        "fanfiction.net", "www.fanfiction.net",
+        re.compile(r"^/s/(\d+)"), "/s/{}",
+    ),
+    (
+        "archiveofourown.org", "archiveofourown.org",
+        re.compile(r"^/works/(\d+)"), "/works/{}",
+    ),
+    (
+        "ao3.org", "archiveofourown.org",
+        re.compile(r"^/works/(\d+)"), "/works/{}",
+    ),
+    (
+        "royalroad.com", "www.royalroad.com",
+        re.compile(r"^/fiction/(\d+)"), "/fiction/{}",
+    ),
+    (
+        "ficwad.com", "ficwad.com",
+        re.compile(r"^/story/(\d+)"), "/story/{}",
+    ),
+    (
+        "mediaminer.org", "www.mediaminer.org",
+        # Two MediaMiner URL shapes exist: /fanfic/view_st.php/<id> and
+        # /fanfic/s/<slug>/<id>. Both trail with the numeric id, which
+        # we canonicalise to view_st.php.
+        re.compile(r"^/fanfic/(?:view_st\.php|s/[^/]+)/(\d+)"),
+        "/fanfic/view_st.php/{}",
+    ),
+    (
+        "literotica.com", "www.literotica.com",
+        # Literotica story ids are slugs, not integers.
+        re.compile(r"^/s/([a-z0-9\-]+)"), "/s/{}",
+    ),
+    (
+        "wattpad.com", "www.wattpad.com",
+        # Wattpad accepts /story/<id> and /<id>-<slug>; collapse both to
+        # the /story/<id> form that the scraper uses as its canonical.
+        re.compile(r"^/(?:story/)?(\d+)"), "/story/{}",
+    ),
+]
+
+
+def canonical_url(url: str) -> str:
+    """Return the canonical form of a supported-site story URL.
+
+    All known variations for a given story (http/https, with or without
+    ``www.``, trailing slash, ``/1/`` chapter suffix, title slug) collapse
+    to a single deterministic string. Unsupported URLs are returned
+    lowercased and scheme-normalised but otherwise unchanged so callers
+    always get something stable to use as a dict key.
+
+    Empty strings are passed through — the caller (library index) treats
+    "no URL" and "empty URL" the same way.
+    """
+    if not url:
+        return ""
+    raw = url.strip()
+    parts = urlsplit(raw)
+    netloc = parts.netloc.lower()
+    path = parts.path
+
+    for host_fragment, canonical_host, path_re, path_template in _CANONICAL_RULES:
+        if host_fragment not in netloc:
+            continue
+        match = path_re.match(path)
+        if not match:
+            continue
+        return urlunsplit(
+            ("https", canonical_host, path_template.format(match.group(1)), "", "")
+        )
+
+    # Unknown host: at least normalise scheme to https, drop ``www.``
+    # (if present), drop query/fragment, and strip a trailing slash so
+    # minor URL variants still dedupe.
+    fallback_host = netloc
+    if fallback_host.startswith("www."):
+        fallback_host = fallback_host[len("www."):]
+    return urlunsplit(("https", fallback_host, path.rstrip("/"), "", ""))

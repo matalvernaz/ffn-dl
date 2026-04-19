@@ -1028,6 +1028,14 @@ def _handle_scan_library(args: argparse.Namespace) -> None:
         f"--review-library to resolve), "
         f"{result.errors} error(s)."
     )
+    if result.duplicates:
+        print(
+            f"{result.duplicates} file(s) share a source URL with another "
+            "copy on disk. The index tracks a primary path per story and "
+            "records the extras in `duplicate_relpaths`; review and delete "
+            "the copy you don't want."
+        )
+        _print_duplicate_pairs(result.root)
     if result.error_files:
         print("Errors:")
         for path, msg in result.error_files[:20]:
@@ -1039,6 +1047,39 @@ def _handle_scan_library(args: argparse.Namespace) -> None:
         if len(result.error_files) > 20:
             print(f"  ... and {len(result.error_files) - 20} more")
     sys.exit(0 if result.errors == 0 else 1)
+
+
+# How many duplicate pairs to print inline before falling back to
+# "… and N more" to keep a 800-file library scan's output readable.
+_MAX_INLINE_DUPLICATE_PAIRS = 20
+
+
+def _print_duplicate_pairs(root: Path) -> None:
+    """Print ``primary -> duplicate`` pairs for the library at ``root``.
+
+    Reads from the on-disk index rather than the scan result because
+    the scanner doesn't keep a per-entry log — the index is where the
+    ``duplicate_relpaths`` list was written, so that's where we read
+    it back from.
+    """
+    from .library.index import LibraryIndex
+
+    idx = LibraryIndex.load()
+    printed = 0
+    total = 0
+    for url, entry in idx.stories_in(root.resolve()):
+        dupes = entry.get("duplicate_relpaths") or []
+        if not dupes:
+            continue
+        primary = entry.get("relpath") or "(unknown)"
+        for dup in dupes:
+            total += 1
+            if printed < _MAX_INLINE_DUPLICATE_PAIRS:
+                print(f"  {primary}  <->  {dup}")
+                printed += 1
+    remaining = total - printed
+    if remaining > 0:
+        print(f"  ... and {remaining} more")
 
 
 def _handle_review_library(args: argparse.Namespace) -> None:

@@ -92,6 +92,7 @@ class LibraryIndex:
         if not isinstance(raw, dict) or raw.get("version") != SCHEMA_VERSION:
             return cls(p, _empty())
         raw.setdefault("libraries", {})
+        _migrate_non_canonical_keys(raw)
         return cls(p, raw)
 
     def save(self) -> None:
@@ -126,19 +127,45 @@ class LibraryIndex:
         consumers stick to the stories_in / untrackable_in helpers."""
         return self._library(root)
 
-    def record(self, root: Path, candidate: StoryCandidate) -> None:
+    def record(self, root: Path, candidate: StoryCandidate) -> bool:
         """Add or update an entry for this candidate under ``root``.
 
-        Trackable candidates (HIGH/MEDIUM) are keyed by source URL so
-        re-scanning an already-known story updates the existing entry
-        rather than duplicating it. LOW-confidence candidates go into
-        ``untrackable`` where --update-all knows to skip them."""
+        Trackable candidates (HIGH/MEDIUM) are keyed by *canonical*
+        source URL (see :func:`ffn_dl.sites.canonical_url`) so the same
+        story embedded at two paths with slightly different URL forms
+        (``/s/N`` vs ``/s/N/1/``) collapses to a single entry.
+
+        When a second file maps to an already-recorded URL, the new
+        relpath is appended to ``duplicate_relpaths`` on the existing
+        entry rather than overwriting the primary ``relpath``. This
+        preserves the original without silently losing information
+        about the other copy. The scanner uses the return value to
+        count duplicates for its scan summary: True if a new entry was
+        created, False if this was a duplicate of an existing one.
+        LOW-confidence candidates always append to ``untrackable`` and
+        return True.
+        """
+        from ..sites import canonical_url
+
         lib = self._library(root)
         rel = str(candidate.path.relative_to(Path(root).expanduser().resolve()))
         md = candidate.metadata
 
         if candidate.is_trackable and md.source_url:
-            lib["stories"][md.source_url] = {
+            key = canonical_url(md.source_url) or md.source_url
+            existing = lib["stories"].get(key)
+            if existing is not None and existing.get("relpath") != rel:
+                # Duplicate copy of a story we've already indexed. Keep
+                # the primary entry's relpath stable (so reorganise /
+                # update-library keep pointing at the same file) and
+                # record the second path as a sibling. Deduplicate in
+                # case the same path turns up twice in a re-scan.
+                dupes = existing.setdefault("duplicate_relpaths", [])
+                if rel not in dupes and rel != existing.get("relpath"):
+                    dupes.append(rel)
+                return False
+
+            lib["stories"][key] = {
                 "relpath": rel,
                 "title": md.title,
                 "author": md.author,
@@ -151,7 +178,7 @@ class LibraryIndex:
                 "chapter_count": md.chapter_count,
                 "last_checked": _now_iso(),
             }
-            return
+            return True
 
         lib["untrackable"].append({
             "relpath": rel,
@@ -164,6 +191,7 @@ class LibraryIndex:
                 else "no identification"
             ),
         })
+        return True
 
     def mark_scan_complete(self, root: Path) -> None:
         self._library(root)["last_scan"] = _now_iso()
@@ -196,3 +224,67 @@ class LibraryIndex:
 
 def _empty() -> dict:
     return {"version": SCHEMA_VERSION, "libraries": {}}
+
+
+def _migrate_non_canonical_keys(raw: dict) -> None:
+    """Re-key each library's ``stories`` dict by canonical URL.
+
+    Indexes written by 1.20.x and earlier keyed entries by whatever
+    source URL the parser pulled out of the file, including the
+    ``/s/N/`` and ``/s/N/1/`` variants FFN uses. When two files for
+    the same story happened to carry different URL shapes, both landed
+    as separate entries — silently doubling up. ``canonical_url`` now
+    collapses them, so on load we re-key the stored entries in place
+    and merge any collisions into a primary + ``duplicate_relpaths``
+    pair. The net effect is that upgrading to this build recovers the
+    missing duplicates from an existing index without forcing a
+    full re-scan, while a future scan produces the same layout.
+    """
+    # Imported locally because sites.py imports scraper modules that
+    # pull in heavy dependencies; keeping the import out of module
+    # scope avoids paying that cost on every library-tool invocation.
+    from ..sites import canonical_url
+
+    for lib in raw.get("libraries", {}).values():
+        stories = lib.get("stories", {})
+        if not isinstance(stories, dict):
+            continue
+        rekeyed: dict[str, dict] = {}
+        for old_key, entry in stories.items():
+            new_key = canonical_url(old_key) or old_key
+            existing = rekeyed.get(new_key)
+            if existing is None:
+                rekeyed[new_key] = entry
+                continue
+            # Collision — merge ``entry`` into ``existing`` as a
+            # duplicate. Keep the entry with more populated metadata
+            # as the primary so the richer record wins.
+            primary, secondary = _pick_primary_entry(existing, entry)
+            dupes = primary.setdefault("duplicate_relpaths", [])
+            candidate_rel = secondary.get("relpath")
+            if candidate_rel and candidate_rel not in dupes and candidate_rel != primary.get("relpath"):
+                dupes.append(candidate_rel)
+            rekeyed[new_key] = primary
+        lib["stories"] = rekeyed
+
+
+def _entry_completeness_score(entry: dict) -> int:
+    """Score a story entry by how much metadata it has.
+
+    Used to decide which of two colliding entries keeps the primary
+    ``relpath`` when merging — prefer the one with more fields
+    populated rather than defaulting to whichever was scanned first.
+    """
+    fields = ("title", "author", "chapter_count", "rating", "status")
+    return sum(1 for f in fields if entry.get(f))
+
+
+def _pick_primary_entry(a: dict, b: dict) -> tuple[dict, dict]:
+    """Return ``(primary, secondary)`` for two entries that collided.
+
+    Higher-completeness wins; ties go to ``a`` (which was inserted
+    first in the walk) so the merge is deterministic.
+    """
+    if _entry_completeness_score(b) > _entry_completeness_score(a):
+        return b, a
+    return a, b

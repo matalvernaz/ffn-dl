@@ -48,6 +48,7 @@ class ScanResult:
     identified_via_url: int = 0
     ambiguous: int = 0
     errors: int = 0
+    duplicates: int = 0
     error_files: list[tuple[Path, str]] = field(default_factory=list)
 
 
@@ -85,7 +86,14 @@ def scan(
             # include one (most common on FicLab dumps whose tags row
             # mixes genres/characters/status/fandom into one blob).
             candidate = identify(path, md, root=root)
-            index.record(root, candidate)
+            # record() returns False when this candidate was a
+            # duplicate of a story already indexed under the same
+            # canonical URL — the second (third, …) copy is recorded
+            # in the primary entry's duplicate_relpaths list. Surface
+            # the count so --scan-library can tell the user.
+            is_new = index.record(root, candidate)
+            if not is_new:
+                result.duplicates += 1
             if candidate.confidence == Confidence.HIGH:
                 result.identified_via_url += 1
             else:

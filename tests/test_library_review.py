@@ -48,7 +48,9 @@ def test_promote_with_supported_url_succeeds(tmp_path: Path):
     stories = list(reloaded.stories_in(lib))
     assert len(stories) == 1
     url, entry = stories[0]
-    assert url == "https://www.fanfiction.net/s/54321/1/"
+    # Index keys use the canonical URL form; FFN's /1/ suffix is
+    # stripped by sites.canonical_url.
+    assert url == "https://www.fanfiction.net/s/54321"
     assert entry["adapter"] == "ffn"
     assert entry["confidence"] == "medium"
 

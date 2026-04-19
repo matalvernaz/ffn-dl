@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.20.3 — 2026-04-19
+
+### Add
+
+- **Duplicate detection.** When the library scanner sees two files
+  with the same canonical source URL, it keeps one primary entry and
+  records the other path(s) in a new ``duplicate_relpaths`` list on
+  the entry — rather than silently overwriting the first relpath as
+  1.20.x did. ``--scan-library`` prints the duplicate count and up to
+  20 primary↔duplicate pairs so the user can review and delete the
+  copy they didn't mean to keep. Validated against a real 817-file
+  library: surfaced 10 duplicate pairs that had been invisible.
+
+### Fix
+
+- **URL canonicalisation.** Before a story URL is used as an index
+  key, ``sites.canonical_url`` collapses the per-site variants that
+  different downloaders emit:
+  - FFN: ``/s/N`` / ``/s/N/`` / ``/s/N/1/`` / ``/s/N/1/Title-Slug``
+    → ``https://www.fanfiction.net/s/N``
+  - AO3: ``http://`` / ``https://`` / ``ao3.org`` / ``archiveofourown.org``
+    → ``https://archiveofourown.org/works/N``
+  - Royal Road, FicWad, MediaMiner, Literotica, Wattpad all get a
+    matching per-site canonical form.
+  - Unsupported hosts are still scheme + trailing-slash normalised so
+    hand-typed URL variants can't silently duplicate.
+  Without this, a library with ``/s/9215532`` and ``/s/9215532/1/``
+  embedded in two different exports of the same story ended up with
+  two distinct index entries. Now they collapse to one, and the
+  second copy is correctly flagged as a duplicate.
+- **Existing indexes migrate on load.** ``LibraryIndex.load`` rewrites
+  any non-canonical keys from an older index and merges colliding
+  entries into ``primary + duplicate_relpaths``, preferring whichever
+  entry has more populated metadata as the primary. No re-scan is
+  required to benefit from the URL collapse on an existing library.
+
 ## 1.20.2 — 2026-04-19
 
 ### Fix
