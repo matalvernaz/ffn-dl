@@ -383,6 +383,35 @@ def _parse_int(value: str) -> int:
         return 0
 
 
+# Body-level chapter-count patterns. Used as a fallback when the
+# structured metadata parsers don't produce a count.
+#
+# ``of\s+N\s+chapters`` matches phrases like
+#   "Content: Chapter 1 to 50 of 50 chapters"   (bold-br dumps)
+#   "... of 15 chapters (Complete)"             (FLAG / Simple-p variants)
+# The match is anchored on the space-bounded ``of`` so chapter-body
+# prose like "one of the chapters" can't collide with it.
+_BODY_CHAPTERS_OF_RE = re.compile(
+    r"\bof\s+(\d+)\s+chapters?\b", re.IGNORECASE,
+)
+
+# ``Chapters: 43/?`` / ``Chapters: 43/43`` — AO3's native HTML download
+# format. The first number is the count of published chapters; the
+# second is the planned total (``?`` when unknown). We only need the
+# first.
+_BODY_CHAPTERS_SLASH_RE = re.compile(
+    r"\bChapters?:\s*(\d+)\s*/\s*(?:\d+|\?)", re.IGNORECASE,
+)
+
+# ``<a href="#chapter_N">`` — FLAG/flagfic.com's table-of-contents
+# anchor convention. The highest N is the chapter count. Used as a
+# last fallback for FLAG files that don't spell out "N chapters"
+# anywhere in the body.
+_TOC_CHAPTER_ANCHOR_RE = re.compile(
+    r'<a\s+href="#chapter_(\d+)"', re.IGNORECASE,
+)
+
+
 def _fill_from_epub(path: Path, md: "FileMetadata") -> None:
     try:
         from ebooklib import epub
@@ -516,6 +545,27 @@ def _fill_from_html(path: Path, md: "FileMetadata") -> None:
             if count > 0:
                 _merge_metadata_field(md, "chapter_count", count)
                 break
+
+    # Body-level fallbacks for formats that don't carry a plain
+    # ``Chapters: N`` field but still expose the count in prose:
+    #   * bold-br dumps: ``Content: Chapter 1 to 50 of 50 chapters``.
+    #     Also matches the FLAG/Simple-p variants that embed the same
+    #     phrase elsewhere in the document.
+    #   * AO3's native HTML export: ``Chapters: 43/?`` or ``43/43``
+    #     inside the Stats block. The first number is the count of
+    #     actually-published chapters.
+    if not md.chapter_count:
+        match = _BODY_CHAPTERS_OF_RE.search(text)
+        if match:
+            _merge_metadata_field(md, "chapter_count", int(match.group(1)))
+    if not md.chapter_count:
+        match = _BODY_CHAPTERS_SLASH_RE.search(text)
+        if match:
+            _merge_metadata_field(md, "chapter_count", int(match.group(1)))
+    if not md.chapter_count:
+        toc_nums = _TOC_CHAPTER_ANCHOR_RE.findall(text)
+        if toc_nums:
+            _merge_metadata_field(md, "chapter_count", max(int(n) for n in toc_nums))
 
     # Source URL: try the explicit `source`/`storylink` fields first
     # (structured), then fall through to extract_source_url() which

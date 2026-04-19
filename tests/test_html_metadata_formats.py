@@ -416,6 +416,73 @@ def test_non_crossover_ficlab_leaves_fandom_for_folder_fallback(tmp_path):
     assert md.fandoms == []
 
 
+def test_bold_br_chapter_count_from_content_phrase(tmp_path):
+    """bold-br files put their chapter count in the Content field as
+    "Chapter X to Y of N chapters"; extracting ``N`` lets library
+    refresh (--update-library) know the local count instead of
+    skipping the story as "chapter count unknown"."""
+    html = """
+    <html><body>
+    <b>Story:</b> Living with Danger<br>
+    <b>Storylink:</b> <a href="https://www.fanfiction.net/s/2109424/1/">...</a><br/>
+    <b>Author:</b> whydoyouneedtoknow<br/>
+    <b>Category:</b> Harry Potter<br>
+    <b>Rating:</b> T<br/>
+    <b>Status:</b> Complete<br/>
+    <b>Content:</b> Chapter 1 to 50 of 50 chapters<br/>
+    </body></html>
+    """
+    path = _write(tmp_path, "lwd.html", html)
+    md = extract_metadata(path)
+    assert md.chapter_count == 50
+
+
+def test_ao3_native_chapter_count_from_stats_slash(tmp_path):
+    """AO3 native HTML has ``Chapters: 43/?`` in the Stats block.
+    Take the first number — the count of published chapters."""
+    html = """
+    <html><body>
+    <p>Posted on <a href="https://archiveofourown.org/works/1">AO3</a></p>
+    <dl>
+      <dt>Stats:</dt>
+      <dd>
+      Published: 2019-03-19
+      Updated: 2024-01-17
+      Words: 588,850
+      Chapters: 43/?
+      </dd>
+    </dl>
+    </body></html>
+    """
+    path = _write(tmp_path, "ao3.html", html)
+    md = extract_metadata(path)
+    assert md.chapter_count == 43
+
+
+def test_flag_chapter_count_from_toc_anchors(tmp_path):
+    """FLAG/flagfic.com files that don't spell out "N chapters" still
+    expose the count via their ``<a href="#chapter_N">`` TOC links."""
+    html = """
+    <html><body>
+    <p>Created by <a href="http://www.flagfic.com/">FLAG</a>
+    from <a href="https://www.fanfiction.net/s/1/">source</a></p>
+    <div id="toc">
+      <ol>
+        <li><a href="#chapter_1">First</a></li>
+        <li><a href="#chapter_2">Second</a></li>
+        <li><a href="#chapter_3">Third</a></li>
+      </ol>
+    </div>
+    <h2>Chapter 1</h2>
+    <h2>Chapter 2</h2>
+    <h2>Chapter 3</h2>
+    </body></html>
+    """
+    path = _write(tmp_path, "flag.html", html)
+    md = extract_metadata(path)
+    assert md.chapter_count == 3
+
+
 def test_metadata_chapter_count_beats_dom_count(tmp_path):
     """When the kv-table gives us a chapter count, don't overwrite it
     with count_chapters() which only recognises ffn-dl's own markup

@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.20.2 — 2026-04-19
+
+### Fix
+
+- **`--update-library` no longer silently skips third-party HTML
+  exports as "chapter count unknown".** 1.20.1 recovered the chapter
+  count from FicLab's structured ``<th>chapters</th>`` row but the
+  other formats embed it in prose: bold-br dumps say
+  ``Content: Chapter X to Y of N chapters``, AO3's native HTML export
+  uses ``Chapters: 43/?`` inside a ``Stats:`` block, and FLAG expresses
+  it through its ``<a href="#chapter_N">`` TOC anchors. None of those
+  landed in ``FileMetadata.chapter_count``, so the index stored 0,
+  ``count_chapters`` (which only understands ffn-dl's own markup)
+  also returned 0, and ``library/refresh.py`` skipped every such
+  story. Three new body-level regex fallbacks in ``_fill_from_html``
+  cover all three patterns; full-library accuracy on a real 817-file
+  library goes from 94.0% to 100.0%.
+  - **Action required for existing libraries:** re-run
+    ``--scan-library DIR`` once on 1.20.2 so the index picks up the
+    newly-derived chapter counts. ``--update-library DIR`` will then
+    stop skipping those stories.
+
 ## 1.20.1 — 2026-04-19
 
 ### Fix
