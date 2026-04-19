@@ -1613,6 +1613,13 @@ class MainFrame(wx.Frame):
             )
         bar.Append(search_menu, "&Search")
 
+        library_menu = wx.Menu()
+        library_item = library_menu.Append(
+            wx.ID_ANY, "&Library...\tCtrl+L",
+        )
+        self.Bind(wx.EVT_MENU, self._on_library_menu, library_item)
+        bar.Append(library_menu, "&Library")
+
         view_menu = wx.Menu()
         log_submenu = wx.Menu()
         self._log_level_items = {}
@@ -1656,6 +1663,20 @@ class MainFrame(wx.Frame):
 
     def _on_log_to_file_menu(self, event):
         self._set_log_to_file(self._log_to_file_item.IsChecked())
+
+    def _on_library_menu(self, event):
+        """Open the library-management dialog.
+
+        Lazy import keeps gui.py's startup cost unaffected for users
+        who never touch the library features.
+        """
+        from .library.gui import LibraryDialog
+
+        dlg = LibraryDialog(self, self.prefs)
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
 
     def _on_check_updates_menu(self, event):
         """Manual trigger: unlike the silent launch check, this surfaces
