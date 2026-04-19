@@ -6,6 +6,7 @@ import random
 import re
 import time
 from pathlib import Path
+from typing import Optional, Union
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
@@ -15,6 +16,45 @@ from .models import Chapter, Story
 logger = logging.getLogger(__name__)
 
 BROWSERS = ["chrome", "chrome", "safari", "edge"]
+
+# Rate-limit / retry tunables, centralised so they're easy to find.
+INITIAL_BACKOFF_S = 30
+"""Seconds to wait on the first 429/503 or connection-error retry."""
+
+MAX_BACKOFF_S = 300
+"""Upper bound on the doubling backoff — 5 min is long enough that any
+server bucket has reset, short enough to not look hung."""
+
+TIMEOUT_RETRY_SLEEP_S = 10
+"""Fixed wait after a request-level timeout (not rate-limit) before retry."""
+
+FORBIDDEN_QUICK_RETRY_S = 5
+"""Initial wait on HTTP 403 — the site is usually gating a single fetch,
+not rate-limiting, so quick retry with browser rotation is fine."""
+
+CONNECTION_ERROR_JITTER_S = 5
+"""Extra random jitter (0..N seconds) added to the connection-error
+backoff so concurrent workers don't retry in lockstep."""
+
+FORBIDDEN_SLOW_RETRY_S = 30
+"""Wait on the last two 403 retries, paired with a browser rotation —
+gives Cloudflare fingerprints time to age out."""
+
+RATE_LIMIT_JITTER_FRAC = 0.1
+"""Jitter added to each 429/503 backoff (fraction of the backoff)."""
+
+AIMD_DECAY_FACTOR = 0.9
+"""Per-success multiplicative decay toward ``delay_floor``. 10% per
+chapter recovers from a rate-limit bump over ~20 fetches."""
+
+AIMD_BUMP_FLOOR_S = 2.0
+"""Minimum post-429 delay even when AIMD's current delay was zero —
+'0 × 2 = 0' would otherwise strand us at floor=0 forever."""
+
+BLOCK_CHECK_PREFIX_BYTES = 2000
+"""How much of a response body to scan for Cloudflare/404 markers.
+The challenge page always puts its signature in the first kilobyte;
+AO3 has its own larger prefix (see ao3.py) for the adult-gate check."""
 
 
 class RateLimitError(Exception):
@@ -29,7 +69,7 @@ class CloudflareBlockError(Exception):
     """Raised when Cloudflare blocks the request."""
 
 
-def _default_cache_dir():
+def _default_cache_dir() -> Path:
     # Frozen Windows builds keep their chapter cache inside the
     # portable folder so uninstall is still "delete the folder".
     try:
@@ -52,19 +92,19 @@ class BaseScraper:
 
     def __init__(
         self,
-        delay_range=None,
-        delay_floor=0.0,
-        delay_start=0.0,
-        delay_ceiling=60.0,
-        max_retries=5,
-        timeout=30,
-        cache_dir=None,
-        use_cache=True,
-        chunk_size=0,
-        chunk_delay_range=(60.0, 75.0),
-        use_wayback=False,
-        concurrency=1,
-    ):
+        delay_range: Optional[tuple[float, float]] = None,
+        delay_floor: float = 0.0,
+        delay_start: float = 0.0,
+        delay_ceiling: float = 60.0,
+        max_retries: int = 5,
+        timeout: int = 30,
+        cache_dir: Optional[Union[str, Path]] = None,
+        use_cache: bool = True,
+        chunk_size: int = 0,
+        chunk_delay_range: tuple[float, float] = (60.0, 75.0),
+        use_wayback: bool = False,
+        concurrency: int = 1,
+    ) -> None:
         # Two rate-limit modes:
         #   * delay_range set → static random.uniform(*delay_range) between
         #     fetches. The CLI's --delay-min/--delay-max lands here.
@@ -98,20 +138,20 @@ class BaseScraper:
         self._browser = "chrome"
         self.session = curl_requests.Session(impersonate=self._browser)
 
-    def _rotate_browser(self):
+    def _rotate_browser(self) -> None:
         self._browser = random.choice(BROWSERS)
         self.session = curl_requests.Session(impersonate=self._browser)
         logger.debug("Rotated to browser impersonation: %s", self._browser)
 
-    def _check_for_blocks(self, html):
-        lower = html[:2000].lower()
+    def _check_for_blocks(self, html: str) -> None:
+        lower = html[:BLOCK_CHECK_PREFIX_BYTES].lower()
         if "just a moment" in lower and "cloudflare" in lower:
             raise CloudflareBlockError(
                 "Cloudflare challenge detected. "
                 "Try increasing delays or waiting before retrying."
             )
 
-    def _try_wayback(self, url):
+    def _try_wayback(self, url: str) -> Optional[str]:
         """Ask archive.org for the latest snapshot of `url` and return its
         HTML body, or None if nothing is archived. The Wayback toolbar
         gets injected into the page but the original DOM is preserved,
@@ -137,11 +177,38 @@ class BaseScraper:
             logger.debug("Wayback fallback failed: %s", exc)
         return None
 
-    def _fetch(self, url, session=None):
-        # `session` is an optional per-request session object — parallel
-        # workers pass their own so they don't race on the shared one.
+    def _fetch(self, url: str, session=None) -> str:
+        """Fetch ``url`` with retry + rate-limit handling.
+
+        Retry policy:
+          * 200: success; on a success *after* a prior 429/503 we call
+            ``_bump_delay_up`` so the AIMD delay reflects the new throttle.
+          * 429/503: doubling backoff (``INITIAL_BACKOFF_S`` →
+            ``MAX_BACKOFF_S``) with jitter, plus browser-impersonation
+            rotation.
+          * 404: raise ``StoryNotFoundError`` (with Wayback fallback if
+            ``use_wayback``).
+          * 403: short retry with browser rotation on the last two
+            attempts — usually the site has fingerprinted us, and a
+            fresh curl-cffi session fixes it.
+          * Connection errors / timeouts: retry with the same doubling
+            backoff as 429s.
+
+        Args:
+            url: Absolute URL to fetch.
+            session: Optional per-request curl session. Parallel workers
+                pass their own so they don't race on the shared one.
+
+        Returns:
+            The response body as text.
+
+        Raises:
+            RateLimitError: retries exhausted without a 200.
+            StoryNotFoundError: upstream returned 404.
+            CloudflareBlockError: a Cloudflare challenge page was served.
+        """
         sess = session if session is not None else self.session
-        backoff = 30
+        backoff = INITIAL_BACKOFF_S
         hit_rate_limit = False
         for attempt in range(self.max_retries):
             try:
@@ -151,15 +218,15 @@ class BaseScraper:
                     "Connection error (attempt %d/%d): %s",
                     attempt + 1, self.max_retries, exc,
                 )
-                time.sleep(backoff + random.uniform(0, 5))
-                backoff = min(backoff * 2, 300)
+                time.sleep(backoff + random.uniform(0, CONNECTION_ERROR_JITTER_S))
+                backoff = min(backoff * 2, MAX_BACKOFF_S)
                 continue
             except curl_requests.errors.Timeout:
                 logger.warning(
                     "Request timed out (attempt %d/%d)",
                     attempt + 1, self.max_retries,
                 )
-                time.sleep(10)
+                time.sleep(TIMEOUT_RETRY_SLEEP_S)
                 continue
 
             if resp.status_code == 200:
@@ -170,14 +237,14 @@ class BaseScraper:
 
             if resp.status_code in (429, 503):
                 hit_rate_limit = True
-                jitter = random.uniform(0, backoff * 0.1)
+                jitter = random.uniform(0, backoff * RATE_LIMIT_JITTER_FRAC)
                 wait = backoff + jitter
                 logger.warning(
                     "Rate limited (HTTP %d), waiting %.0fs (attempt %d/%d)",
                     resp.status_code, wait, attempt + 1, self.max_retries,
                 )
                 time.sleep(wait)
-                backoff = min(backoff * 2, 300)
+                backoff = min(backoff * 2, MAX_BACKOFF_S)
                 self._rotate_browser()
                 continue
 
@@ -189,10 +256,12 @@ class BaseScraper:
                 raise StoryNotFoundError(f"Not found: {url}")
 
             if resp.status_code == 403:
-                wait = 5 + random.uniform(0, 5)
+                wait = FORBIDDEN_QUICK_RETRY_S + random.uniform(
+                    0, FORBIDDEN_QUICK_RETRY_S,
+                )
                 if attempt >= self.max_retries - 2:
                     self._rotate_browser()
-                    wait = 30
+                    wait = FORBIDDEN_SLOW_RETRY_S
                 logger.warning(
                     "Forbidden (HTTP 403), retrying in %.0fs (attempt %d/%d)",
                     wait, attempt + 1, self.max_retries,
@@ -205,7 +274,7 @@ class BaseScraper:
                 resp.status_code, attempt + 1, self.max_retries,
             )
             time.sleep(backoff)
-            backoff = min(backoff * 2, 300)
+            backoff = min(backoff * 2, MAX_BACKOFF_S)
 
         if self.use_wayback:
             archived = self._try_wayback(url)
@@ -214,7 +283,7 @@ class BaseScraper:
                 return archived
         raise RateLimitError(f"Failed after {self.max_retries} retries: {url}")
 
-    def _delay(self):
+    def _delay(self) -> None:
         self._fetch_count += 1
         if self.chunk_size and self._fetch_count % self.chunk_size == 0:
             wait = random.uniform(*self.chunk_delay_range)
@@ -228,18 +297,18 @@ class BaseScraper:
             time.sleep(random.uniform(*self.delay_range))
             return
         # AIMD: sleep the current delay (with a little jitter so we don't
-        # lock-step with server buckets), then decay 10% toward the floor.
+        # lock-step with server buckets), then decay toward the floor.
         if self._current_delay > 0:
             jitter = random.uniform(0, self._current_delay * 0.2)
             time.sleep(self._current_delay + jitter)
         self._current_delay = max(
-            self.delay_floor, self._current_delay * 0.9,
+            self.delay_floor, self._current_delay * AIMD_DECAY_FACTOR,
         )
 
-    def _bump_delay_up(self):
+    def _bump_delay_up(self) -> None:
         """AIMD multiplicative increase after a rate-limit hit."""
         prev = self._current_delay
-        new_delay = max(prev * 2, 2.0)
+        new_delay = max(prev * 2, AIMD_BUMP_FLOOR_S)
         self._current_delay = min(self.delay_ceiling, new_delay)
         if self._current_delay != prev:
             logger.info(
@@ -247,13 +316,30 @@ class BaseScraper:
                 prev, self._current_delay,
             )
 
-    def _fetch_parallel(self, urls):
-        """Fetch a list of URLs, up to `self.concurrency` in flight. Returns
-        the HTML bodies in input order. When a batch trips the rate-limit
-        retry path (detected via `_current_delay` rising), concurrency is
-        halved for subsequent batches — same AIMD shape as the inter-fetch
-        delay. Falls through to plain sequential `_fetch` calls at
-        concurrency 1, so subclasses can call this unconditionally.
+    def _fetch_parallel(self, urls: list[str]) -> list[str]:
+        """Fetch a list of URLs concurrently, returning bodies in input order.
+
+        Uses a thread pool sized to ``self.concurrency`` (each worker
+        gets its own curl session so concurrent libcurl handles don't
+        race). Falls through to sequential ``_fetch`` calls when
+        concurrency is 1 or only one URL is provided, so subclasses
+        can call this unconditionally.
+
+        AIMD concurrency control: after each batch, compare the scraper's
+        ``_current_delay`` to its value before the batch — if it rose,
+        some request got a 429/503 and triggered ``_bump_delay_up``, so
+        we halve the pool size for the next batch. This mirrors the
+        per-request AIMD delay shape one layer up: multiplicative
+        decrease on throttle, no explicit recovery (subsequent batches
+        stay at the reduced concurrency until the scraper is re-created).
+        FFN uses concurrency=1 regardless because it captcha-bans on
+        bulk regardless of pacing.
+
+        Args:
+            urls: Chapter / resource URLs to fetch, in order.
+
+        Returns:
+            List of response bodies indexed parallel to ``urls``.
         """
         if not urls:
             return []
@@ -298,20 +384,20 @@ class BaseScraper:
 
     # ── Cache ─────────────────────────────────────────────────────
 
-    def _story_cache_dir(self, story_id):
+    def _story_cache_dir(self, story_id) -> Optional[Path]:
         if not self.use_cache:
             return None
         d = self.cache_dir / f"{self.site_name}_{story_id}"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def _save_meta_cache(self, story_id, meta):
+    def _save_meta_cache(self, story_id, meta: dict) -> None:
         if not self.use_cache:
             return
         path = self._story_cache_dir(story_id) / "meta.json"
         path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
-    def _load_meta_cache(self, story_id):
+    def _load_meta_cache(self, story_id) -> Optional[dict]:
         if not self.use_cache:
             return None
         path = self._story_cache_dir(story_id) / "meta.json"
@@ -324,7 +410,7 @@ class BaseScraper:
             path.unlink(missing_ok=True)
             return None
 
-    def _save_chapter_cache(self, story_id, chapter):
+    def _save_chapter_cache(self, story_id, chapter: Chapter) -> None:
         if not self.use_cache:
             return
         path = self._story_cache_dir(story_id) / f"ch_{chapter.number:04d}.html"
@@ -333,7 +419,7 @@ class BaseScraper:
             encoding="utf-8",
         )
 
-    def _load_chapter_cache(self, story_id, chap_num):
+    def _load_chapter_cache(self, story_id, chap_num: int) -> Optional[Chapter]:
         if not self.use_cache:
             return None
         path = self._story_cache_dir(story_id) / f"ch_{chap_num:04d}.html"
@@ -347,7 +433,7 @@ class BaseScraper:
             path.unlink(missing_ok=True)
             return None
 
-    def clean_cache(self, story_id):
+    def clean_cache(self, story_id) -> None:
         if not self.use_cache:
             return
         import shutil

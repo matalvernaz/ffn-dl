@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.19.1 — 2026-04-19
+
+### Change
+
+- **Code-quality sweep.** Internal-only refactor following a codebase
+  audit. No user-visible behaviour changes beyond the menu item below.
+  - Centralised site / URL detection in a new `ffn_dl.sites` module so
+    the CLI, clipboard watcher, GUI, and updater all share one
+    registry of supported URL patterns.
+  - Split `cli.main()` (previously 800+ lines) into `_build_parser`
+    plus focused dispatch helpers (`_handle_update_file`,
+    `_collect_urls`, `_expand_author_and_series_urls`, `_run_batch`,
+    `_handle_install_attribution`).
+  - Split `_handle_search` into `_build_search_spec`, `_collapse_results`,
+    `_print_search_results`, `_prompt_search_choice`, and
+    `_download_picked_result`.
+  - Named all scraper retry / backoff magic numbers
+    (`INITIAL_BACKOFF_S`, `MAX_BACKOFF_S`, `AIMD_DECAY_FACTOR`, etc.)
+    and added real docstrings to `_fetch` and `_fetch_parallel`.
+  - Replaced the worst bare `except Exception` swallows with narrower
+    types plus `logger.debug` so failures are debuggable from the log.
+  - Added type hints to CLI and scraper public APIs.
+
+### Add
+
+- **Help → Read the Manual.** New GUI menu item (F1) that opens the
+  project README in the default browser.
+
 ## 1.19.0 — 2026-04-19
 
 ### Add

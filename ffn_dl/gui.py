@@ -18,14 +18,22 @@ from collections import deque
 from pathlib import Path
 
 
+logger = logging.getLogger(__name__)
+
 _LOG_FLUSH_INTERVAL_MS = 100
+"""How often the UI pulls queued log lines onto the main thread."""
+
+# In-memory log pane trims from _LOG_MAX_LINES down to _LOG_TRIM_TO_LINES
+# on overflow (20% headroom). Trimming further would throw away recent
+# context; trimming less would make the UI thrash as every new line
+# triggers another trim. 5k lines ≈ one heavy download session.
 _LOG_MAX_LINES = 5000
 _LOG_TRIM_TO_LINES = 4000
 
 # 1 MB × 3 backups — enough to catch the last handful of downloads
 # when a user needs to share logs for a bug report, small enough that
 # a portable zip on a flash drive doesn't balloon.
-_LOG_FILE_MAX_BYTES = 1 << 20
+_LOG_FILE_MAX_BYTES = 1 * 1024 * 1024
 _LOG_FILE_BACKUPS = 3
 
 _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
@@ -57,18 +65,6 @@ class _WxLogHandler(logging.Handler):
             # sensible to do — the log line is going to the void.
             pass
 
-
-_FFN_URL_RE = re.compile(
-    r"https?://(?:www\.|m\.)?("
-    r"fanfiction\.net/s/\d+"
-    r"|ficwad\.com/story/\d+"
-    r"|(?:archiveofourown\.org|ao3\.org)/works/\d+"
-    r"|royalroad\.com/fiction/\d+"
-    r"|mediaminer\.org/fanfic/(?:view_st\.php/\d+|s/[^?#\s]+?/\d+)"
-    r"|literotica\.com/s/[a-z0-9-]+"
-    r"|wattpad\.com/(?:story/)?\d+"
-    r")"
-)
 
 _SEARCH_COLUMNS = [
     ("Title", 260),
@@ -821,8 +817,8 @@ class MainFrame(wx.Frame):
         for frame in list(self._search_frames.values()):
             try:
                 frame.save_state()
-            except Exception:
-                pass
+            except (RuntimeError, AttributeError, OSError):
+                logger.debug("save_state on search frame failed", exc_info=True)
 
     def _on_close(self, event):
         # Snapshot each open search frame's state to prefs, then destroy
@@ -831,17 +827,17 @@ class MainFrame(wx.Frame):
         for frame in list(self._search_frames.values()):
             try:
                 frame.save_state()
-            except Exception:
-                pass
+            except (RuntimeError, AttributeError, OSError):
+                logger.debug("save_state on close failed", exc_info=True)
             try:
                 frame.Destroy()
-            except Exception:
-                pass
+            except (RuntimeError, AttributeError):
+                logger.debug("frame.Destroy on close failed", exc_info=True)
         self._search_frames.clear()
         try:
             self._save_prefs()
-        except Exception:
-            pass
+        except (RuntimeError, OSError):
+            logger.debug("_save_prefs on close failed", exc_info=True)
         if hasattr(self, "_log_timer"):
             self._log_timer.Stop()
         self._detach_log_handlers()
@@ -1300,10 +1296,10 @@ class MainFrame(wx.Frame):
             return
         self._last_clip = clip
 
-        match = _FFN_URL_RE.search(clip)
-        if not match:
+        from .sites import extract_story_url
+        url = extract_story_url(clip)
+        if not url:
             return
-        url = match.group(0)
         if url in self._watch_seen:
             return
         self._watch_seen.add(url)
@@ -1322,28 +1318,8 @@ class MainFrame(wx.Frame):
     # ── Download worker ──────────────────────────────────────
 
     def _scraper_for(self, url):
-        from .ao3 import AO3Scraper
-        from .ficwad import FicWadScraper
-        from .literotica import LiteroticaScraper
-        from .mediaminer import MediaMinerScraper
-        from .royalroad import RoyalRoadScraper
-        from .scraper import FFNScraper
-
-        text = url.lower()
-        if "ficwad.com" in text:
-            return FicWadScraper()
-        if "archiveofourown.org" in text or "ao3.org" in text:
-            return AO3Scraper()
-        if "royalroad.com" in text:
-            return RoyalRoadScraper()
-        if "mediaminer.org" in text:
-            return MediaMinerScraper()
-        if "literotica.com" in text:
-            return LiteroticaScraper()
-        if "wattpad.com" in text:
-            from .wattpad import WattpadScraper
-            return WattpadScraper()
-        return FFNScraper()
+        from .sites import detect_scraper
+        return detect_scraper(url)()
 
     def _export_story(self, story):
         fmt = self.format_ctrl.GetString(self.format_ctrl.GetSelection())
@@ -1642,6 +1618,8 @@ class MainFrame(wx.Frame):
         bar.Append(view_menu, "&View")
 
         help_menu = wx.Menu()
+        manual_item = help_menu.Append(wx.ID_HELP, "Read the &Manual\tF1")
+        self.Bind(wx.EVT_MENU, self._on_open_manual, manual_item)
         check_item = help_menu.Append(wx.ID_ANY, "&Check for Updates...")
         self.Bind(wx.EVT_MENU, self._on_check_updates_menu, check_item)
         help_menu.AppendSeparator()
@@ -1729,6 +1707,10 @@ class MainFrame(wx.Frame):
         info.SetWebSite("https://github.com/matalvernaz/ffn-dl")
         info.SetCopyright("(c) Matthew Alvernaz")
         wx.adv.AboutBox(info, self)
+
+    def _on_open_manual(self, event):
+        """Open the project README (the user-facing manual) in the browser."""
+        webbrowser.open("https://github.com/matalvernaz/ffn-dl#readme")
 
 
 class SearchFrame(wx.Frame):

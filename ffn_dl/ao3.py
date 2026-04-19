@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 AO3_BASE = "https://archiveofourown.org"
 
+# AO3's adult-content gate and login-required markers appear a bit
+# further into the body than Cloudflare's challenge signature, so we
+# read a larger prefix here than BaseScraper's default.
+_BLOCK_CHECK_PREFIX_BYTES = 4000
+
 
 class AO3LockedError(Exception):
     """Raised when a work requires an AO3 login to view."""
@@ -55,7 +60,7 @@ class AO3Scraper(BaseScraper):
 
     def _check_for_blocks(self, html):
         super()._check_for_blocks(html)
-        lower = html[:4000].lower()
+        lower = html[:_BLOCK_CHECK_PREFIX_BYTES].lower()
         if "this work could have adult content" in lower and "proceed" in lower:
             # Should not happen when view_adult=true is set, but guard anyway
             raise AO3LockedError(

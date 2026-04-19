@@ -29,7 +29,7 @@ class FileMetadata:
     format: str = ""
 
 
-def count_chapters(filepath):
+def count_chapters(filepath: Path | str) -> int:
     """Count chapters in an existing export file."""
     path = Path(filepath)
     suffix = path.suffix.lower()
@@ -54,13 +54,17 @@ def count_chapters(filepath):
                 if hasattr(item, "file_name")
                 and item.file_name.startswith("chapter_")
             )
-        except Exception:
+        except Exception as exc:
+            # ebooklib has a broad exception surface (EpubException,
+            # zipfile errors, etc.); log and fall through so one bad
+            # file doesn't kill a whole update-all run.
+            logger.debug("count_chapters(%s) failed: %s", path, exc)
             return 0
 
     return 0
 
 
-def extract_status(filepath) -> str:
+def extract_status(filepath: Path | str) -> str:
     """Return the story's completion status ('Complete' / 'In-Progress' / '')
     by reading the metadata block of an ffn-dl export. Empty string if not
     recognisable, so callers can treat unknown as "not complete."
@@ -100,13 +104,13 @@ def extract_status(filepath) -> str:
                 match = re.search(r"<th>Status</th><td>([^<]+)</td>", body)
                 if match:
                     return match.group(1).strip()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("extract_status(%s) failed: %s", path, exc)
 
     return ""
 
 
-def extract_source_url(filepath):
+def extract_source_url(filepath: Path | str) -> str:
     """Read an existing export file and extract the source URL."""
     path = Path(filepath)
     if not path.exists():
@@ -136,23 +140,14 @@ def extract_source_url(filepath):
             sources = dc.get("source", [])
             if sources:
                 return sources[0][0]
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("extract_source_url(%s) epub read failed: %s", path, exc)
 
-    # Fallback: look for any supported story URL
-    match = re.search(
-        r"https?://(?:www\.)?("
-        r"fanfiction\.net/s/\d+"
-        r"|ficwad\.com/story/\d+"
-        r"|(?:archiveofourown\.org|ao3\.org)/works/\d+"
-        r"|royalroad\.com/fiction/\d+"
-        r"|mediaminer\.org/fanfic/(?:view_st\.php/\d+|s/[^?#\s]+?/\d+)"
-        r"|literotica\.com/s/[a-z0-9-]+"
-        r")",
-        text,
-    )
-    if match:
-        return match.group(0)
+    # Fallback: look for any supported story URL anywhere in the body.
+    from .sites import extract_story_url
+    found = extract_story_url(text)
+    if found:
+        return found
 
     raise ValueError(
         f"Could not find a source URL in {path.name}. "
@@ -320,7 +315,7 @@ def _fill_from_txt(path: Path, md: "FileMetadata") -> None:
             md.source_url = value
 
 
-def extract_metadata(filepath) -> "FileMetadata":
+def extract_metadata(filepath: Path | str) -> "FileMetadata":
     """Read a story file and return whatever metadata can be recovered.
 
     Handles ffn-dl's own exports first-class. Reads structured metadata

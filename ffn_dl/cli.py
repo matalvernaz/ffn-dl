@@ -2,77 +2,71 @@
 
 import argparse
 import logging
-import re
 import sys
 from pathlib import Path
 
-from .ao3 import AO3LockedError, AO3Scraper
+from .ao3 import AO3LockedError
 from .exporters import DEFAULT_TEMPLATE, EXPORTERS, check_format_deps
-from .ficwad import FicWadScraper
 from .literotica import LiteroticaScraper
-from .mediaminer import MediaMinerScraper
 from .models import parse_chapter_spec
-from .royalroad import RoyalRoadScraper
 from .scraper import (
     CloudflareBlockError,
-    FFNScraper,
     RateLimitError,
     StoryNotFoundError,
 )
+from .sites import (
+    detect_scraper as _detect_site,
+    extract_story_url,
+    is_author_url as _is_author_url,
+    is_series_url as _is_series_url,
+)
 from .updater import count_chapters, extract_source_url, extract_status
-from .wattpad import WattpadPaidStoryError, WattpadScraper
+from .wattpad import WattpadPaidStoryError
+
+logger = logging.getLogger(__name__)
+
+# Errors that a per-item download can raise and that we want to handle
+# by recording the failure and moving on, rather than aborting the
+# whole batch. Kept narrower than bare ``Exception`` so programming
+# bugs (AttributeError, KeyError on missing fields) still surface.
+_DOWNLOAD_EXPECTED_ERRORS = (
+    RateLimitError,
+    CloudflareBlockError,
+    StoryNotFoundError,
+    AO3LockedError,
+    WattpadPaidStoryError,
+    ValueError,
+    OSError,
+    ImportError,
+)
 
 
-def _detect_site(url):
-    """Return the appropriate scraper class based on the URL."""
-    text = str(url).lower()
-    if "ficwad.com" in text:
-        return FicWadScraper
-    if "archiveofourown.org" in text or "ao3.org" in text:
-        return AO3Scraper
-    if "royalroad.com" in text:
-        return RoyalRoadScraper
-    if "mediaminer.org" in text:
-        return MediaMinerScraper
-    if "literotica.com" in text:
-        return LiteroticaScraper
-    if "wattpad.com" in text:
-        return WattpadScraper
-    return FFNScraper
-
-
-def _is_author_url(url):
-    """Return True if the URL points to an author page on any supported site."""
-    return (
-        FFNScraper.is_author_url(url)
-        or FicWadScraper.is_author_url(url)
-        or AO3Scraper.is_author_url(url)
-        or RoyalRoadScraper.is_author_url(url)
-        or MediaMinerScraper.is_author_url(url)
-        or LiteroticaScraper.is_author_url(url)
-        or WattpadScraper.is_author_url(url)
-    )
-
-
-def _is_series_url(url):
-    """Return True if the URL points to a series (AO3 or Literotica)."""
-    return AO3Scraper.is_series_url(url) or LiteroticaScraper.is_series_url(url)
-
-
-def _scrape_author_stories(url, args):
+def _scrape_author_stories(
+    url: str, args: argparse.Namespace,
+) -> tuple[str, list[str]]:
     """Scrape an author page and return (author_name, [story_urls])."""
     scraper = _build_scraper(url, args)
     return scraper.scrape_author_stories(url)
 
 
-def _scrape_series_works(url, args):
+def _scrape_series_works(
+    url: str, args: argparse.Namespace,
+) -> tuple[str, list[str]]:
     """Scrape an AO3 series and return (series_name, [work_urls])."""
     scraper = _build_scraper(url, args)
     return scraper.scrape_series_works(url)
 
 
-def _merge_stories(series_name, series_url, stories):
-    """Combine a series of Story objects into one Story for single-file export."""
+def _merge_stories(series_name: str, series_url: str, stories: list):
+    """Combine a series of Story objects into one Story for single-file export.
+
+    The merged Story gets a computed title (the series name), a
+    combined author (single author if all works share one, otherwise
+    comma-joined), and a per-work summary block. Each source work
+    becomes a title chapter followed by its own chapters, preserving
+    chapter numbering across the merged document so exporters can
+    render a proper table of contents.
+    """
     from html import escape
     from .models import Chapter, Story
 
@@ -137,7 +131,11 @@ def _merge_stories(series_name, series_url, stories):
     return merged
 
 
-def _handle_merge_series(series_urls, args, output_dir):
+def _handle_merge_series(
+    series_urls: list[str],
+    args: argparse.Namespace,
+    output_dir: Path,
+) -> bool:
     """Download each series URL (AO3 or Literotica), merge its works, export as one file."""
     try:
         check_format_deps(args.format)
@@ -170,7 +168,8 @@ def _handle_merge_series(series_urls, args, output_dir):
             try:
                 story = work_scraper.download(work_url, progress_callback=progress)
                 stories.append(story)
-            except Exception as exc:
+            except _DOWNLOAD_EXPECTED_ERRORS as exc:
+                logger.debug("Series part download failed: %s", exc, exc_info=True)
                 print(f"    Error: {exc}", file=sys.stderr)
                 all_ok = False
 
@@ -206,7 +205,13 @@ def _handle_merge_series(series_urls, args, output_dir):
     return all_ok
 
 
-def _handle_merge_parts(series_name, series_url, work_urls, args, output_dir):
+def _handle_merge_parts(
+    series_name: str,
+    series_url: str,
+    work_urls: list[str],
+    args: argparse.Namespace,
+    output_dir: Path,
+) -> bool:
     """Download an explicit list of work URLs and merge them into one file.
     Used for Literotica-style "series" detected from search-result titles.
     Tries to resolve the anchor part's canonical /series/se/<id> first so
@@ -236,12 +241,14 @@ def _handle_merge_parts(series_name, series_url, work_urls, args, output_dir):
                         series_url = resolved
                         series_name = s_name or series_name
                         work_urls = s_urls
-                except Exception as exc:
+                except _DOWNLOAD_EXPECTED_ERRORS as exc:
+                    logger.debug("Series scrape failed", exc_info=True)
                     print(
                         f"  (Series scrape failed: {exc}); using known parts.",
                         file=sys.stderr,
                     )
-    except Exception as exc:
+    except _DOWNLOAD_EXPECTED_ERRORS as exc:
+        logger.debug("Series URL resolution failed", exc_info=True)
         print(f"  (Couldn't resolve series URL: {exc})", file=sys.stderr)
 
     print(f"\nSeries: {series_name}")
@@ -257,7 +264,8 @@ def _handle_merge_parts(series_name, series_url, work_urls, args, output_dir):
             stories.append(
                 work_scraper.download(work_url, progress_callback=progress)
             )
-        except Exception as exc:
+        except _DOWNLOAD_EXPECTED_ERRORS as exc:
+            logger.debug("Merge-parts download failed", exc_info=True)
             print(f"    Error: {exc}", file=sys.stderr)
 
     if not stories:
@@ -362,7 +370,7 @@ def _library_subdir_for(story, args) -> Path | None:
     return full.parent
 
 
-def _build_scraper(url, args):
+def _build_scraper(url: str, args: argparse.Namespace):
     """Build a scraper instance for the given URL using CLI args."""
     scraper_cls = _detect_site(url)
     kwargs = {
@@ -382,7 +390,14 @@ def _build_scraper(url, args):
     return scraper_cls(**kwargs)
 
 
-def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=0):
+def _download_one(
+    url: str,
+    args: argparse.Namespace,
+    output_dir: Path,
+    *,
+    update_path: Path | None = None,
+    existing_chapters: int = 0,
+) -> bool:
     """Download and export a single story. Returns True on success, False on error."""
     scraper = _build_scraper(url, args)
 
@@ -483,7 +498,8 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
                 print(f"Emailed to: {args.send_to_kindle}")
             except SMTPConfigError as exc:
                 print(f"Could not send: {exc}", file=sys.stderr)
-            except Exception as exc:
+            except (OSError, RuntimeError) as exc:
+                logger.debug("Kindle email failed", exc_info=True)
                 print(f"Email failed: {exc}", file=sys.stderr)
 
         if args.clean_cache:
@@ -518,7 +534,7 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
         return False
 
 
-def _read_batch_file(path):
+def _read_batch_file(path: str) -> list[str]:
     """Read URLs from a batch file, skipping blank lines and comments."""
     urls = []
     batch_path = Path(path)
@@ -532,30 +548,15 @@ def _read_batch_file(path):
     return urls
 
 
-_FFN_URL_RE = re.compile(r"https?://(?:www\.)?fanfiction\.net/s/\d+", re.I)
-_FICWAD_URL_RE = re.compile(r"https?://(?:www\.)?ficwad\.com/story/\d+", re.I)
-_AO3_URL_RE = re.compile(
-    r"https?://(?:www\.)?(?:archiveofourown\.org|ao3\.org)/works/\d+", re.I
-)
-_RR_URL_RE = re.compile(
-    r"https?://(?:www\.)?royalroad\.com/fiction/\d+", re.I
-)
-_MM_URL_RE = re.compile(
-    r"https?://(?:www\.)?mediaminer\.org/fanfic/"
-    r"(?:view_st\.php/\d+|s/[^?#\s]+?/\d+)", re.I
-)
-_LIT_URL_RE = re.compile(
-    r"https?://(?:www\.)?literotica\.com/s/[a-z0-9-]+", re.I
-)
-_WP_URL_RE = re.compile(
-    r"https?://(?:www\.|m\.)?wattpad\.com/(?:story/)?\d+", re.I
-)
+def _build_search_spec(args: argparse.Namespace):
+    """Return (site_label, search_fn, filters) for the chosen --site.
 
-
-def _handle_search(args):
-    """Interactive search mode: search the chosen site, display results, download on pick."""
+    Each site carries a different flag set; this function maps the
+    argparse namespace to the keyword dict that the per-site search
+    function expects. Unset filter keys are dropped so we don't pass
+    ``None`` through to the downstream URL builders.
+    """
     from .search import (
-        collapse_ao3_series, collapse_literotica_series, fetch_until_limit,
         search_ao3, search_ffn, search_literotica, search_royalroad,
         search_wattpad,
     )
@@ -596,9 +597,7 @@ def _handle_search(args):
         search_fn = search_royalroad
     elif args.site == "literotica":
         site_label = "literotica.com (tag browse)"
-        filters = {
-            "category": getattr(args, "lit_category", None),
-        }
+        filters = {"category": getattr(args, "lit_category", None)}
         search_fn = search_literotica
         if getattr(args, "lit_page", None):
             args.start_page = max(args.start_page, int(args.lit_page))
@@ -624,6 +623,113 @@ def _handle_search(args):
         }
         search_fn = search_ffn
     filters = {k: v for k, v in filters.items() if v}
+    return site_label, search_fn, filters
+
+
+def _collapse_results(raw_results: list, site: str) -> list:
+    """Apply per-site series collapsing. Sites without a series concept
+    (FFN, Royal Road, Wattpad) return the raw list unchanged."""
+    from .search import collapse_ao3_series, collapse_literotica_series
+
+    if site == "ao3":
+        return collapse_ao3_series(raw_results)
+    if site == "literotica":
+        return collapse_literotica_series(raw_results)
+    return list(raw_results)
+
+
+def _print_search_results(results: list, start_idx: int = 1) -> None:
+    """Render the search results list the interactive prompt picks from."""
+    for i, r in enumerate(results, start=start_idx):
+        if r.get("is_series"):
+            parts = len(r.get("series_parts") or [])
+            print(f"  {i:>2}. {r['title']}  [Series · {parts} part(s) seen]")
+            print(f"      by {r.get('author', '')} | {r.get('fandom', '')}")
+        else:
+            status_tag = " [Complete]" if r.get("status") == "Complete" else ""
+            print(f"  {i:>2}. {r['title']}")
+            print(
+                f"      by {r['author']} | {r['fandom']} | "
+                f"{r['words']} words | {r['chapters']} ch | "
+                f"Rated {r['rating']}{status_tag}"
+            )
+        summary = r.get("summary") or ""
+        if summary:
+            s = summary if len(summary) <= 120 else summary[:117] + "..."
+            print(f"      {s}")
+        print()
+
+
+def _prompt_search_choice(results: list):
+    """Prompt for a numeric pick, 'm' for more, or 'q' to quit.
+
+    Returns an integer index (1-based), the string ``"more"``, or
+    calls ``sys.exit(0)`` on quit / Ctrl-C — the search loop has no
+    fallback path if the user bails out.
+    """
+    prompt = (
+        f"Enter a number (1-{len(results)}) to download, 'm' to load more, "
+        f"or 'q' to quit: "
+    )
+    while True:
+        try:
+            choice = input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(0)
+        choice = choice.strip().lower()
+        if choice == "q":
+            sys.exit(0)
+        if choice in ("m", "more"):
+            return "more"
+        try:
+            idx = int(choice)
+        except ValueError:
+            print("Invalid input. Enter a number, 'm', or 'q'.")
+            continue
+        if not 1 <= idx <= len(results):
+            print(f"Pick a number between 1 and {len(results)}.")
+            continue
+        return idx
+
+
+def _download_picked_result(picked: dict, args: argparse.Namespace) -> bool:
+    """Download one search-pick (work, series, or multi-part) via the
+    appropriate handler. Returns the success flag from that handler."""
+    print(f"\nDownloading: {picked['title']}")
+    print(f"  {picked['url']}\n")
+
+    if args.format is None:
+        args.format = "epub"
+    if args.output is None:
+        args.output = "."
+
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if picked.get("is_series"):
+        args.merge_series = True
+        if picked.get("parts_only"):
+            part_urls = [
+                p["url"] for p in (picked.get("series_parts") or [])
+                if p.get("url")
+            ]
+            return _handle_merge_parts(
+                picked.get("title") or "Series",
+                picked.get("url") or "",
+                part_urls,
+                args,
+                output_dir,
+            )
+        return _handle_merge_series([picked["url"]], args, output_dir)
+    return _download_one(picked["url"], args, output_dir)
+
+
+def _handle_search(args: argparse.Namespace) -> None:
+    """Interactive search mode: search the chosen site, display results, download on pick."""
+    from .search import fetch_until_limit
+
+    site_label, search_fn, filters = _build_search_spec(args)
 
     query_desc = args.search if args.search else "(no query — list browse)"
     print(f"Searching {site_label} for: {query_desc}")
@@ -633,7 +739,7 @@ def _handle_search(args):
 
     limit = max(1, int(args.limit))
     try:
-        results, next_page = fetch_until_limit(
+        raw_fetched, next_page = fetch_until_limit(
             search_fn, args.search,
             limit=limit, start_page=args.start_page, **filters,
         )
@@ -641,69 +747,19 @@ def _handle_search(args):
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    if not results:
+    if not raw_fetched:
         print("No results found.")
         sys.exit(0)
 
-    # Keep the raw uncollapsed list so load-more can re-collapse the full
-    # set — series parts that cross page boundaries need to see each
-    # other to group correctly.
-    raw_results = list(results)
-    if args.site == "ao3":
-        results = collapse_ao3_series(raw_results)
-    elif args.site == "literotica":
-        results = collapse_literotica_series(raw_results)
-
-    def _print_results(rs, start_idx=1):
-        for i, r in enumerate(rs, start=start_idx):
-            if r.get("is_series"):
-                parts = len(r.get("series_parts") or [])
-                print(f"  {i:>2}. {r['title']}  [Series · {parts} part(s) seen]")
-                print(f"      by {r.get('author', '')} | {r.get('fandom', '')}")
-            else:
-                status_tag = " [Complete]" if r.get("status") == "Complete" else ""
-                print(f"  {i:>2}. {r['title']}")
-                print(
-                    f"      by {r['author']} | {r['fandom']} | "
-                    f"{r['words']} words | {r['chapters']} ch | "
-                    f"Rated {r['rating']}{status_tag}"
-                )
-            summary = r.get("summary") or ""
-            if summary:
-                s = summary if len(summary) <= 120 else summary[:117] + "..."
-                print(f"      {s}")
-            print()
-
-    _print_results(results)
-
-    def _pick(rs):
-        prompt = (
-            f"Enter a number (1-{len(rs)}) to download, 'm' to load more, "
-            f"or 'q' to quit: "
-        )
-        while True:
-            try:
-                choice = input(prompt)
-            except (EOFError, KeyboardInterrupt):
-                print()
-                sys.exit(0)
-            choice = choice.strip().lower()
-            if choice == "q":
-                sys.exit(0)
-            if choice in ("m", "more"):
-                return "more"
-            try:
-                idx = int(choice)
-            except ValueError:
-                print("Invalid input. Enter a number, 'm', or 'q'.")
-                continue
-            if not 1 <= idx <= len(rs):
-                print(f"Pick a number between 1 and {len(rs)}.")
-                continue
-            return idx
+    # Keep the raw uncollapsed list so load-more can re-collapse the
+    # full set — series parts that cross page boundaries need to see
+    # each other to group correctly.
+    raw_results = list(raw_fetched)
+    results = _collapse_results(raw_results, args.site)
+    _print_search_results(results)
 
     while True:
-        picked_n = _pick(results)
+        picked_n = _prompt_search_choice(results)
         if picked_n == "more":
             try:
                 more_raw, next_page = fetch_until_limit(
@@ -717,51 +773,18 @@ def _handle_search(args):
                 print("(No more results.)")
                 continue
             raw_results.extend(more_raw)
-            if args.site == "ao3":
-                results = collapse_ao3_series(raw_results)
-            elif args.site == "literotica":
-                results = collapse_literotica_series(raw_results)
-            else:
-                results = list(raw_results)
+            results = _collapse_results(raw_results, args.site)
             # Reprint the full list so numbering matches the merged view.
             print()
-            _print_results(results)
+            _print_search_results(results)
             continue
 
         picked = results[picked_n - 1]
-        print(f"\nDownloading: {picked['title']}")
-        print(f"  {picked['url']}\n")
-
-        if args.format is None:
-            args.format = "epub"
-        if args.output is None:
-            args.output = "."
-
-        output_dir = Path(args.output)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        if picked.get("is_series"):
-            args.merge_series = True
-            if picked.get("parts_only"):
-                part_urls = [
-                    p["url"] for p in (picked.get("series_parts") or [])
-                    if p.get("url")
-                ]
-                ok = _handle_merge_parts(
-                    picked.get("title") or "Series",
-                    picked.get("url") or "",
-                    part_urls,
-                    args,
-                    output_dir,
-                )
-            else:
-                ok = _handle_merge_series([picked["url"]], args, output_dir)
-        else:
-            ok = _download_one(picked["url"], args, output_dir)
+        ok = _download_picked_result(picked, args)
         sys.exit(0 if ok else 1)
 
 
-def _handle_update_all(args):
+def _handle_update_all(args: argparse.Namespace) -> None:
     """Scan a folder for previously-downloaded exports and update each."""
     folder = Path(args.update_all)
     if not folder.is_dir():
@@ -808,7 +831,8 @@ def _handle_update_all(args):
 
         try:
             local = count_chapters(path)
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
+            logger.debug("count_chapters failed for %s", path, exc_info=True)
             print(f"  [skip] {rel}: couldn't read ({exc})")
             skipped.append(rel)
             continue
@@ -821,7 +845,8 @@ def _handle_update_all(args):
         if args.skip_complete:
             try:
                 status = extract_status(path)
-            except Exception:
+            except (OSError, ValueError) as exc:
+                logger.debug("extract_status failed for %s", path, exc_info=True)
                 status = ""
             if status.lower() == "complete":
                 print(f"  [skip] {rel}: marked Complete ({local} chapters)")
@@ -886,7 +911,8 @@ def _run_update_queue(
                 except (RateLimitError, CloudflareBlockError,
                         StoryNotFoundError, AO3LockedError, ValueError) as exc:
                     entry["error"] = exc
-                except Exception as exc:
+                except (OSError, RuntimeError) as exc:
+                    logger.debug("Chapter-count probe failed", exc_info=True)
                     entry["error"] = exc
         progress("")
 
@@ -971,7 +997,7 @@ def _run_update_queue(
     return 0 if not failed else 1
 
 
-def _handle_scan_library(args):
+def _handle_scan_library(args: argparse.Namespace) -> None:
     """Scan a directory, record findings in the library index."""
     from .library.scanner import scan
 
@@ -1009,7 +1035,7 @@ def _handle_scan_library(args):
     sys.exit(0 if result.errors == 0 else 1)
 
 
-def _handle_review_library(args):
+def _handle_review_library(args: argparse.Namespace) -> None:
     """Interactive TUI for promoting untrackable library entries."""
     from .library.index import LibraryIndex
     from .library.review import promote_untrackable, untrackable_for_root
@@ -1078,7 +1104,7 @@ def _handle_review_library(args):
     sys.exit(0)
 
 
-def _handle_update_library(args):
+def _handle_update_library(args: argparse.Namespace) -> None:
     """Check every indexed story in a library for new chapters upstream."""
     from .library.refresh import build_refresh_queue
     from .library.scanner import scan as rescan_library
@@ -1128,13 +1154,14 @@ def _handle_update_library(args):
     if not args.dry_run:
         try:
             rescan_library(root_resolved)
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
+            logger.debug("Post-update rescan failed", exc_info=True)
             print(f"\nWarning: post-update index refresh failed: {exc}")
 
     sys.exit(exit_code)
 
 
-def _handle_reorganize(args):
+def _handle_reorganize(args: argparse.Namespace) -> None:
     """Plan (and optionally apply) file moves to match the library template."""
     from .library.reorganizer import apply as apply_moves
     from .library.reorganizer import plan
@@ -1190,7 +1217,7 @@ def _handle_reorganize(args):
     sys.exit(0 if result.errors == 0 else 1)
 
 
-def _handle_watch(args):
+def _handle_watch(args: argparse.Namespace) -> None:
     """Clipboard watch mode: poll clipboard for FFN/FicWad URLs."""
     try:
         import pyperclip
@@ -1244,16 +1271,7 @@ def _handle_watch(args):
                 continue
             last_clip = clip
 
-            # Check if clipboard contains a supported URL
-            url = None
-            for pattern in (_FFN_URL_RE, _FICWAD_URL_RE, _AO3_URL_RE,
-                            _RR_URL_RE, _MM_URL_RE, _LIT_URL_RE,
-                            _WP_URL_RE):
-                match = pattern.search(clip)
-                if match:
-                    url = match.group(0)
-                    break
-
+            url = extract_story_url(clip)
             if not url:
                 continue
 
@@ -1273,7 +1291,14 @@ def _handle_watch(args):
         sys.exit(0)
 
 
-def main(argv=None):
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for the CLI.
+
+    All command-line flags are defined here. Kept separate from
+    ``main`` so the dispatch logic stays readable and the parser can
+    be tested / introspected (e.g. for shell completion) without
+    running the full program.
+    """
     parser = argparse.ArgumentParser(
         prog="ffn-dl",
         description="Download fanfiction from fanfiction.net and ficwad.com",
@@ -1824,36 +1849,34 @@ def main(argv=None):
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
-    args = parser.parse_args(argv)
+    return parser
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(message)s",
-    )
 
-    # Short-circuit: install an attribution backend and exit.
-    if getattr(args, "install_attribution", None):
-        from . import attribution as _attr
+def _handle_install_attribution(backend: str) -> int:
+    """Install an optional attribution backend and return an exit code."""
+    from . import attribution as _attr
 
-        backend = args.install_attribution
-        reason = _attr.install_unsupported_reason(backend)
-        if reason:
-            # Running as a frozen PyInstaller .exe — surface the
-            # explanation rather than attempting a doomed subprocess.
-            print(reason)
-            return 1
-        print(f"Installing {backend} (this may take a minute)...")
-        ok = _attr.install(backend, log_callback=print)
-        if ok:
-            print(f"\n{backend} installed successfully.")
-            return 0
-        print(f"\nFailed to install {backend}.")
+    reason = _attr.install_unsupported_reason(backend)
+    if reason:
+        # Running as a frozen PyInstaller .exe — surface the
+        # explanation rather than attempting a doomed subprocess.
+        print(reason)
         return 1
+    print(f"Installing {backend} (this may take a minute)...")
+    if _attr.install(backend, log_callback=print):
+        print(f"\n{backend} installed successfully.")
+        return 0
+    print(f"\nFailed to install {backend}.")
+    return 1
 
-    # --- Search mode ---
-    # Most searches need --search, but several flags stand in for a
-    # free-text query on their own: RR list browse, RR filter-only
-    # browse (tags/genres/warnings/bounds), and Literotica category.
+
+def _is_search_mode(args: argparse.Namespace) -> bool:
+    """Return True if the args request an interactive search.
+
+    Most searches need --search, but several flags stand in for a
+    free-text query on their own: RR list browse, RR filter-only
+    browse (tags/genres/warnings/bounds), and Literotica category.
+    """
     rr_filter_only = any(
         getattr(args, attr, None)
         for attr in (
@@ -1862,114 +1885,212 @@ def main(argv=None):
             "rr_max_pages", "rr_min_rating",
         )
     )
-    if (
-        args.search
-        or rr_filter_only
-        or getattr(args, "lit_category", None)
-    ):
+    return bool(
+        args.search or rr_filter_only or getattr(args, "lit_category", None)
+    )
+
+
+def _handle_update_file(args: argparse.Namespace) -> int:
+    """Single-file --update: read source URL, download new chapters, re-export."""
+    update_path = Path(args.update)
+    url = extract_source_url(update_path)
+    existing_chapters = count_chapters(update_path)
+    if args.format is None:
+        args.format = _FMT_MAP.get(update_path.suffix.lower(), "epub")
+    if args.output is None:
+        args.output = str(update_path.parent)
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        ok = _download_one(
+            url, args, output_dir,
+            update_path=update_path,
+            existing_chapters=existing_chapters,
+        )
+    except KeyboardInterrupt:
+        print("\nCancelled. Re-run the same command to resume.")
+        return 130
+    return 0 if ok else 1
+
+
+def _collect_urls(args: argparse.Namespace) -> list[str]:
+    """Gather story URLs from positional args and --batch file."""
+    urls = list(args.url) if args.url else []
+    if args.batch:
+        urls.extend(_read_batch_file(args.batch))
+    return urls
+
+
+def _expand_author_and_series_urls(
+    urls: list[str], args: argparse.Namespace,
+) -> list[str]:
+    """Resolve any author-page or series-page URLs into per-story URLs.
+
+    Each author URL expands to the author's own-stories list; each
+    AO3/Literotica series URL expands to its constituent works.
+    Raises SystemExit on fetch failure — the caller treats these as
+    fatal because the user explicitly asked for a collection.
+    """
+    expanded: list[str] = []
+    for url in urls:
+        if _is_author_url(url):
+            try:
+                author_name, story_urls = _scrape_author_stories(url, args)
+            except (RateLimitError, CloudflareBlockError, StoryNotFoundError) as exc:
+                print(f"Error fetching author page {url}: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if not story_urls:
+                print(f"No stories found on author page: {url}", file=sys.stderr)
+                sys.exit(1)
+            print(f"Author: {author_name}")
+            print(f"Found {len(story_urls)} stories.")
+            expanded.extend(story_urls)
+        elif _is_series_url(url):
+            try:
+                series_name, work_urls = _scrape_series_works(url, args)
+            except (RateLimitError, CloudflareBlockError, StoryNotFoundError) as exc:
+                print(f"Error fetching series page {url}: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if not work_urls:
+                print(f"No works found in series: {url}", file=sys.stderr)
+                sys.exit(1)
+            print(f"Series: {series_name}")
+            print(f"Found {len(work_urls)} works.")
+            expanded.extend(work_urls)
+        else:
+            expanded.append(url)
+    return expanded
+
+
+def _run_batch(
+    urls: list[str], args: argparse.Namespace, output_dir: Path,
+) -> int:
+    """Download each URL in turn, printing a per-run summary at the end.
+
+    Single-URL case preserves the original exit-code behaviour
+    (0/1 from the one download); multi-URL case always prints a
+    summary and exits non-zero if any story failed. Interrupts
+    surface as exit code 130 with a partial summary.
+    """
+    if len(urls) == 1:
+        try:
+            ok = _download_one(urls[0], args, output_dir)
+        except KeyboardInterrupt:
+            print("\nCancelled. Re-run the same command to resume.")
+            return 130
+        return 0 if ok else 1
+
+    succeeded = 0
+    failed = 0
+    failures: list[str] = []
+    try:
+        for i, url in enumerate(urls, 1):
+            print(f"\n{'='*60}")
+            print(f"[{i}/{len(urls)}] {url}")
+            print(f"{'='*60}")
+            if _download_one(url, args, output_dir):
+                succeeded += 1
+            else:
+                failed += 1
+                failures.append(url)
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        remaining = len(urls) - (succeeded + failed)
+        print(f"\n{'='*60}")
+        print(
+            f"Batch interrupted — {succeeded} succeeded, {failed} failed, "
+            f"{remaining} not attempted."
+        )
+        if failures:
+            print("Failed URLs:")
+            for u in failures:
+                print(f"  {u}")
+        return 130
+
+    print(f"\n{'='*60}")
+    print(
+        f"Batch complete — {succeeded} succeeded, {failed} failed "
+        f"out of {len(urls)} total."
+    )
+    if failures:
+        print("Failed URLs:")
+        for u in failures:
+            print(f"  {u}")
+    print(f"{'='*60}")
+    return 0 if failed == 0 else 1
+
+
+def main(argv: list[str] | None = None) -> None:
+    """CLI entry point. Parses args and dispatches to a handler."""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(message)s",
+    )
+
+    if getattr(args, "install_attribution", None):
+        sys.exit(_handle_install_attribution(args.install_attribution))
+
+    # --- Search mode ---
+    if _is_search_mode(args):
         if not args.search:
             args.search = ""
         _handle_search(args)
         return
 
-    # --- Library scan mode ---
+    # --- Library / bulk modes: each handler owns its own sys.exit ---
     if args.scan_library:
         _handle_scan_library(args)
         return
-
-    # --- Library reorganize mode ---
     if args.reorganize:
         _handle_reorganize(args)
         return
-
-    # --- Library update mode ---
     if args.update_library:
         _handle_update_library(args)
         return
-
-    # --- Library review mode ---
     if args.review_library:
         _handle_review_library(args)
         return
-
-    # --- Update-all folder mode ---
     if args.update_all:
         _handle_update_all(args)
         return
-
-    # --- Clipboard watch mode ---
     if args.watch:
         _handle_watch(args)
         return
 
-    # --- Resolve --update mode (single-file, no batch) ---
+    # --- Single-file --update (not batch) ---
     if args.update:
         if args.batch:
             parser.error("--update and --batch cannot be used together")
-        update_path = Path(args.update)
-        url = extract_source_url(update_path)
-        existing_chapters = count_chapters(update_path)
-        fmt_map = {".epub": "epub", ".html": "html", ".txt": "txt"}
-        if args.format is None:
-            args.format = fmt_map.get(update_path.suffix.lower(), "epub")
-        if args.output is None:
-            args.output = str(update_path.parent)
-        if args.format is None:
-            args.format = "epub"
-        output_dir = Path(args.output)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        sys.exit(_handle_update_file(args))
 
-        try:
-            ok = _download_one(
-                url,
-                args,
-                output_dir,
-                update_path=update_path,
-                existing_chapters=existing_chapters,
-            )
-        except KeyboardInterrupt:
-            print("\nCancelled. Re-run the same command to resume.")
-            sys.exit(130)
-        sys.exit(0 if ok else 1)
-
-    # --- Resolve --author mode ---
+    # --- --author: fetch the author's own stories, then batch-download ---
     if args.author:
         if args.batch:
             parser.error("--author and --batch cannot be used together")
-        if args.format is None:
-            args.format = "epub"
-        if args.output is None:
-            args.output = "."
-        output_dir = Path(args.output)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
         try:
             author_name, story_urls = _scrape_author_stories(args.author, args)
         except (RateLimitError, CloudflareBlockError, StoryNotFoundError) as exc:
             print(f"Error fetching author page: {exc}", file=sys.stderr)
             sys.exit(1)
-
         if not story_urls:
             print("No stories found on the author page.", file=sys.stderr)
             sys.exit(1)
-
         print(f"Author: {author_name}")
         print(f"Found {len(story_urls)} stories.")
         urls = story_urls
-        # Fall through to batch processing below
 
     else:
-        # --- Collect URLs from positional args and --batch file ---
-        urls = list(args.url) if args.url else []
+        try:
+            urls = _collect_urls(args)
+        except FileNotFoundError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
 
-        if args.batch:
-            try:
-                urls.extend(_read_batch_file(args.batch))
-            except FileNotFoundError as exc:
-                print(f"Error: {exc}", file=sys.stderr)
-                sys.exit(1)
-
-        # --- --merge-series: handle series URLs specially ---
+        # --merge-series: peel off series URLs and render each as one file.
         if args.merge_series:
             series_urls = [u for u in urls if _is_series_url(u)]
             if series_urls:
@@ -1980,105 +2101,29 @@ def main(argv=None):
                 output_dir = Path(args.output)
                 output_dir.mkdir(parents=True, exist_ok=True)
                 ok = _handle_merge_series(series_urls, args, output_dir)
-                # Remove series URLs from further processing
                 urls = [u for u in urls if not _is_series_url(u)]
                 if not urls:
                     sys.exit(0 if ok else 1)
 
-        # Expand any author or series URLs found in positional args
-        expanded = []
-        for url in urls:
-            if _is_author_url(url):
-                try:
-                    author_name, story_urls = _scrape_author_stories(url, args)
-                except (RateLimitError, CloudflareBlockError, StoryNotFoundError) as exc:
-                    print(f"Error fetching author page {url}: {exc}", file=sys.stderr)
-                    sys.exit(1)
-                if not story_urls:
-                    print(f"No stories found on author page: {url}", file=sys.stderr)
-                    sys.exit(1)
-                print(f"Author: {author_name}")
-                print(f"Found {len(story_urls)} stories.")
-                expanded.extend(story_urls)
-            elif _is_series_url(url):
-                try:
-                    series_name, work_urls = _scrape_series_works(url, args)
-                except (RateLimitError, CloudflareBlockError, StoryNotFoundError) as exc:
-                    print(f"Error fetching series page {url}: {exc}", file=sys.stderr)
-                    sys.exit(1)
-                if not work_urls:
-                    print(f"No works found in series: {url}", file=sys.stderr)
-                    sys.exit(1)
-                print(f"Series: {series_name}")
-                print(f"Found {len(work_urls)} works.")
-                expanded.extend(work_urls)
-            else:
-                expanded.append(url)
-        urls = expanded
+        urls = _expand_author_and_series_urls(urls, args)
 
         if not urls:
-            parser.error("either a URL, --batch FILE, --update FILE, or --author URL is required")
+            parser.error(
+                "either a URL, --batch FILE, --update FILE, or "
+                "--author URL is required"
+            )
 
     if args.format is None:
         args.format = "epub"
 
-    # Library auto-sort: if --output wasn't given and a library path
-    # is configured in prefs, route fresh downloads into the library
-    # and let _download_one derive the per-story subdir from metadata.
-    # An explicit --output always wins so power users keep their
-    # one-off overrides.
+    # Library auto-sort: if --output wasn't given and a library path is
+    # configured, route fresh downloads into the library and let
+    # _download_one derive the per-story subdir from metadata. Explicit
+    # --output always wins so power users keep their one-off overrides.
     _apply_library_autosort(args)
-
     if args.output is None:
         args.output = "."
-
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Single URL: preserve original exit-code behaviour ---
-    if len(urls) == 1:
-        try:
-            ok = _download_one(urls[0], args, output_dir)
-        except KeyboardInterrupt:
-            print("\nCancelled. Re-run the same command to resume.")
-            sys.exit(130)
-        sys.exit(0 if ok else 1)
-
-    # --- Multiple URLs: batch mode with summary ---
-    succeeded = 0
-    failed = 0
-    failures = []
-
-    try:
-        for i, url in enumerate(urls, 1):
-            print(f"\n{'='*60}")
-            print(f"[{i}/{len(urls)}] {url}")
-            print(f"{'='*60}")
-            ok = _download_one(url, args, output_dir)
-            if ok:
-                succeeded += 1
-            else:
-                failed += 1
-                failures.append(url)
-    except KeyboardInterrupt:
-        print("\nCancelled.")
-        # Count remaining URLs as not attempted
-        remaining = len(urls) - (succeeded + failed)
-        print(f"\n{'='*60}")
-        print(f"Batch interrupted — {succeeded} succeeded, {failed} failed, "
-              f"{remaining} not attempted.")
-        if failures:
-            print("Failed URLs:")
-            for u in failures:
-                print(f"  {u}")
-        sys.exit(130)
-
-    print(f"\n{'='*60}")
-    print(f"Batch complete — {succeeded} succeeded, {failed} failed "
-          f"out of {len(urls)} total.")
-    if failures:
-        print("Failed URLs:")
-        for u in failures:
-            print(f"  {u}")
-    print(f"{'='*60}")
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(_run_batch(urls, args, output_dir))
