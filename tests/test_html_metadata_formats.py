@@ -275,6 +275,147 @@ def test_ffndl_native_html_still_works(tmp_path):
     assert md.source_url == "https://www.fanfiction.net/s/99999999/"
 
 
+_FLAG_HTML = """
+<!DOCTYPE html>
+<html><head>
+<title>FLAG :: The Sealed Kunai by Kenchi618</title>
+</head><body>
+<h1>The Sealed Kunai by Kenchi618</h1>
+<p>This book was automatically created by <a href="http://www.flagfic.com/">FLAG</a>
+based on content retrieved from <span id="crSource">
+<a href="http://www.fanfiction.net/s/6051938/">http://www.fanfiction.net/s/6051938/</a>
+</span>.</p>
+<p>The content in this book is copyrighted by
+<span id="crAuthor">Kenchi618</span> or their authorised agents(s).</p>
+<h2>Chapter 1</h2>
+</body></html>
+"""
+
+
+def test_flag_format_extracts_title_and_author(tmp_path):
+    """flagfic.com output — `<span id="crAuthor">` + `<h1>Title by Author</h1>`."""
+    path = _write(tmp_path, "kunai.html", _FLAG_HTML)
+    md = extract_metadata(path)
+    assert md.title == "The Sealed Kunai"
+    assert md.author == "Kenchi618"
+    assert md.source_url and "6051938" in md.source_url
+
+
+_SPAN_CLASS_HTML = """
+<!doctype html>
+<html><body>
+<h1><span class="title">Sealkeeper: He Who Binds</span></h1>
+<h2>by <span class="author">Syynistyre</span></h2>
+<p>Original source:
+<a href="https://www.fanfiction.net/s/11651066/1/">https://www.fanfiction.net/s/11651066/1/</a></p>
+</body></html>
+"""
+
+
+def test_span_class_format_extracts_title_and_author(tmp_path):
+    path = _write(tmp_path, "sealkeeper.html", _SPAN_CLASS_HTML)
+    md = extract_metadata(path)
+    assert md.title == "Sealkeeper: He Who Binds"
+    assert md.author == "Syynistyre"
+    assert md.source_url and "11651066" in md.source_url
+
+
+_AO3_NATIVE_FULL_HTML = """
+<html>
+<head><title>The Last Prayer - GraeFoxx - Naruto</title></head>
+<body>
+<div id="preface">
+<p class="message">
+<b>The Last Prayer</b><br/>
+Posted originally on the <a href="http://archiveofourown.org/">Archive of Our Own</a>
+at <a href="http://archiveofourown.org/works/18163346">http://archiveofourown.org/works/18163346</a>.
+</p>
+<div class="meta">
+<dl class="tags">
+<dt>Rating:</dt><dd>Explicit</dd>
+<dt>Fandom:</dt><dd>Naruto</dd>
+</dl>
+</div>
+</div>
+</body></html>
+"""
+
+
+def test_ao3_native_fallback_recovers_title_and_author(tmp_path):
+    """AO3 native HTML has no kv-table for title/author — pulled from
+    the ``<title>`` tag's ``Title - Author - Fandom`` convention."""
+    path = _write(tmp_path, "ao3native.html", _AO3_NATIVE_FULL_HTML)
+    md = extract_metadata(path)
+    assert md.title == "The Last Prayer"
+    assert md.author == "GraeFoxx"
+    assert md.fandoms == ["Naruto"]  # from <dt>Fandom:</dt>
+    assert md.rating == "Explicit"
+
+
+def test_fallback_never_overwrites_structured_values(tmp_path):
+    """If a kv-table already gave us a title, a `<title>` tag with a
+    different value mustn't clobber it."""
+    html = """
+    <html>
+    <head><title>Some Wrong Thing - Someone - Fandom</title></head>
+    <body>
+    <table>
+      <tr><th>title</th><td>Correct Title From Table</td></tr>
+      <tr><th>author</th><td>Correct Author</td></tr>
+      <tr><th>source</th><td><a href="https://archiveofourown.org/works/1">x</a></td></tr>
+    </table>
+    </body></html>
+    """
+    path = _write(tmp_path, "mixed.html", html)
+    md = extract_metadata(path)
+    assert md.title == "Correct Title From Table"
+    assert md.author == "Correct Author"
+
+
+def test_ficlab_crossover_fandom_extracted_from_tags(tmp_path):
+    """FicLab has no dedicated fandom field, but FFN's crossover
+    convention gives us a reliable ``"X + Y Crossover"`` entry inside
+    the tags row. For a fic in ``misc/`` (where the folder-fandom
+    fallback correctly refuses to help), extracting this tag is the
+    only way to get a meaningful fandom."""
+    html = """
+    <html><body>
+    <p>FicLab v1.0 — source https://www.fanfiction.net/s/123/</p>
+    <table><tbody>
+      <tr><th>title</th><td>Crossover Story</td></tr>
+      <tr><th>author</th><td>Someone</td></tr>
+      <tr><th>source</th><td><a href="https://www.fanfiction.net/s/123/">url</a></td></tr>
+      <tr><th>tags</th><td>Adventure, Fanfiction, Harry P., Harry Potter + Dragon Age Crossover, In-Progress, Morrigan</td></tr>
+    </tbody></table>
+    </body></html>
+    """
+    path = _write(tmp_path, "crossover.html", html)
+    md = extract_metadata(path)
+    assert md.fandoms == ["Harry Potter + Dragon Age Crossover"]
+
+
+def test_non_crossover_ficlab_leaves_fandom_for_folder_fallback(tmp_path):
+    """A FicLab file with no ``Crossover`` tag keeps fandoms empty —
+    the folder-fandom backfill in identify() is the right place to
+    populate it, not the tags-blob heuristic."""
+    html = """
+    <html><body>
+    <table><tbody>
+      <tr><th>title</th><td>Single Fandom Story</td></tr>
+      <tr><th>author</th><td>Someone</td></tr>
+      <tr><th>source</th><td><a href="https://www.fanfiction.net/s/123/">url</a></td></tr>
+      <tr><th>tags</th><td>Adventure, Fanfiction, Harry P., Naruto, In-Progress</td></tr>
+    </tbody></table>
+    </body></html>
+    """
+    path = _write(tmp_path, "single.html", html)
+    md = extract_metadata(path)
+    # Empty — no reliable way to pick "Naruto" out of a tags blob that
+    # mixes genre/character/status tokens. The folder-fandom fallback
+    # in library.identifier takes over when the file is scanned.
+    assert md.fandoms == []
+
+
 def test_metadata_chapter_count_beats_dom_count(tmp_path):
     """When the kv-table gives us a chapter count, don't overwrite it
     with count_chapters() which only recognises ffn-dl's own markup

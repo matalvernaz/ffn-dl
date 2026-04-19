@@ -491,6 +491,21 @@ def _fill_from_html(path: Path, md: "FileMetadata") -> None:
             md.fandoms = [value]
             break
 
+    # FicLab-style crossover recovery: FicLab has no dedicated fandom
+    # field, but FFN's crossover tag format is stable — a single tag
+    # reading ``"{FandomA} + {FandomB} Crossover"`` — and FicLab passes
+    # it straight through in the ``tags`` row. Look for that exact
+    # shape so crossovers in the user's ``misc/`` folder (where the
+    # folder-fandom fallback won't fire) still get a meaningful fandom
+    # string from the content itself.
+    if not md.fandoms:
+        tags_value = merged.get("tags", "")
+        for raw_tag in tags_value.split(","):
+            tag = raw_tag.strip()
+            if tag.lower().endswith(" crossover"):
+                md.fandoms = [tag]
+                break
+
     # Chapter count from metadata when available — saves an expensive
     # DOM re-walk in count_chapters() and works on formats whose
     # chapter markup count_chapters can't parse.
@@ -510,6 +525,213 @@ def _fill_from_html(path: Path, md: "FileMetadata") -> None:
         if value and value.startswith(("http://", "https://")):
             _merge_metadata_field(md, "source_url", value)
             break
+
+    # Last-resort title/author fallbacks. Covers three formats whose
+    # metadata doesn't live in a kv-table or labelled paragraph:
+    #
+    #   * FLAG / flagfic.com: `<span id="crAuthor">Author</span>` and
+    #     `<title>FLAG :: Title by Author</title>`.
+    #   * AO3 native HTML download: title in the `<title>` tag as
+    #     "Title - Author - Fandom" and bolded inside a `<p class="message">`.
+    #   * span-class: `<span class="title">Title</span>` + author sibling.
+    #
+    # Only runs when the structured parsers above didn't already populate
+    # the field — we never overwrite a trusted kv-table value with a
+    # fallback guess.
+    if not md.title or not md.author:
+        _fill_title_author_fallbacks(text, md)
+
+
+# Universal HTML metadata markers — present in most downloaders'
+# output regardless of whether they use a kv-table, paragraph dump, or
+# none of the above. Used as a final safety net so any unknown format
+# still surfaces at least a title.
+_META_AUTHOR_RE = re.compile(
+    r'<meta\s+name="author"\s+content="([^"]+)"', re.IGNORECASE,
+)
+_META_OG_TITLE_RE = re.compile(
+    r'<meta\s+property="og:title"\s+content="([^"]+)"', re.IGNORECASE,
+)
+_FIRST_H1_RE = re.compile(r'<h1[^>]*>(.*?)</h1>', re.IGNORECASE | re.DOTALL)
+
+# Titles that show up in these HTML elements often carry site-level
+# branding like "Story — FanFiction" or "Title | Royal Road"; strip
+# those suffixes so the user sees the actual story title.
+_TITLE_BRANDING_SEPARATORS = (" | ", " — ", " – ", " :: ", " — ")
+_TITLE_BRANDING_TRAILERS = (
+    "fanfiction", "fanfiction.net", "archive of our own", "ao3",
+    "royal road", "wattpad", "literotica", "ficwad", "mediaminer",
+)
+
+
+def _strip_title_branding(raw: str) -> str:
+    """Drop trailing site-branding segments from a `<title>` tag value.
+
+    E.g. ``"My Story | FanFiction"`` → ``"My Story"``. Preserves the
+    full string if no separator matches so legitimate ``|`` characters
+    in titles stay intact.
+    """
+    for separator in _TITLE_BRANDING_SEPARATORS:
+        if separator not in raw:
+            continue
+        head, _, tail = raw.rpartition(separator)
+        if tail.strip().lower() in _TITLE_BRANDING_TRAILERS:
+            return head.strip()
+    return raw.strip()
+
+
+# <span id="crAuthor">Author Name</span> — used by the FLAG/flagfic.com
+# downloader. Multiple crXXX spans exist per file (crAuthor, crTitle via
+# the <h1>, crSource for URL), each uniquely identified by id.
+_FLAG_AUTHOR_RE = re.compile(
+    r'<span\s+id="crAuthor"[^>]*>(.*?)</span>', re.IGNORECASE | re.DOTALL,
+)
+
+# `<h1>Title by Author</h1>` — FLAG shows both title and author on the
+# cover page in a single h1. Split on the last " by " to get the pieces.
+_FLAG_COVER_H1_RE = re.compile(
+    r'<h1[^>]*>(.*?)</h1>', re.IGNORECASE | re.DOTALL,
+)
+
+# <span class="title">...</span> / <span class="author">...</span>,
+# observed in at least one third-party downloader.
+_SPAN_CLASS_TITLE_RE = re.compile(
+    r'<span\s+class="title"[^>]*>(.*?)</span>', re.IGNORECASE | re.DOTALL,
+)
+_SPAN_CLASS_AUTHOR_RE = re.compile(
+    r'<span\s+class="author"[^>]*>(.*?)</span>', re.IGNORECASE | re.DOTALL,
+)
+
+# AO3 native HTML: <title>Title - Author - Fandom</title>. The chapter
+# body often starts with a <p class="message"><b>Title</b>... blurb
+# followed by author info.
+_HTML_TITLE_TAG_RE = re.compile(
+    r'<title[^>]*>(.*?)</title>', re.IGNORECASE | re.DOTALL,
+)
+_AO3_NATIVE_SIGNATURE = "archiveofourown.org"
+
+
+def _fill_title_author_fallbacks(html: str, md: "FileMetadata") -> None:
+    """Best-effort title/author recovery from non-tabular HTML.
+
+    Tries each fallback parser in order of specificity: FLAG
+    (`<span id="crAuthor">` + `<h1>Title by Author</h1>`), span-class
+    dumps, then AO3's native `<title>` tag. Only populates fields that
+    are still empty on ``md`` — never overwrites a value the
+    structured parsers already found.
+    """
+    # FLAG's `<span id="crAuthor">Name</span>` is a reliable author
+    # marker. The cover <h1>Title by Author</h1> gives us the title.
+    flag_author_match = _FLAG_AUTHOR_RE.search(html)
+    if flag_author_match:
+        _merge_metadata_field(md, "author", _clean_cell_value(flag_author_match.group(1)))
+        # Find the cover h1 — skip "Copyright", "Summary", "Table of
+        # Contents" etc. by requiring " by " to appear in the text.
+        for h1_match in _FLAG_COVER_H1_RE.finditer(html):
+            text = _clean_cell_value(h1_match.group(1))
+            if " by " in text:
+                candidate_title = text.rsplit(" by ", 1)[0].strip()
+                if candidate_title:
+                    _merge_metadata_field(md, "title", candidate_title)
+                    break
+
+    # `<span class="title">` / `<span class="author">` dumps.
+    span_title = _SPAN_CLASS_TITLE_RE.search(html)
+    if span_title:
+        _merge_metadata_field(md, "title", _clean_cell_value(span_title.group(1)))
+    span_author = _SPAN_CLASS_AUTHOR_RE.search(html)
+    if span_author:
+        _merge_metadata_field(md, "author", _clean_cell_value(span_author.group(1)))
+
+    # AO3 native download. Only trigger if the body references AO3 so
+    # we don't mis-parse a random other HTML file's <title> tag.
+    if _AO3_NATIVE_SIGNATURE in html:
+        title_tag_match = _HTML_TITLE_TAG_RE.search(html)
+        if title_tag_match:
+            raw = _clean_cell_value(title_tag_match.group(1))
+            # AO3's pattern: "Title - Author - Fandom". Splitting on the
+            # surrounding " - " gives us [title, author, fandom] when
+            # present. If only one " - " exists we take the left side
+            # as title and skip author — better to miss a field than
+            # record the fandom as the author.
+            parts = [p.strip() for p in raw.split(" - ")]
+            if len(parts) >= 2 and parts[0]:
+                _merge_metadata_field(md, "title", parts[0])
+            if len(parts) >= 3 and parts[1]:
+                _merge_metadata_field(md, "author", parts[1])
+
+    # Universal fallbacks — run after every format-specific parser so
+    # they only fill in what's still missing. <meta> tags and the first
+    # <h1>/<title> are present in almost every HTML file, so these
+    # catch unknown downloaders we haven't written explicit parsers for.
+    if not md.author:
+        author_meta = _META_AUTHOR_RE.search(html)
+        if author_meta:
+            _merge_metadata_field(md, "author", _clean_cell_value(author_meta.group(1)))
+
+    if not md.title:
+        og_title = _META_OG_TITLE_RE.search(html)
+        if og_title:
+            _merge_metadata_field(
+                md, "title", _strip_title_branding(_clean_cell_value(og_title.group(1))),
+            )
+
+    if not md.title:
+        h1_match = _FIRST_H1_RE.search(html)
+        if h1_match:
+            text = _clean_cell_value(h1_match.group(1))
+            # Skip generic boilerplate headings common to downloader
+            # cover pages — we want the story title, not the section.
+            generic = {"copyright", "summary", "table of contents", "cover", "preface"}
+            if text and text.lower().rstrip(":").strip() not in generic:
+                _split_title_by_author(text, md)
+
+    if not md.title:
+        title_tag = _HTML_TITLE_TAG_RE.search(html)
+        if title_tag:
+            raw = _strip_title_branding(_clean_cell_value(title_tag.group(1)))
+            _split_title_by_author(raw, md)
+
+
+def _split_title_by_author(text: str, md: "FileMetadata") -> None:
+    """Assign ``text`` to ``md.title``, splitting on ``" by "`` when present.
+
+    Several downloaders expose both title and author in a single HTML
+    element — ``<title>Story by Author</title>``, ``<h1>Story by Author</h1>``,
+    or HPFFA's ``<div id="pagetitle"><a>Title</a> by <a>Author</a></div>``
+    (which collapses to the same string after tag-stripping).
+
+    We only split when the right-hand side looks like a plausible
+    author name — short (≤60 chars), no newlines, no obvious sentence
+    punctuation — so legitimate titles like ``"Life by the Seaside"``
+    don't lose their tail. Author is only set when it was still empty;
+    we never overwrite a value a structured parser already found.
+    """
+    if not text:
+        return
+
+    MAX_PLAUSIBLE_AUTHOR_LEN = 60
+
+    # Use rsplit so a title like "A Day by the Sea by Jane Doe" splits
+    # on the final " by " — the author is the trailing segment.
+    if " by " in text:
+        head, _, tail = text.rpartition(" by ")
+        head = head.strip()
+        tail = tail.strip()
+        looks_like_author = (
+            head
+            and tail
+            and "\n" not in tail
+            and len(tail) <= MAX_PLAUSIBLE_AUTHOR_LEN
+            # Plausible author names don't end in sentence punctuation.
+            and tail[-1] not in ".!?"
+        )
+        if looks_like_author:
+            _merge_metadata_field(md, "title", head)
+            _merge_metadata_field(md, "author", tail)
+            return
+
+    _merge_metadata_field(md, "title", text)
 
 
 def _fill_from_txt(path: Path, md: "FileMetadata") -> None:

@@ -80,7 +80,11 @@ def scan(
         result.total_files += 1
         try:
             md = extract_metadata(path)
-            candidate = identify(path, md)
+            # Pass ``root`` so identify() can backfill the fandom from
+            # the parent folder when the file's HTML metadata didn't
+            # include one (most common on FicLab dumps whose tags row
+            # mixes genres/characters/status/fandom into one blob).
+            candidate = identify(path, md, root=root)
             index.record(root, candidate)
             if candidate.confidence == Confidence.HIGH:
                 result.identified_via_url += 1

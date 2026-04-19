@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.20.1 — 2026-04-19
+
+### Fix
+
+- **Library metadata extraction is now effectively complete for
+  third-party HTML formats.** Smoke-tested against a real 817-file
+  library: title 100%, author 100%, fandoms 99.8%, source_url 99.8%
+  — up from 99.3% / 99.3% / 85.6% / 99.7% in 1.20.0.
+  - New format parsers: FLAG / flagfic.com
+    (``<span id="crAuthor">`` + ``<h1>Title by Author</h1>``), the
+    ``<span class="title">`` / ``<span class="author">`` variant, and
+    AO3's native HTML download (title recovered from the
+    ``<title>Title - Author - Fandom</title>`` convention when no
+    kv-table is present).
+  - Universal fallbacks: when none of the format-specific parsers
+    produced a title, try ``<meta property="og:title">``, the first
+    ``<h1>``, and finally the ``<title>`` tag — with site-branding
+    suffixes (``"Story | FanFiction"``) stripped and a generic-heading
+    blocklist (``Copyright``, ``Summary``, …) applied so cover-page
+    boilerplate isn't mistaken for a title.
+  - ``<meta name="author">`` is used as a last-resort author source.
+  - ``_split_title_by_author`` handles the ``"Story by Author"``
+    pattern that shows up in ``<title>`` tags (HPFFA and others) —
+    splits on the final ``" by "`` and assigns both fields, with a
+    length/punctuation guard so titles like ``"Life by the Seaside"``
+    don't lose their tail.
+- **Crossover fandoms are now recovered from FicLab tag rows.** FFN's
+  crossover convention emits a single tag of the form
+  ``"{FandomA} + {FandomB} Crossover"``. For fics in a crossover
+  bucket (e.g. ``misc/`` in a library organised by fandom), this is
+  the only fandom signal available — the folder name isn't a fandom,
+  the tags row is the whole story. Scan accuracy on the crossover
+  subset went from 0% to 26/28.
+- **Library scanner now back-fills fandom from the parent folder.**
+  `library.identifier.identify(path, metadata, root=...)` uses the
+  file's immediate subfolder under the scan root as a fandom when the
+  HTML metadata didn't include one — the right fallback for libraries
+  already organised by fandom folder. Catch-all folder names (``misc``,
+  ``unsorted``, ``downloads``, …) are excluded so they can't pollute
+  the index.
+
 ## 1.20.0 — 2026-04-19
 
 ### Add
