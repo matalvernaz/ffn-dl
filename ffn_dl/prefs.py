@@ -21,6 +21,15 @@ KEY_ATTRIBUTION_MODEL_SIZE = "attribution_model_size"
 KEY_LOG_LEVEL = "log_level"
 KEY_LOG_TO_FILE = "log_to_file"
 KEY_STORY_PICKER_SORT = "story_picker_sort"
+# Library manager — auto-sort downloads into category subdirs and
+# re-check existing files (including foreign ones from FanFicFare /
+# FicHub) for updates.
+KEY_LIBRARY_PATH = "library_path"
+KEY_LIBRARY_PATH_TEMPLATE = "library_path_template"
+KEY_LIBRARY_INDEX_PATH = "library_index_path"  # blank → program config dir
+KEY_LIBRARY_MISC_FOLDER = "library_misc_folder"
+KEY_LIBRARY_AMBIGUOUS_PROMPT = "library_ambiguous_prompt"
+KEY_LIBRARY_REORGANIZE_CONFIRM_EACH = "library_reorganize_confirm_each"
 # Per-tab JSON blobs: {"query": "...", "filters": {key: value, ...}}
 KEY_SEARCH_STATE_FFN = "search_state_ffn"
 KEY_SEARCH_STATE_AO3 = "search_state_ao3"
@@ -39,6 +48,10 @@ DEFAULTS = {
     KEY_ATTRIBUTION_MODEL_SIZE: "",
     KEY_LOG_LEVEL: "INFO",
     KEY_LOG_TO_FILE: False,
+    KEY_LIBRARY_PATH_TEMPLATE: "{fandom}/{title} - {author}.{ext}",
+    KEY_LIBRARY_MISC_FOLDER: "Misc",
+    KEY_LIBRARY_AMBIGUOUS_PROMPT: True,
+    KEY_LIBRARY_REORGANIZE_CONFIRM_EACH: True,
 }
 
 

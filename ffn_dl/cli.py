@@ -852,6 +852,38 @@ def _handle_update_all(args):
     sys.exit(0 if not failed else 1)
 
 
+def _handle_scan_library(args):
+    """Scan a directory, record findings in the library index."""
+    from .library.scanner import scan
+
+    root = Path(args.scan_library)
+    if not root.is_dir():
+        print(f"Error: {root} is not a directory.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Scanning {root}...")
+    result = scan(
+        root,
+        recursive=args.recursive,
+        clear_existing=args.clear_library,
+    )
+    print(
+        f"Scanned {result.total_files} file(s): "
+        f"{result.identified_via_url} tracked by URL, "
+        f"{result.ambiguous} indexed-only (no embedded URL — run "
+        f"--review-library to resolve), "
+        f"{result.errors} error(s)."
+    )
+    if result.error_files:
+        print("Errors:")
+        for path, msg in result.error_files[:20]:
+            rel = path.relative_to(root) if args.recursive else path.name
+            print(f"  {rel}: {msg}")
+        if len(result.error_files) > 20:
+            print(f"  ... and {len(result.error_files) - 20} more")
+    sys.exit(0 if result.errors == 0 else 1)
+
+
 def _handle_watch(args):
     """Clipboard watch mode: poll clipboard for FFN/FicWad URLs."""
     try:
@@ -974,10 +1006,27 @@ def main(argv=None):
         ),
     )
     parser.add_argument(
+        "--scan-library",
+        metavar="DIR",
+        help=(
+            "Scan DIR for story files (.epub/.html/.txt) from any source — "
+            "ffn-dl, FanFicFare, FicHub, or bare scrapes — and record what "
+            "was found in the library index. No moves, no downloads."
+        ),
+    )
+    parser.add_argument(
+        "--clear-library",
+        action="store_true",
+        help=(
+            "With --scan-library: drop this library's existing index entries "
+            "before scanning, so orphan files (deleted off disk) are removed."
+        ),
+    )
+    parser.add_argument(
         "-r",
         "--recursive",
         action="store_true",
-        help="With --update-all: descend into subdirectories",
+        help="With --update-all or --scan-library: descend into subdirectories",
     )
     parser.add_argument(
         "--dry-run",
@@ -1468,6 +1517,11 @@ def main(argv=None):
         if not args.search:
             args.search = ""
         _handle_search(args)
+        return
+
+    # --- Library scan mode ---
+    if args.scan_library:
+        _handle_scan_library(args)
         return
 
     # --- Update-all folder mode ---
