@@ -1009,6 +1009,75 @@ def _handle_scan_library(args):
     sys.exit(0 if result.errors == 0 else 1)
 
 
+def _handle_review_library(args):
+    """Interactive TUI for promoting untrackable library entries."""
+    from .library.index import LibraryIndex
+    from .library.review import promote_untrackable, untrackable_for_root
+
+    root = Path(args.review_library)
+    if not root.is_dir():
+        print(f"Error: {root} is not a directory.", file=sys.stderr)
+        sys.exit(1)
+    root_resolved = root.resolve()
+
+    idx = LibraryIndex.load()
+    untrackable = untrackable_for_root(idx, root_resolved)
+    if not untrackable:
+        print(
+            f"No untrackable files for {root_resolved}. "
+            "(Either everything is identified, or --scan-library hasn't run.)"
+        )
+        sys.exit(0)
+
+    print(
+        f"{len(untrackable)} untrackable file(s) in {root_resolved}.\n"
+        "For each, enter a source URL to promote it (blank to skip, "
+        "'q' to quit the review).\n"
+    )
+
+    promoted = 0
+    skipped = 0
+    for i, entry in enumerate(untrackable, 1):
+        rel = entry.get("relpath") or "(unknown path)"
+        title = entry.get("title") or "(unknown title)"
+        author = entry.get("author") or "(unknown author)"
+        reason = entry.get("reason") or ""
+        print(f"[{i}/{len(untrackable)}] {rel}")
+        print(f"  Title:  {title}")
+        print(f"  Author: {author}")
+        if reason:
+            print(f"  Note:   {reason}")
+        try:
+            answer = input("  URL: ").strip()
+        except EOFError:
+            print("\nCancelled.")
+            break
+        if answer.lower() == "q":
+            print("Stopping review.")
+            break
+        if not answer:
+            print("  (skipped)\n")
+            skipped += 1
+            continue
+        result = promote_untrackable(
+            idx, root_resolved, rel, answer, save=False,
+        )
+        if result.ok:
+            print(f"  ✓ Matched {result.adapter} — promoted.\n")
+            promoted += 1
+        else:
+            print(f"  ✗ {result.message}\n")
+            skipped += 1
+
+    if promoted:
+        idx.save()
+    print(
+        f"\nReview complete: {promoted} promoted, {skipped} skipped, "
+        f"{len(untrackable) - promoted - skipped} not shown."
+    )
+    sys.exit(0)
+
+
 def _handle_update_library(args):
     """Check every indexed story in a library for new chapters upstream."""
     from .library.refresh import build_refresh_queue
@@ -1286,6 +1355,16 @@ def main(argv=None):
             "and download any updates in place. Uses the library index, "
             "so --scan-library must have run first. Works across all "
             "supported sources (ffn-dl's own exports, FanFicFare, FicHub)."
+        ),
+    )
+    parser.add_argument(
+        "--review-library",
+        metavar="DIR",
+        help=(
+            "Walk the untrackable list for DIR's library and prompt for "
+            "a source URL per file. Confirmed entries are promoted into "
+            "the stories list with MEDIUM confidence so subsequent "
+            "--update-library runs pick them up."
         ),
     )
     parser.add_argument(
@@ -1806,6 +1885,11 @@ def main(argv=None):
     # --- Library update mode ---
     if args.update_library:
         _handle_update_library(args)
+        return
+
+    # --- Library review mode ---
+    if args.review_library:
+        _handle_review_library(args)
         return
 
     # --- Update-all folder mode ---

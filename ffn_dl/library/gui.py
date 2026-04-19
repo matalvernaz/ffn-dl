@@ -23,8 +23,10 @@ import wx
 
 from .. import prefs as _prefs
 from .gui_logic import format_move_label
+from .index import LibraryIndex
 from .refresh import build_refresh_queue, default_refresh_args
 from .reorganizer import MoveOp, apply as apply_moves, plan
+from .review import promote_untrackable, untrackable_for_root
 from .scanner import scan
 from .template import DEFAULT_MISC_FOLDER, DEFAULT_TEMPLATE
 
@@ -146,6 +148,10 @@ class LibraryDialog(wx.Dialog):
         self.update_btn.Bind(wx.EVT_BUTTON, self._on_check_updates)
         btn_row.Add(self.update_btn, 0, wx.RIGHT, 6)
 
+        self.review_btn = wx.Button(panel, label="Review &Ambiguous...")
+        self.review_btn.Bind(wx.EVT_BUTTON, self._on_review)
+        btn_row.Add(self.review_btn, 0, wx.RIGHT, 6)
+
         btn_row.AddStretchSpacer(1)
 
         close_btn = wx.Button(panel, id=wx.ID_CLOSE, label="&Close")
@@ -209,6 +215,7 @@ class LibraryDialog(wx.Dialog):
         self.scan_btn.Enable(not busy)
         self.reorg_btn.Enable(not busy)
         self.update_btn.Enable(not busy)
+        self.review_btn.Enable(not busy)
 
     def _post_status(self, line: str) -> None:
         """Thread-safe status-pane append. Used as the progress callback
@@ -316,6 +323,31 @@ class LibraryDialog(wx.Dialog):
         if not self._alive:
             return
         self._set_busy(False)
+
+    def _on_review(self, event: wx.Event) -> None:
+        root = self._current_path()
+        if root is None:
+            return
+        self._save_prefs()
+        idx = LibraryIndex.load()
+        untrackable = untrackable_for_root(idx, root)
+        if not untrackable:
+            wx.MessageBox(
+                (
+                    "No untrackable files in this library. "
+                    "Run Scan Library first, or everything is already identified."
+                ),
+                "Library", wx.OK | wx.ICON_INFORMATION, self,
+            )
+            return
+        dlg = ReviewDialog(self, idx=idx, root=root, untrackable=untrackable)
+        try:
+            dlg.ShowModal()
+            promoted = dlg.promoted_count
+        finally:
+            dlg.Destroy()
+        if promoted:
+            self._append_status(f"Review: promoted {promoted} file(s).")
 
     def _on_reorganize(self, event: wx.Event) -> None:
         root = self._current_path()
@@ -499,5 +531,166 @@ class ReorganizePreviewDialog(wx.Dialog):
             i for i in range(self.list_ctrl.GetCount())
             if self.list_ctrl.IsChecked(i)
         }
+
+
+class ReviewDialog(wx.Dialog):
+    """Per-file URL-entry flow for untrackable library entries.
+
+    One file in focus at a time. User pastes a source URL for the
+    selected row and clicks Promote; that file moves into the library
+    index's stories list with MEDIUM confidence. Index is saved on
+    every successful promotion so a mid-review crash doesn't lose
+    accepted entries.
+    """
+
+    def __init__(
+        self,
+        parent: wx.Window,
+        *,
+        idx: LibraryIndex,
+        root: Path,
+        untrackable: list[dict],
+    ):
+        super().__init__(
+            parent,
+            title="Review Ambiguous Files",
+            size=(740, 540),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._idx = idx
+        self._root = Path(root).expanduser().resolve()
+        self._pending = list(untrackable)
+        self.promoted_count = 0
+        self._build_ui()
+        self._refresh_list()
+        self._select_first_pending()
+
+    def _build_ui(self) -> None:
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        sizer.Add(
+            wx.StaticText(
+                panel,
+                label=(
+                    "Pick a file, paste its source URL, and press Promote. "
+                    "The file moves to the library index's tracked list so "
+                    "Check for Updates can pick it up."
+                ),
+            ),
+            0, wx.ALL, 8,
+        )
+
+        self.list_ctrl = wx.ListCtrl(
+            panel,
+            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SUNKEN,
+        )
+        self.list_ctrl.SetName("Untrackable files")
+        self.list_ctrl.InsertColumn(0, "File", width=280)
+        self.list_ctrl.InsertColumn(1, "Title", width=200)
+        self.list_ctrl.InsertColumn(2, "Author", width=140)
+        self.list_ctrl.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_select)
+        sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+
+        url_row = wx.BoxSizer(wx.HORIZONTAL)
+        url_row.Add(
+            wx.StaticText(panel, label="Source &URL:"),
+            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6,
+        )
+        self.url_ctrl = wx.TextCtrl(
+            panel, style=wx.TE_PROCESS_ENTER,
+        )
+        self.url_ctrl.SetName("Source URL")
+        self.url_ctrl.Bind(wx.EVT_TEXT_ENTER, self._on_promote)
+        url_row.Add(self.url_ctrl, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        self.promote_btn = wx.Button(panel, label="&Promote")
+        self.promote_btn.Bind(wx.EVT_BUTTON, self._on_promote)
+        url_row.Add(self.promote_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        self.skip_btn = wx.Button(panel, label="&Skip")
+        self.skip_btn.Bind(wx.EVT_BUTTON, self._on_skip)
+        url_row.Add(self.skip_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+        sizer.Add(url_row, 0, wx.EXPAND | wx.ALL, 8)
+
+        self.status_ctrl = wx.StaticText(panel, label="")
+        self.status_ctrl.SetName("Review status")
+        sizer.Add(self.status_ctrl, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        btn_row.AddStretchSpacer(1)
+        close_btn = wx.Button(panel, id=wx.ID_CLOSE, label="&Close")
+        close_btn.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
+        btn_row.Add(close_btn, 0)
+        sizer.Add(btn_row, 0, wx.EXPAND | wx.ALL, 8)
+
+        panel.SetSizer(sizer)
+        self.SetEscapeId(wx.ID_CLOSE)
+
+    def _refresh_list(self) -> None:
+        self.list_ctrl.DeleteAllItems()
+        for i, entry in enumerate(self._pending):
+            row = self.list_ctrl.InsertItem(
+                i, entry.get("relpath") or "(unknown path)"
+            )
+            self.list_ctrl.SetItem(row, 1, entry.get("title") or "")
+            self.list_ctrl.SetItem(row, 2, entry.get("author") or "")
+
+    def _select_first_pending(self) -> None:
+        if self._pending:
+            self.list_ctrl.Select(0)
+            self.list_ctrl.Focus(0)
+            self.url_ctrl.SetFocus()
+
+    def _selected_index(self) -> int:
+        return self.list_ctrl.GetFirstSelected()
+
+    def _on_select(self, event: wx.Event) -> None:
+        # Clear the URL field when the selection changes so a user
+        # doesn't accidentally promote file N with the URL they typed
+        # for N-1.
+        self.url_ctrl.SetValue("")
+        self.status_ctrl.SetLabel("")
+
+    def _on_promote(self, event: wx.Event) -> None:
+        i = self._selected_index()
+        if i < 0 or i >= len(self._pending):
+            return
+        url = self.url_ctrl.GetValue().strip()
+        if not url:
+            self.status_ctrl.SetLabel("Type a URL first, or press Skip.")
+            return
+        entry = self._pending[i]
+        result = promote_untrackable(
+            self._idx, self._root, entry.get("relpath") or "", url, save=True,
+        )
+        if not result.ok:
+            self.status_ctrl.SetLabel(f"Not promoted: {result.message}")
+            return
+        self.promoted_count += 1
+        del self._pending[i]
+        self._refresh_list()
+        if self._pending:
+            new_i = min(i, len(self._pending) - 1)
+            self.list_ctrl.Select(new_i)
+            self.list_ctrl.Focus(new_i)
+        self.url_ctrl.SetValue("")
+        self.status_ctrl.SetLabel(
+            f"Promoted to {result.adapter}. "
+            f"{len(self._pending)} file(s) remaining."
+        )
+        if not self._pending:
+            wx.MessageBox(
+                "No more untrackable files.",
+                "Library", wx.OK | wx.ICON_INFORMATION, self,
+            )
+
+    def _on_skip(self, event: wx.Event) -> None:
+        i = self._selected_index()
+        if i < 0 or i >= len(self._pending):
+            return
+        if i + 1 < len(self._pending):
+            self.list_ctrl.Select(i + 1)
+            self.list_ctrl.Focus(i + 1)
+        self.url_ctrl.SetValue("")
+        self.status_ctrl.SetLabel("")
 
 

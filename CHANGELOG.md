@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.19.0 — 2026-04-19
+
+### Add
+
+- **Library manager.** Scan a directory full of fanfiction files from
+  any downloader (ffn-dl's own exports, FanFicFare, FicHub, bare HTML
+  or text with an embedded URL) and index what's there, keep it sorted
+  by fandom via a configurable path template, check every tracked
+  story for new chapters upstream, and route new downloads into the
+  right category folder automatically.
+  - `--scan-library DIR` — walk, identify, and record every story
+    file. Uses structured metadata when the originating tool left it
+    behind; falls back to a URL-in-content regex. Symlinks are
+    skipped so self-referential ones can't loop forever.
+  - `--reorganize DIR [--apply]` — plan the moves that would bring
+    a library into alignment with the path template (default
+    `{fandom}/{title} - {author}.{ext}`). Dry-run by default; empty
+    source directories get cleaned up after an apply.
+  - `--update-library DIR` — index-driven refresh. For each tracked
+    story, probe the source for new chapters and download any
+    updates in place, preserving the original file's format and
+    location. Works across ffn-dl, FanFicFare, and FicHub files.
+  - `--review-library DIR` — interactive CLI for promoting
+    untrackable files (title + author but no embedded URL). Paste a
+    source URL per file and the entry moves into the tracked list.
+  - **Auto-sort on download.** When a library path is configured in
+    prefs and the user hasn't passed `--output`, new downloads land
+    at `<library>/<fandom>/<filename>`. Multi-fandom crossovers and
+    files with no fandom tag route to a Misc folder. Explicit
+    `--output` always wins.
+  - **GUI.** A new `&Library` menu (`Ctrl+L`) opens a hub dialog
+    with a dir picker, path template, misc folder, and buttons for
+    Scan, Reorganize, Check for Updates, and Review Ambiguous. The
+    reorganize preview uses per-row checkboxes; the review dialog
+    walks untrackable files one at a time for URL entry. All
+    screen-reader-friendly (`[x]`/`[ ] ` label prefixes on
+    `wx.CheckListBox` since MSAA state reporting is unreliable).
+
+### Fix
+
+- **Path-template hardening.** `..`/`.` segments are dropped so a
+  hostile template or malformed metadata value can't escape the
+  library root. Every segment is capped at 200 chars, preserving
+  extensions. Windows reserved device names (CON, PRN, AUX, NUL,
+  COM1-9, LPT1-9) get an underscore prefix when they appear as a
+  segment's base name.
+- **FanFicFare metadata reading.** Relationship tags like
+  `Harry/Hermione` no longer leak into the fandom list and misroute
+  fics to Misc — the `/` discriminator separates them from real
+  fandom names.
+- **Malformed EPUB visibility.** A file `ebooklib` can't read now
+  emits a logger warning instead of being silently indexed with no
+  metadata.
+- **Prefs without wxPython.** CLI-only installs no longer error at
+  `Prefs()` construction; the wx-backed config object is optional
+  and the class falls back to returning defaults when unavailable.
+
 ## 1.18.1 — 2026-04-18
 
 ### Add

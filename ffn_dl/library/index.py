@@ -119,6 +119,13 @@ class LibraryIndex:
             key, {"last_scan": None, "stories": {}, "untrackable": []}
         )
 
+    def library_state(self, root: Path) -> dict:
+        """Mutable in-place dict for a library root: ``stories``,
+        ``untrackable``, and ``last_scan``. Callers that need to
+        promote/demote entries reach in through this; single-read
+        consumers stick to the stories_in / untrackable_in helpers."""
+        return self._library(root)
+
     def record(self, root: Path, candidate: StoryCandidate) -> None:
         """Add or update an entry for this candidate under ``root``.
 
