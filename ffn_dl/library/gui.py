@@ -23,6 +23,7 @@ import wx
 
 from .. import prefs as _prefs
 from .gui_logic import format_move_label
+from .refresh import build_refresh_queue, default_refresh_args
 from .reorganizer import MoveOp, apply as apply_moves, plan
 from .scanner import scan
 from .template import DEFAULT_MISC_FOLDER, DEFAULT_TEMPLATE
@@ -141,6 +142,10 @@ class LibraryDialog(wx.Dialog):
         self.reorg_btn.Bind(wx.EVT_BUTTON, self._on_reorganize)
         btn_row.Add(self.reorg_btn, 0, wx.RIGHT, 6)
 
+        self.update_btn = wx.Button(panel, label="Check for &Updates")
+        self.update_btn.Bind(wx.EVT_BUTTON, self._on_check_updates)
+        btn_row.Add(self.update_btn, 0, wx.RIGHT, 6)
+
         btn_row.AddStretchSpacer(1)
 
         close_btn = wx.Button(panel, id=wx.ID_CLOSE, label="&Close")
@@ -203,6 +208,18 @@ class LibraryDialog(wx.Dialog):
     def _set_busy(self, busy: bool) -> None:
         self.scan_btn.Enable(not busy)
         self.reorg_btn.Enable(not busy)
+        self.update_btn.Enable(not busy)
+
+    def _post_status(self, line: str) -> None:
+        """Thread-safe status-pane append. Used as the progress callback
+        for long-running worker-thread operations."""
+        if not self._alive:
+            return
+        wx.CallAfter(self._append_status_if_alive, line)
+
+    def _append_status_if_alive(self, line: str) -> None:
+        if self._alive:
+            self._append_status(line)
 
     def _on_scan(self, event: wx.Event) -> None:
         root = self._current_path()
@@ -244,6 +261,60 @@ class LibraryDialog(wx.Dialog):
         if not self._alive:
             return
         self._append_status(f"Scan failed: {exc}")
+        self._set_busy(False)
+
+    def _on_check_updates(self, event: wx.Event) -> None:
+        root = self._current_path()
+        if root is None:
+            return
+        self._save_prefs()
+        self._append_status(f"Checking {root} for updates...")
+        self._set_busy(True)
+
+        # Lazy-import cli inside the worker so the module-load graph
+        # stays library-independent (cli imports library, not the
+        # other way around).
+        def worker():
+            try:
+                from .. import cli
+                from .scanner import scan as rescan
+
+                args = default_refresh_args()
+                probe_queue, skipped = build_refresh_queue(
+                    root,
+                    skip_complete=False,
+                    progress=self._post_status,
+                )
+                if not probe_queue and not skipped:
+                    self._post_status(
+                        f"No indexed stories for {root}. Run Scan Library first."
+                    )
+                    wx.CallAfter(self._update_finished)
+                    return
+
+                cli._run_update_queue(
+                    probe_queue, args, args.probe_workers,
+                    skipped_count=len(skipped),
+                    label="Library update",
+                    progress=self._post_status,
+                )
+
+                try:
+                    rescan(root)
+                except Exception as exc:
+                    self._post_status(
+                        f"Warning: post-update index refresh failed: {exc}"
+                    )
+            except Exception as exc:
+                self._post_status(f"Update failed: {exc}")
+            finally:
+                wx.CallAfter(self._update_finished)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_finished(self) -> None:
+        if not self._alive:
+            return
         self._set_busy(False)
 
     def _on_reorganize(self, event: wx.Event) -> None:

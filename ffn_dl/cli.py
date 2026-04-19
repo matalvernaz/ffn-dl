@@ -290,6 +290,78 @@ def _handle_merge_parts(series_name, series_url, work_urls, args, output_dir):
     return True
 
 
+def _apply_library_autosort(args) -> None:
+    """If no explicit --output was passed and a library is configured,
+    route fresh downloads into it. Sets args.output to the library
+    root and stashes the template + misc folder on args so
+    _download_one can compute the per-story subdirectory once the
+    story metadata is known.
+
+    No-op when the user passed --output or when the library path pref
+    is empty. Safe to call multiple times.
+    """
+    if args.output is not None:
+        return
+    from .library.template import DEFAULT_MISC_FOLDER, DEFAULT_TEMPLATE
+    from .prefs import (
+        KEY_LIBRARY_MISC_FOLDER,
+        KEY_LIBRARY_PATH,
+        KEY_LIBRARY_PATH_TEMPLATE,
+        Prefs,
+    )
+
+    prefs = Prefs()
+    library_path = (prefs.get(KEY_LIBRARY_PATH, "") or "").strip()
+    if not library_path:
+        return
+
+    args.output = library_path
+    args._library_autosort = True
+    args._library_template = (
+        prefs.get(KEY_LIBRARY_PATH_TEMPLATE) or DEFAULT_TEMPLATE
+    )
+    args._library_misc = (
+        prefs.get(KEY_LIBRARY_MISC_FOLDER) or DEFAULT_MISC_FOLDER
+    )
+
+
+def _library_subdir_for(story, args) -> Path | None:
+    """Compute the library-relative directory for a just-scraped story.
+
+    Returns None when auto-sort isn't enabled on these args (caller
+    should use output_dir as-is). Uses only the directory part of
+    the library template — the filename still comes from the usual
+    name template so --name overrides keep working.
+    """
+    if not getattr(args, "_library_autosort", False):
+        return None
+    from .library.template import render
+    from .updater import FileMetadata
+
+    category = story.metadata.get("category")
+    fandoms: list[str] = []
+    if category:
+        # AO3 sometimes comma-separates crossover fandoms; other
+        # scrapers hand us a single string. Splitting on comma mirrors
+        # the exporter's own "category" rendering logic.
+        fandoms = [f.strip() for f in category.split(",") if f.strip()]
+
+    md = FileMetadata(
+        title=story.title,
+        author=story.author,
+        fandoms=fandoms,
+        rating=story.metadata.get("rating"),
+        status=story.metadata.get("status"),
+        format=args.format or "epub",
+    )
+    full = render(
+        md,
+        template=args._library_template,
+        misc_folder=args._library_misc,
+    )
+    return full.parent
+
+
 def _build_scraper(url, args):
     """Build a scraper instance for the given URL using CLI args."""
     scraper_cls = _detect_site(url)
@@ -365,6 +437,16 @@ def _download_one(url, args, output_dir, *, update_path=None, existing_chapters=
             # Re-download everything (cache makes this fast).
             print("\n  Re-exporting full story...")
             story = scraper.download(url, skip_chapters=0, chapters=chapter_spec)
+
+        # Library auto-sort: for fresh downloads only, route into
+        # <library>/<fandom>/... based on the story's metadata.
+        # Updates stay where they were (update_path already points to
+        # the existing file's parent).
+        if update_path is None:
+            subdir = _library_subdir_for(story, args)
+            if subdir is not None:
+                output_dir = output_dir / subdir
+                output_dir.mkdir(parents=True, exist_ok=True)
 
         if args.format == "audio":
             from .tts import generate_audiobook
@@ -681,18 +763,15 @@ def _handle_search(args):
 
 def _handle_update_all(args):
     """Scan a folder for previously-downloaded exports and update each."""
-    from concurrent.futures import ThreadPoolExecutor
-
     folder = Path(args.update_all)
     if not folder.is_dir():
         print(f"Error: {folder} is not a directory.", file=sys.stderr)
         sys.exit(1)
 
-    exts = (".epub", ".html", ".txt")
     iterator = folder.rglob("*") if args.recursive else folder.iterdir()
     files = sorted(
         p for p in iterator
-        if p.is_file() and p.suffix.lower() in exts
+        if p.is_file() and p.suffix.lower() in _FMT_MAP
     )
     if not files:
         where = "recursively in" if args.recursive else "in"
@@ -711,13 +790,7 @@ def _handle_update_all(args):
     mode = f" ({', '.join(mode_bits)})"
     print(f"Scanning {len(files)} files in {folder}{mode}...\n")
 
-    updated = []
-    up_to_date = []
-    failed = []
-    skipped = []
-    would_update = []
-
-    fmt_map = {".epub": "epub", ".html": "html", ".txt": "txt"}
+    skipped: list[str] = []
 
     # Phase 1 (serial, fast): read local state. Anything that can be
     # resolved without a network call — missing source URL, unreadable
@@ -757,9 +830,49 @@ def _handle_update_all(args):
 
         probe_queue.append({"path": path, "rel": rel, "url": url, "local": local})
 
+    exit_code = _run_update_queue(
+        probe_queue, args, workers, skipped_count=len(skipped),
+        label="Update-all",
+    )
+    sys.exit(exit_code)
+
+
+_FMT_MAP = {".epub": "epub", ".html": "html", ".txt": "txt"}
+
+
+def _run_update_queue(
+    probe_queue: list[dict],
+    args,
+    workers: int,
+    *,
+    skipped_count: int,
+    label: str = "Update-all",
+    progress=print,
+) -> int:
+    """Run the probe + download cycle on a pre-built queue.
+
+    ``probe_queue`` entries need ``path`` (absolute), ``rel`` (display
+    name), ``url``, and ``local`` (existing chapter count). Phase 1
+    (reading each of those from disk or from the library index) is
+    the caller's job; this helper owns Phase 2 (concurrent remote
+    probes), Phase 3 (serial downloads), and the summary emission.
+
+    ``progress`` is a one-arg callable that receives each line of
+    output. Defaults to ``print`` for CLI use; the GUI passes its own
+    callback that marshals onto the main thread.
+
+    Returns the exit code: 0 on success, 1 if any story failed.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    updated: list[str] = []
+    up_to_date: list[str] = []
+    failed: list[str] = []
+    would_update: list[tuple[str, int, int]] = []
+
     # Phase 2 (concurrent): remote chapter-count probes.
     if probe_queue:
-        print(f"\nProbing {len(probe_queue)} stories for new chapters...")
+        progress(f"\nProbing {len(probe_queue)} stories for new chapters...")
 
         def probe_one(entry):
             scraper = _build_scraper(entry["url"], args)
@@ -775,7 +888,7 @@ def _handle_update_all(args):
                     entry["error"] = exc
                 except Exception as exc:
                     entry["error"] = exc
-        print()
+        progress("")
 
     # Phase 3 (serial): apply the decisions. Any actual downloads run
     # one-at-a-time so we don't stack parallel chapter fetches on a
@@ -784,30 +897,36 @@ def _handle_update_all(args):
     cancelled = False
     for i, entry in enumerate(probe_queue, 1):
         rel = entry["rel"]
-        print(f"[{i}/{total}] {rel}")
+        progress(f"[{i}/{total}] {rel}")
 
         if "error" in entry:
-            print(f"  Probe failed: {entry['error']}")
+            progress(f"  Probe failed: {entry['error']}")
             failed.append(rel)
             continue
 
         local = entry["local"]
         remote = entry["remote"]
         if remote <= local:
-            label = "up to date" if remote == local else f"remote has fewer chapters ({remote} < {local}) — leaving alone"
-            print(f"  {local} local / {remote} remote — {label}")
+            msg = (
+                "up to date"
+                if remote == local
+                else f"remote has fewer chapters ({remote} < {local}) — leaving alone"
+            )
+            progress(f"  {local} local / {remote} remote — {msg}")
             up_to_date.append(rel)
             continue
 
         new_count = remote - local
-        print(f"  {local} local / {remote} remote — {new_count} new chapter(s)")
+        progress(
+            f"  {local} local / {remote} remote — {new_count} new chapter(s)"
+        )
 
         if args.dry_run:
             would_update.append((rel, local, remote))
             continue
 
         path = entry["path"]
-        args.format = fmt_map.get(path.suffix.lower(), "epub")
+        args.format = _FMT_MAP.get(path.suffix.lower(), "epub")
         args.output = str(path.parent)
         output_dir = Path(args.output)
         try:
@@ -816,7 +935,7 @@ def _handle_update_all(args):
                 update_path=path, existing_chapters=local,
             )
         except KeyboardInterrupt:
-            print("\nCancelled.")
+            progress("\nCancelled.")
             cancelled = True
             break
         if ok:
@@ -825,31 +944,31 @@ def _handle_update_all(args):
             failed.append(rel)
 
     if cancelled:
-        pass  # summary still printed below
+        pass  # summary still emitted below
 
-    print(f"\n{'='*60}")
+    progress(f"\n{'='*60}")
     if args.dry_run:
-        print(
+        progress(
             f"Dry run — would update {len(would_update)}, "
             f"{len(up_to_date)} up to date, {len(failed)} failed, "
-            f"{len(skipped)} skipped."
+            f"{skipped_count} skipped."
         )
         if would_update:
-            print("Would update:")
+            progress("Would update:")
             for name, local, remote in would_update:
-                print(f"  {name}  ({local} -> {remote})")
+                progress(f"  {name}  ({local} -> {remote})")
     else:
-        print(
-            f"Update-all complete — {len(updated)} updated, "
+        progress(
+            f"{label} complete — {len(updated)} updated, "
             f"{len(up_to_date)} up to date, {len(failed)} failed, "
-            f"{len(skipped)} skipped."
+            f"{skipped_count} skipped."
         )
     if failed:
-        print("Failed:")
+        progress("Failed:")
         for name in failed:
-            print(f"  {name}")
-    print('='*60)
-    sys.exit(0 if not failed else 1)
+            progress(f"  {name}")
+    progress('='*60)
+    return 0 if not failed else 1
 
 
 def _handle_scan_library(args):
@@ -888,6 +1007,62 @@ def _handle_scan_library(args):
         if len(result.error_files) > 20:
             print(f"  ... and {len(result.error_files) - 20} more")
     sys.exit(0 if result.errors == 0 else 1)
+
+
+def _handle_update_library(args):
+    """Check every indexed story in a library for new chapters upstream."""
+    from .library.refresh import build_refresh_queue
+    from .library.scanner import scan as rescan_library
+
+    root = Path(args.update_library)
+    if not root.is_dir():
+        print(f"Error: {root} is not a directory.", file=sys.stderr)
+        sys.exit(1)
+    root_resolved = root.resolve()
+
+    workers = max(1, int(args.probe_workers or 5))
+    mode_bits = []
+    if args.dry_run:
+        mode_bits.append("dry-run")
+    if args.skip_complete:
+        mode_bits.append("skipping completed")
+    mode_bits.append(f"{workers} probe worker{'s' if workers != 1 else ''}")
+    mode = f" ({', '.join(mode_bits)})"
+
+    probe_queue, skipped = build_refresh_queue(
+        root_resolved,
+        skip_complete=args.skip_complete,
+    )
+    if not probe_queue and not skipped:
+        print(
+            f"No indexed stories for {root}. "
+            "Run --scan-library first."
+        )
+        sys.exit(0)
+
+    total_indexed = len(probe_queue) + len(skipped)
+    print(
+        f"Checking {total_indexed} indexed "
+        f"stor{'y' if total_indexed == 1 else 'ies'} "
+        f"in {root_resolved}{mode}...\n"
+    )
+
+    exit_code = _run_update_queue(
+        probe_queue, args, workers,
+        skipped_count=len(skipped),
+        label="Library update",
+    )
+
+    # Refresh the index so chapter counts reflect any updates we just
+    # applied. Cheap compared to the downloads themselves, and keeps
+    # the next --update-library run from re-probing unchanged stories.
+    if not args.dry_run:
+        try:
+            rescan_library(root_resolved)
+        except Exception as exc:
+            print(f"\nWarning: post-update index refresh failed: {exc}")
+
+    sys.exit(exit_code)
 
 
 def _handle_reorganize(args):
@@ -962,6 +1137,14 @@ def _handle_watch(args):
 
     if args.format is None:
         args.format = "epub"
+
+    # Library auto-sort: if --output wasn't given and a library path
+    # is configured in prefs, route fresh downloads into the library
+    # and let _download_one derive the per-story subdir from metadata.
+    # An explicit --output always wins so power users keep their
+    # one-off overrides.
+    _apply_library_autosort(args)
+
     if args.output is None:
         args.output = "."
 
@@ -1093,6 +1276,16 @@ def main(argv=None):
             "<author>.<ext>). Reads from the library index; run "
             "--scan-library first. Dry-run by default — use --apply to "
             "actually move files."
+        ),
+    )
+    parser.add_argument(
+        "--update-library",
+        metavar="DIR",
+        help=(
+            "Check every indexed story in DIR for new chapters upstream "
+            "and download any updates in place. Uses the library index, "
+            "so --scan-library must have run first. Works across all "
+            "supported sources (ffn-dl's own exports, FanFicFare, FicHub)."
         ),
     )
     parser.add_argument(
@@ -1610,6 +1803,11 @@ def main(argv=None):
         _handle_reorganize(args)
         return
 
+    # --- Library update mode ---
+    if args.update_library:
+        _handle_update_library(args)
+        return
+
     # --- Update-all folder mode ---
     if args.update_all:
         _handle_update_all(args)
@@ -1739,6 +1937,14 @@ def main(argv=None):
 
     if args.format is None:
         args.format = "epub"
+
+    # Library auto-sort: if --output wasn't given and a library path
+    # is configured in prefs, route fresh downloads into the library
+    # and let _download_one derive the per-story subdir from metadata.
+    # An explicit --output always wins so power users keep their
+    # one-off overrides.
+    _apply_library_autosort(args)
+
     if args.output is None:
         args.output = "."
 
