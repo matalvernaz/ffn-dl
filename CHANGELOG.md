@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.20.0 — 2026-04-19
+
+### Add
+
+- **Watchlist with notifications.** Subscribe to stories, authors, or
+  saved searches and receive Pushover, Discord, or email alerts when
+  they change. Three watch types share one polling loop:
+  - **Story watches** — new chapter alerts via each scraper's cheap
+    `get_chapter_count()` probe.
+  - **Author watches** — new-work alerts via `scrape_author_works()`
+    on any of the 7 supported sites.
+  - **Search watches** — new-match alerts on a saved query for FFN,
+    AO3, Royal Road, Literotica, or Wattpad.
+  - New CLI flags: `--watchlist-add URL`, `--watchlist-add-search
+    SITE QUERY`, `--watchlist-list`, `--watchlist-remove ID`,
+    `--watchlist-run`, `--watchlist-test CHANNEL`. `--watchlist-run`
+    is cron / Windows-Task-Scheduler friendly — one poll pass, exits.
+  - Storage is a JSON file at `<portable_root>/watchlist.json` so
+    entries survive auto-updates. Atomic writes + corrupt-file
+    quarantine keep the file from wedging the app.
+  - Per-watch cooldown prevents a transient scraper flake from
+    spamming duplicate alerts.
+  - GUI tab will land in a follow-up 1.20.x release; the CLI is the
+    first cut so scheduled polling works on headless setups today.
+
+### Fix
+
+- **Library scan now reads metadata from every common HTML format.**
+  The previous scanner only understood ffn-dl's own `<th>Title</th>
+  <td>…</td>` kv-table, so ~99% of a library populated by FanFicFare
+  / FicLab / raw browser downloads / AO3's native HTML export ended
+  up indexed with null title, author, rating, status, fandom, and
+  chapter_count — the adapter and source URL were detected but every
+  other field was empty, which made `--reorganize` and the library
+  GUI nearly useless. Smoke-tested against a real 817-file library:
+  the title/author hit-rate went from 3/817 to 809/817 (99.0%),
+  fandom from 0/817 to 699/817 (86%), chapter_count from 0/817 to
+  768/817 (94%).
+  - `_parse_kv_table` now returns lowercase-normalised keys, so
+    FicLab's `<th>title</th>` resolves the same as ffn-dl's
+    `<th>Title</th>`.
+  - `_parse_kv_table` also understands `<dt>Label:</dt><dd>Value</dd>`
+    (AO3's native HTML export) and `<tr><td>…</td><td>…</td></tr>`
+    (EPUB title-page variant).
+  - New `_parse_paragraph_labels` reads `<p>Label: value</p>` and
+    `<b>Label:</b> value<br/>` paragraph dumps. Restricted to a
+    known label set so chapter-body dialogue tags (`<p>Harry: …</p>`)
+    aren't mistaken for metadata.
+  - Chapter count is now pulled from the structured metadata when
+    available, so `count_chapters()` (which only understands ffn-dl's
+    own `<div class="chapter">` markup) no longer overwrites a
+    correct number with 0 on third-party files.
+
 ## 1.19.2 — 2026-04-19
 
 ### Fix

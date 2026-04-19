@@ -36,6 +36,26 @@ KEY_SEARCH_STATE_AO3 = "search_state_ao3"
 KEY_SEARCH_STATE_ROYALROAD = "search_state_royalroad"
 KEY_SEARCH_STATE_LITEROTICA = "search_state_literotica"
 KEY_SEARCH_STATE_WATTPAD = "search_state_wattpad"
+# Watchlist notification channels — see ffn_dl.notifications for semantics.
+# Pushover creds are a per-user + per-application pair; Discord is a single
+# webhook URL; email uses the same SMTP config as --send-to-kindle and only
+# needs the recipient address stored here.
+KEY_PUSHOVER_TOKEN = "pushover_token"
+KEY_PUSHOVER_USER = "pushover_user"
+KEY_DISCORD_WEBHOOK = "discord_webhook"
+KEY_NOTIFY_EMAIL = "notify_email"
+# Watchlist background polling — GUI only; the CLI uses `--watch-run` on
+# demand. `KEY_WATCH_POLL_INTERVAL_S` is clamped at load time to the
+# floor defined in watchlist.MIN_POLL_INTERVAL_S so a corrupt config
+# can't make the app hammer sites.
+KEY_WATCH_AUTOPOLL = "watch_autopoll"
+KEY_WATCH_POLL_INTERVAL_S = "watch_poll_interval_s"
+
+# Default GUI polling interval for the watchlist background thread, in
+# seconds. One hour balances freshness against site politeness — FFN's
+# 6s/request floor means even a 50-watch list fits comfortably inside
+# an hour, and every other supported site is faster.
+DEFAULT_WATCH_POLL_INTERVAL_S = 60 * 60
 
 DEFAULTS = {
     KEY_NAME_TEMPLATE: "{title} - {author}",
@@ -52,6 +72,8 @@ DEFAULTS = {
     KEY_LIBRARY_MISC_FOLDER: "Misc",
     KEY_LIBRARY_AMBIGUOUS_PROMPT: True,
     KEY_LIBRARY_REORGANIZE_CONFIRM_EACH: True,
+    KEY_WATCH_AUTOPOLL: False,
+    KEY_WATCH_POLL_INTERVAL_S: DEFAULT_WATCH_POLL_INTERVAL_S,
 }
 
 

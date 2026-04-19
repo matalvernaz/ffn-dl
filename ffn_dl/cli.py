@@ -1858,6 +1858,77 @@ def _build_parser() -> argparse.ArgumentParser:
             "(requires pyperclip: pip install ffn-dl[clipboard])"
         ),
     )
+
+    # --- Watchlist / notifications -----------------------------------------
+    # `--watchlist-*` is a separate namespace from `-w/--watch` (clipboard)
+    # on purpose: they're unrelated features and sharing the prefix would
+    # trip argparse's abbreviation matching.
+    watch_group = parser.add_argument_group(
+        "watchlist",
+        "Subscribe to stories, authors, or saved searches and receive "
+        "Pushover/Discord/email alerts when they change. See --watchlist-* "
+        "flags below.",
+    )
+    watch_group.add_argument(
+        "--watchlist-add",
+        metavar="URL",
+        help=(
+            "Add a watch for URL. Auto-detects story vs author from the URL; "
+            "use --watchlist-label / --watchlist-channel to customise."
+        ),
+    )
+    watch_group.add_argument(
+        "--watchlist-add-search",
+        nargs=2,
+        metavar=("SITE", "QUERY"),
+        help=(
+            "Add a saved-search watch. SITE is one of ffn/ao3/royalroad/"
+            "literotica/wattpad; QUERY is the search string. Pair with "
+            "--watchlist-label for a friendly name."
+        ),
+    )
+    watch_group.add_argument(
+        "--watchlist-label",
+        metavar="LABEL",
+        help="Display label for the watch being added (optional).",
+    )
+    watch_group.add_argument(
+        "--watchlist-channel",
+        action="append",
+        metavar="CHANNEL",
+        help=(
+            "Notification channel to enable on the watch being added: "
+            "pushover, discord, or email. Repeat for multiple channels. "
+            "If omitted, every configured channel is used."
+        ),
+    )
+    watch_group.add_argument(
+        "--watchlist-list",
+        action="store_true",
+        help="List all watches with their id, type, target, and status.",
+    )
+    watch_group.add_argument(
+        "--watchlist-remove",
+        metavar="ID",
+        help="Remove a watch by id (or unambiguous id prefix).",
+    )
+    watch_group.add_argument(
+        "--watchlist-run",
+        action="store_true",
+        help=(
+            "Poll every enabled watch once and dispatch notifications for "
+            "new items. Suitable for cron / Windows Task Scheduler."
+        ),
+    )
+    watch_group.add_argument(
+        "--watchlist-test",
+        metavar="CHANNEL",
+        help=(
+            "Send a test notification through CHANNEL (pushover, discord, "
+            "or email) using the currently-configured credentials."
+        ),
+    )
+
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
@@ -2033,6 +2104,273 @@ def _run_batch(
     return 0 if failed == 0 else 1
 
 
+# ---------------------------------------------------------------------------
+# Watchlist handlers
+#
+# Each handler is a self-contained exit path: it loads the store, does one
+# thing (list / add / remove / poll / test), prints a human-readable result,
+# and returns an exit code. None of them return to the regular URL-dispatch
+# flow — watchlist commands are their own mode.
+# ---------------------------------------------------------------------------
+
+# CLI exit codes. Named so the handlers don't sprinkle 0/1/2 magic integers.
+_EXIT_OK = 0
+_EXIT_GENERIC_FAILURE = 1
+_EXIT_USAGE_ERROR = 2
+
+# How many hex chars of a watch id to show in --watchlist-list. Full ids
+# are 32 chars (uuid4().hex); 8 chars is enough to disambiguate in any
+# realistic watchlist while staying narrow enough to fit in a terminal.
+_WATCHLIST_ID_DISPLAY_CHARS = 8
+
+
+def _watchlist_channels_from_args(args: argparse.Namespace) -> list[str]:
+    """Resolve the channel list for a new watch from ``--watchlist-channel``.
+
+    If the flag was omitted, every supported channel is enabled — the
+    user presumably configured the creds they want; letting unused
+    channels no-op on missing config is less surprising than a watch
+    that silently never notifies.
+    """
+    from .notifications import ALL_CHANNELS
+
+    requested = args.watchlist_channel or []
+    if not requested:
+        return list(ALL_CHANNELS)
+
+    valid = set(ALL_CHANNELS)
+    cleaned: list[str] = []
+    for raw in requested:
+        # Accept comma-separated values too — `--watchlist-channel pushover,email`
+        # is ergonomically nicer than repeating the flag.
+        for chunk in raw.split(","):
+            name = chunk.strip().lower()
+            if not name:
+                continue
+            if name not in valid:
+                raise ValueError(
+                    f"Unknown notification channel: {name!r}. "
+                    f"Valid channels: {', '.join(sorted(valid))}."
+                )
+            if name not in cleaned:
+                cleaned.append(name)
+    return cleaned
+
+
+def _handle_watchlist_list() -> int:
+    """Print every watch in the store with its type, target, and status."""
+    from .watchlist import WatchlistStore
+
+    store = WatchlistStore.load_default()
+    watches = store.all()
+    if not watches:
+        print("Watchlist is empty. Add one with --watchlist-add URL.")
+        return _EXIT_OK
+
+    print(f"{len(watches)} watch(es):\n")
+    for w in watches:
+        short_id = w.id[:_WATCHLIST_ID_DISPLAY_CHARS]
+        enabled = "on " if w.enabled else "off"
+        channels = ",".join(w.channels) or "(none)"
+        last = w.last_checked_at or "never"
+        error = f"  ERR: {w.last_error}" if w.last_error else ""
+        target = w.target or (f"search: {w.query!r}" if w.type == "search" else "")
+        label = w.label or target
+        print(
+            f"  {short_id}  [{enabled}]  {w.type:7s}  {w.site or '-':10s}  "
+            f"{label}"
+        )
+        print(
+            f"             channels={channels}  last_checked={last}{error}"
+        )
+    return _EXIT_OK
+
+
+def _handle_watchlist_add(args: argparse.Namespace) -> int:
+    """Add an author or story watch for ``args.watchlist_add``."""
+    from .watchlist import (
+        VALID_WATCH_TYPES,
+        Watch,
+        WatchlistStore,
+        classify_target,
+        site_key_for_url,
+    )
+
+    url = args.watchlist_add.strip()
+    watch_type = classify_target(url)
+    if watch_type is None or watch_type not in VALID_WATCH_TYPES:
+        print(
+            f"Error: {url!r} is neither a recognised author page nor a "
+            "story URL on any supported site.",
+            file=sys.stderr,
+        )
+        return _EXIT_USAGE_ERROR
+
+    try:
+        channels = _watchlist_channels_from_args(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return _EXIT_USAGE_ERROR
+
+    store = WatchlistStore.load_default()
+    watch = Watch(
+        type=watch_type,
+        site=site_key_for_url(url),
+        target=url,
+        label=(args.watchlist_label or "").strip(),
+        channels=channels,
+    )
+    store.add(watch)
+    print(
+        f"Added {watch_type} watch {watch.id[:_WATCHLIST_ID_DISPLAY_CHARS]} "
+        f"for {watch.display_label()}"
+    )
+    return _EXIT_OK
+
+
+def _handle_watchlist_add_search(args: argparse.Namespace) -> int:
+    """Add a saved-search watch from ``args.watchlist_add_search``."""
+    from .watchlist import (
+        SEARCH_SUPPORTED_SITES,
+        WATCH_TYPE_SEARCH,
+        Watch,
+        WatchlistStore,
+    )
+
+    site_raw, query = args.watchlist_add_search
+    site = site_raw.strip().lower()
+    if site not in SEARCH_SUPPORTED_SITES:
+        print(
+            f"Error: search watches not supported on {site!r}. "
+            f"Supported: {', '.join(SEARCH_SUPPORTED_SITES)}.",
+            file=sys.stderr,
+        )
+        return _EXIT_USAGE_ERROR
+
+    try:
+        channels = _watchlist_channels_from_args(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return _EXIT_USAGE_ERROR
+
+    store = WatchlistStore.load_default()
+    watch = Watch(
+        type=WATCH_TYPE_SEARCH,
+        site=site,
+        target=f"{site} search: {query}",
+        label=(args.watchlist_label or "").strip(),
+        channels=channels,
+        query=query,
+    )
+    store.add(watch)
+    print(
+        f"Added search watch {watch.id[:_WATCHLIST_ID_DISPLAY_CHARS]} "
+        f"on {site}: {query!r}"
+    )
+    return _EXIT_OK
+
+
+def _handle_watchlist_remove(watch_id: str) -> int:
+    """Remove the watch matching ``watch_id`` (full id or unambiguous prefix)."""
+    from .watchlist import WatchlistStore
+
+    store = WatchlistStore.load_default()
+    if store.remove(watch_id):
+        print(f"Removed watch {watch_id}.")
+        return _EXIT_OK
+    print(
+        f"No watch matches {watch_id!r}. Use --watchlist-list to see ids.",
+        file=sys.stderr,
+    )
+    return _EXIT_USAGE_ERROR
+
+
+def _handle_watchlist_run() -> int:
+    """Poll every enabled watch once; print a per-watch summary."""
+    from .prefs import Prefs
+    from .watchlist import WatchlistStore, run_once
+
+    store = WatchlistStore.load_default()
+    if not store.all():
+        print("Watchlist is empty — nothing to poll.")
+        return _EXIT_OK
+
+    prefs = Prefs()
+    results = run_once(store, prefs)
+
+    any_error = False
+    new_total = 0
+    for result in results:
+        watch = store.get(result.watch_id)
+        label = watch.display_label() if watch else result.watch_id[:_WATCHLIST_ID_DISPLAY_CHARS]
+        if not result.ok:
+            any_error = True
+            print(f"  [!] {label}: {result.error}", file=sys.stderr)
+            continue
+        if result.new_items:
+            new_total += len(result.new_items)
+            if result.chapter_delta:
+                print(
+                    f"  [+] {label}: {result.chapter_delta} new chapter"
+                    f"{'s' if result.chapter_delta != 1 else ''}"
+                )
+            else:
+                print(f"  [+] {label}: {len(result.new_items)} new item(s)")
+        else:
+            print(f"  [=] {label}: no change")
+
+    print(
+        f"Poll complete — {len(results)} watch(es) checked, "
+        f"{new_total} new item(s)."
+    )
+    return _EXIT_GENERIC_FAILURE if any_error else _EXIT_OK
+
+
+def _handle_watchlist_test(channel: str) -> int:
+    """Send a test notification through ``channel`` via the current creds."""
+    from .notifications import (
+        ALL_CHANNELS,
+        Notification,
+        NotificationError,
+        dispatch,
+    )
+    from .prefs import Prefs
+
+    channel = channel.strip().lower()
+    if channel not in ALL_CHANNELS:
+        print(
+            f"Error: unknown channel {channel!r}. "
+            f"Valid: {', '.join(ALL_CHANNELS)}.",
+            file=sys.stderr,
+        )
+        return _EXIT_USAGE_ERROR
+
+    prefs = Prefs()
+    notification = Notification(
+        title="ffn-dl watchlist test",
+        message=(
+            "If you're reading this, your ffn-dl notification credentials "
+            "for this channel are working."
+        ),
+        url="https://github.com/matalvernaz/ffn-dl",
+    )
+    # dispatch() catches NotificationError per-channel and returns a list
+    # of (channel, message) failures. We still handle the import-time
+    # exception class here as a belt-and-braces.
+    try:
+        delivered, failures = dispatch([channel], notification, prefs)
+    except NotificationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return _EXIT_GENERIC_FAILURE
+
+    if failures:
+        for ch, reason in failures:
+            print(f"  [!] {ch}: {reason}", file=sys.stderr)
+        return _EXIT_GENERIC_FAILURE
+    print(f"Test notification delivered via {', '.join(delivered)}.")
+    return _EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point. Parses args and dispatches to a handler."""
     parser = _build_parser()
@@ -2045,6 +2383,22 @@ def main(argv: list[str] | None = None) -> None:
 
     if getattr(args, "install_attribution", None):
         sys.exit(_handle_install_attribution(args.install_attribution))
+
+    # --- Watchlist modes: all self-contained (no positional URLs) ---
+    # Checked before search / library / URL dispatch so none of those
+    # paths treats a watchlist flag as "no arguments, show help".
+    if getattr(args, "watchlist_list", False):
+        sys.exit(_handle_watchlist_list())
+    if getattr(args, "watchlist_run", False):
+        sys.exit(_handle_watchlist_run())
+    if getattr(args, "watchlist_add", None):
+        sys.exit(_handle_watchlist_add(args))
+    if getattr(args, "watchlist_add_search", None):
+        sys.exit(_handle_watchlist_add_search(args))
+    if getattr(args, "watchlist_remove", None):
+        sys.exit(_handle_watchlist_remove(args.watchlist_remove))
+    if getattr(args, "watchlist_test", None):
+        sys.exit(_handle_watchlist_test(args.watchlist_test))
 
     # --- Search mode ---
     if _is_search_mode(args):

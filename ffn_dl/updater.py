@@ -195,22 +195,192 @@ def _looks_like_fandom(subject: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Label-table parsers for `_fill_from_html`.
+#
+# Different third-party downloaders embed fanfic metadata in different
+# HTML shapes. We've observed the following in the wild:
+#
+#   * ffn-dl's own exports  — `<tr><th>Title</th><td>Value</td></tr>`
+#   * FicLab (ficlab.com)   — same shape but lowercase labels
+#   * AO3 native HTML       — `<dt>Label:</dt><dd>Value</dd>`
+#   * Simple paragraph dump — `<p>Label: Value</p>`
+#   * Bold-prefix dump      — `<b>Label:</b> Value<br/>`
+#
+# To keep lookups consistent across all of them, every parser normalises
+# labels to lowercase-with-colon-stripped. `_fill_from_html` then looks
+# up "title", "author", etc. (lowercase) regardless of source format.
+# ---------------------------------------------------------------------------
+
+# Regex for <a href=...>text</a> — callers strip the anchor wrapper from
+# captured values to keep just the visible text (or, for a `source` row,
+# the href itself, which `_extract_source_from_kv` handles separately).
+_ANCHOR_RE = re.compile(r"<a[^>]*>(.*?)</a>", re.DOTALL)
+
+# Regex that strips every remaining tag after anchors have been unwrapped.
+_TAG_STRIPPER_RE = re.compile(r"<[^>]+>")
+
+
+def _normalise_label(label: str) -> str:
+    """Return a lookup key for a metadata label.
+
+    Lowercases and strips surrounding whitespace + trailing colons so
+    ``"Title"`` and ``"title:"`` (AO3's `<dt>` shape) collapse to the
+    same key. Used by every parser below so callers can do
+    ``kv.get("title")`` without worrying about original casing.
+    """
+    return label.strip().rstrip(":").strip().lower()
+
+
+def _clean_cell_value(raw: str) -> str:
+    """Strip anchor wrappers and any other tags from a captured cell."""
+    unwrapped = _ANCHOR_RE.sub(r"\1", raw)
+    return _TAG_STRIPPER_RE.sub("", unwrapped).strip()
+
+
 def _parse_kv_table(html: str) -> dict[str, str]:
-    """Extract <th>Label</th><td>Value</td> rows into a flat dict.
-    Used for both ffn-dl HTML exports and ffn-dl EPUB title pages."""
-    out = {}
-    for m in re.finditer(
-        r"<tr[^>]*>\s*<th[^>]*>([^<]+)</th>\s*<td[^>]*>(.*?)</td>",
-        html,
+    """Extract metadata rows from HTML into a lowercase-keyed dict.
+
+    Handles three interchangeable shapes in a single pass so callers
+    don't have to know which downloader produced the file:
+
+    * ``<tr><th>Label</th><td>Value</td></tr>`` — ffn-dl and FicLab
+    * ``<tr><td>Label</td><td>Value</td></tr>`` — some EPUB title pages
+    * ``<dt>Label:</dt><dd>Value</dd>``         — AO3's native HTML export
+
+    Returned keys are lowercase with trailing colons stripped, so
+    ``"Title"``, ``"title"``, and ``"Title:"`` all yield ``"title"``.
+    Values have anchor tags unwrapped to keep their text and have every
+    other tag stripped so the consumer sees a clean string.
+    """
+    out: dict[str, str] = {}
+
+    # <tr><th>...</th><td>...</td></tr> and the <tr><td>...</td><td>...</td>
+    # variant (FicLab's EPUB title page uses the td/td form). Both start
+    # from <tr>, so we merge them into one sweep with an alternation on
+    # the label cell.
+    table_row_re = re.compile(
+        r"<tr[^>]*>\s*"
+        r"(?:<th[^>]*>([^<]+)</th>|<td[^>]*>([^<]*)</td>)"
+        r"\s*<td[^>]*>(.*?)</td>",
         re.DOTALL,
-    ):
-        label = m.group(1).strip()
-        # Strip anchor tags from the value while keeping href text
-        value = re.sub(r"<a[^>]*>(.*?)</a>", r"\1", m.group(2), flags=re.DOTALL)
-        value = re.sub(r"<[^>]+>", "", value).strip()
-        if label and value:
-            out[label] = value
+    )
+    for match in table_row_re.finditer(html):
+        label = match.group(1) or match.group(2) or ""
+        value = _clean_cell_value(match.group(3))
+        key = _normalise_label(label)
+        if key and value:
+            out[key] = value
+
+    # <dt>Label:</dt><dd>Value</dd> — AO3's native HTML export structure.
+    definition_re = re.compile(
+        r"<dt[^>]*>([^<]+)</dt>\s*<dd[^>]*>(.*?)</dd>",
+        re.DOTALL,
+    )
+    for match in definition_re.finditer(html):
+        key = _normalise_label(match.group(1))
+        value = _clean_cell_value(match.group(2))
+        if key and value and key not in out:
+            out[key] = value
+
     return out
+
+
+# Metadata labels we expect in `<p>Label: value</p>` / `<b>Label:</b>
+# value<br/>` dumps. Restricted to avoid picking up random "Note:" lines
+# in chapter text as if they were metadata.
+_PARAGRAPH_METADATA_LABELS = {
+    "title", "author", "authorlink", "source", "sourcelink", "story", "storylink",
+    "category", "categories", "fandom", "fandoms",
+    "genre", "genres", "characters", "pairing", "pairings",
+    "summary", "status", "rating", "chapters", "words",
+    "updated", "published", "downloaded", "last updated",
+    "tags", "language",
+}
+
+
+def _parse_paragraph_labels(html: str) -> dict[str, str]:
+    """Extract ``<p>Label: value</p>`` / ``<b>Label:</b> value`` metadata.
+
+    Covers the paragraph-dump output format used by several older
+    browser-based FFN downloaders. Two passes:
+
+    1. ``<p>Label: value</p>`` — look for a known label followed by a
+       colon at the start of a paragraph. The rest of the paragraph is
+       the value.
+    2. ``<b>Label:</b> value`` — bold-prefixed labels, value runs until
+       the next ``<br>`` (next line) or another ``<b>`` (next label).
+
+    Labels are restricted to :data:`_PARAGRAPH_METADATA_LABELS` so
+    chapter text that happens to start with a capitalised word + colon
+    (common in dialogue tags) isn't mistaken for metadata.
+    """
+    out: dict[str, str] = {}
+
+    # Alternation of recognised labels is built into the regex so we
+    # can match in a single scan instead of O(N_paragraphs * N_labels).
+    label_alternation = "|".join(sorted(_PARAGRAPH_METADATA_LABELS, key=len, reverse=True))
+
+    paragraph_re = re.compile(
+        rf"<p[^>]*>\s*(?:<(?:b|strong)[^>]*>)?\s*"
+        rf"({label_alternation})\s*:\s*"
+        rf"(?:</(?:b|strong)>)?\s*(.*?)</p>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for match in paragraph_re.finditer(html):
+        key = _normalise_label(match.group(1))
+        value = _clean_cell_value(match.group(2))
+        if key and value and key not in out:
+            out[key] = value
+
+    # Bold-prefix dumps: `<b>Label:</b> value` where the value runs
+    # until the next `<br>` or the next bolded label. ``re.DOTALL`` so
+    # values can contain inline tags; the non-greedy ``.*?`` plus the
+    # `<br>|<b>|</p>|\Z` stop set keeps a single paragraph from
+    # absorbing the next one's content.
+    bold_re = re.compile(
+        rf"<(?:b|strong)[^>]*>\s*({label_alternation})\s*:\s*</(?:b|strong)>"
+        rf"\s*(.*?)(?=<br|<(?:b|strong)[^>]*>|</p>|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for match in bold_re.finditer(html):
+        key = _normalise_label(match.group(1))
+        value = _clean_cell_value(match.group(2))
+        if key and value and key not in out:
+            out[key] = value
+
+    return out
+
+
+# Labels (normalised, lowercase) that imply a fandom/category assignment.
+# "tags" is intentionally excluded — FicLab dumps the entire FFN tag list
+# (genres, characters, statuses) into a single `tags` row; picking a
+# fandom out of that soup needs heuristics better left to Phase 4's
+# review flow.
+_FANDOM_LABELS = ("fandom", "fandoms", "category", "categories")
+
+# Labels whose value is a chapter count we can trust as an integer.
+_CHAPTER_COUNT_LABELS = ("chapters",)
+
+# Labels (in order of preference) that carry a source URL when present.
+# We prefer `source` over `storylink` because FicLab uses the former as
+# the primary canonical URL; `storylink` shows up only in the bold-br
+# paragraph dumps that also happen to have `source: FanFiction.net`
+# (site name, not a URL) in a separate field.
+_SOURCE_URL_LABELS = ("source", "storylink", "sourcelink")
+
+
+def _parse_int(value: str) -> int:
+    """Return an int from a possibly comma/whitespace-decorated value.
+
+    Returns 0 on an unparseable value so callers can treat "no reliable
+    count" and "zero" the same way without a try/except.
+    """
+    digits = re.sub(r"[^0-9]", "", value or "")
+    try:
+        return int(digits) if digits else 0
+    except ValueError:
+        return 0
 
 
 def _fill_from_epub(path: Path, md: "FileMetadata") -> None:
@@ -257,35 +427,89 @@ def _fill_from_epub(path: Path, md: "FileMetadata") -> None:
             continue
         body = item.content.decode("utf-8", errors="replace")
         kv = _parse_kv_table(body)
-        category = kv.get("Category")
+        # Labels are now normalised to lowercase (see _parse_kv_table).
+        category = kv.get("category")
         if category:
             md.fandoms = [category]
         if not md.status:
-            md.status = kv.get("Status")
+            md.status = kv.get("status")
         if not md.rating:
-            md.rating = kv.get("Rating")
+            md.rating = kv.get("rating")
         break
 
 
+def _merge_metadata_field(
+    md: "FileMetadata", field_name: str, value: str | int | None,
+) -> None:
+    """Set ``md.<field_name>`` to ``value`` only if currently unset.
+
+    Used so multiple format parsers (kv-table + paragraph) can contribute
+    to the same :class:`FileMetadata` without the second parser clobbering
+    a good value the first one already found.
+    """
+    if not value:
+        return
+    current = getattr(md, field_name, None)
+    if current:
+        return
+    setattr(md, field_name, value)
+
+
 def _fill_from_html(path: Path, md: "FileMetadata") -> None:
+    """Populate ``md`` from an HTML file in any of the recognised formats.
+
+    Tries every parser defined above and merges the first non-empty value
+    per field. Labels are looked up lowercase (see :func:`_parse_kv_table`
+    and :func:`_parse_paragraph_labels`) so ffn-dl's ``Title`` and FicLab's
+    ``title`` both resolve.
+
+    The caller leaves this function with ``md`` populated as best we can
+    and falls back to :func:`extract_source_url` for the URL and
+    :func:`count_chapters` for the chapter count if either is still
+    missing.
+    """
     text = path.read_text(encoding="utf-8", errors="replace")
+
+    # Parse every supported HTML metadata shape into a single dict. Keys
+    # are lowercase; first-wins precedence keeps a genuine <th>/<td>
+    # row from being overwritten by a later paragraph-label match.
     kv = _parse_kv_table(text)
+    paragraphs = _parse_paragraph_labels(text)
+    merged: dict[str, str] = dict(paragraphs)
+    merged.update(kv)  # kv has priority — more structured shape
 
-    md.title = kv.get("Title")
-    md.author = kv.get("Author")
-    md.status = kv.get("Status")
-    md.rating = kv.get("Rating")
+    _merge_metadata_field(md, "title", merged.get("title") or merged.get("story"))
+    _merge_metadata_field(md, "author", merged.get("author"))
+    _merge_metadata_field(md, "status", merged.get("status"))
+    _merge_metadata_field(md, "rating", merged.get("rating"))
 
-    category = kv.get("Category")
-    if category:
-        md.fandoms.append(category)
+    # Fandoms can live under any of several label aliases; take the
+    # first populated one.
+    for label in _FANDOM_LABELS:
+        value = merged.get(label)
+        if value and not md.fandoms:
+            md.fandoms = [value]
+            break
 
-    # Source link appears as <a href="URL">URL</a> — _parse_kv_table
-    # has stripped the anchor tag and left the href text as the value,
-    # so Source here is already the URL string.
-    source = kv.get("Source")
-    if source and source.startswith(("http://", "https://")):
-        md.source_url = source
+    # Chapter count from metadata when available — saves an expensive
+    # DOM re-walk in count_chapters() and works on formats whose
+    # chapter markup count_chapters can't parse.
+    for label in _CHAPTER_COUNT_LABELS:
+        value = merged.get(label)
+        if value:
+            count = _parse_int(value)
+            if count > 0:
+                _merge_metadata_field(md, "chapter_count", count)
+                break
+
+    # Source URL: try the explicit `source`/`storylink` fields first
+    # (structured), then fall through to extract_source_url() which
+    # regex-matches any known URL pattern in the body.
+    for label in _SOURCE_URL_LABELS:
+        value = merged.get(label)
+        if value and value.startswith(("http://", "https://")):
+            _merge_metadata_field(md, "source_url", value)
+            break
 
 
 def _fill_from_txt(path: Path, md: "FileMetadata") -> None:
@@ -344,5 +568,11 @@ def extract_metadata(filepath: Path | str) -> "FileMetadata":
         except (ValueError, FileNotFoundError):
             pass
 
-    md.chapter_count = count_chapters(path)
+    # Only count chapters from the DOM if the format parsers didn't
+    # already extract a trustworthy count from the metadata — count_chapters
+    # only understands ffn-dl's own `<div class="chapter">` markup, so
+    # running it on a FicLab / paragraph-dump file returns 0 and would
+    # overwrite the correct number we just parsed out of the metadata.
+    if not md.chapter_count:
+        md.chapter_count = count_chapters(path)
     return md

@@ -19,6 +19,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# SMTP connection timeout, seconds. Long enough to absorb a slow DNS
+# lookup on the first send, short enough that a hung relay can't wedge
+# the watchlist poll loop for minutes.
+SMTP_TIMEOUT_S = 30
+
+# Implicit-TLS port. Everything else uses STARTTLS.
+SMTP_SSL_PORT = 465
+
 
 class SMTPConfigError(RuntimeError):
     """Raised when required SMTP settings aren't available."""
@@ -60,6 +68,40 @@ def _config(prefs=None):
     return cfg
 
 
+def send_text(to_addr: str, subject: str, body: str, prefs=None) -> None:
+    """Send a plain-text email using the same SMTP config as ``send_file``.
+
+    Used by the watchlist notification dispatcher. Kept here rather than
+    in a new module so all SMTP plumbing — STARTTLS vs SSL port handling,
+    credential resolution, From-address defaulting — lives in one place.
+    """
+    cfg = _config(prefs=prefs)
+
+    msg = EmailMessage()
+    msg["From"] = cfg["from_addr"]
+    msg["To"] = to_addr
+    msg["Subject"] = subject or "(no subject)"
+    msg.set_content(body or "")
+
+    logger.info(
+        "Sending notification email to %s via %s:%d",
+        to_addr, cfg["host"], cfg["port"],
+    )
+
+    # Port 465 is the implicit-TLS ("SSL") port; everything else is
+    # STARTTLS (explicit TLS upgrade). Matches send_file's logic.
+    if cfg["port"] == SMTP_SSL_PORT:
+        with smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=SMTP_TIMEOUT_S) as smtp:
+            smtp.login(cfg["user"], cfg["password"])
+            smtp.send_message(msg)
+    else:
+        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=SMTP_TIMEOUT_S) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.login(cfg["user"], cfg["password"])
+            smtp.send_message(msg)
+
+
 def send_file(to_addr: str, attachment_path, subject=None, body="", prefs=None):
     """Email `attachment_path` to `to_addr` using configured SMTP.
 
@@ -94,12 +136,12 @@ def send_file(to_addr: str, attachment_path, subject=None, body="", prefs=None):
         path.name, path.stat().st_size, to_addr, cfg["host"], cfg["port"],
     )
 
-    if cfg["port"] == 465:
-        with smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=30) as smtp:
+    if cfg["port"] == SMTP_SSL_PORT:
+        with smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=SMTP_TIMEOUT_S) as smtp:
             smtp.login(cfg["user"], cfg["password"])
             smtp.send_message(msg)
     else:
-        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=30) as smtp:
+        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=SMTP_TIMEOUT_S) as smtp:
             smtp.ehlo()
             smtp.starttls()
             smtp.login(cfg["user"], cfg["password"])
