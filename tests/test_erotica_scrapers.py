@@ -10,21 +10,29 @@ import pytest
 
 from ffn_dl.erotica import (
     AFFScraper,
+    ChyoaScraper,
+    DarkWandererScraper,
     FictionmaniaScraper,
+    GreatFeetScraper,
     LiteroticaScraper,
     LushStoriesScraper,
     MCStoriesScraper,
     NiftyScraper,
     SexStoriesScraper,
     StoriesOnlineScraper,
+    TGStorytimeScraper,
 )
 from ffn_dl.erotica.search import (
     EROTICA_SITE_SLUGS,
     EROTICA_TAG_VOCABULARY,
+    ErotiCAResults,
+    TAG_SITE_COVERAGE,
     _normalise_sites,
     _normalise_tags,
     _parse_word_threshold,
     search_erotica,
+    tag_site_count,
+    tag_sites_for,
 )
 from ffn_dl.sites import EROTICA_SCRAPERS, canonical_url, detect_scraper
 
@@ -35,7 +43,8 @@ def test_all_erotica_scrapers_registered():
     expected = {
         LiteroticaScraper, AFFScraper, StoriesOnlineScraper, NiftyScraper,
         SexStoriesScraper, MCStoriesScraper, LushStoriesScraper,
-        FictionmaniaScraper,
+        FictionmaniaScraper, TGStorytimeScraper, ChyoaScraper,
+        DarkWandererScraper, GreatFeetScraper,
     }
     assert set(EROTICA_SCRAPERS) == expected
 
@@ -51,6 +60,13 @@ def test_all_erotica_scrapers_registered():
     ("https://fictionmania.tv/stories/readhtmlstory.html?storyID=12345",
      FictionmaniaScraper),
     ("https://www.literotica.com/s/my-story", LiteroticaScraper),
+    ("https://www.tgstorytime.com/viewstory.php?sid=9219", TGStorytimeScraper),
+    ("https://chyoa.com/story/Insurance-Salesman-s.14", ChyoaScraper),
+    ("https://chyoa.com/chapter/Ooh-that-s-hot.17", ChyoaScraper),
+    ("https://darkwanderer.net/threads/foo.12345/", DarkWandererScraper),
+    ("https://darkwanderer.net/threads/foo.12345/page-3",
+     DarkWandererScraper),
+    ("https://www.greatfeet.com/stories/ts1735.htm", GreatFeetScraper),
 ])
 def test_detect_scraper_routes_correctly(url, expected_cls):
     assert detect_scraper(url) is expected_cls
@@ -98,6 +114,26 @@ def test_detect_scraper_routes_correctly(url, expected_cls):
     (
         "https://fictionmania.tv/stories/readhtmlstory.html?storyID=74553&junk=1",
         "https://fictionmania.tv/stories/readhtmlstory.html?storyID=74553",
+    ),
+    # TGStorytime: keep sid, drop chapter/ageconsent churn.
+    (
+        "https://www.tgstorytime.com/viewstory.php?sid=9219&chapter=2&ageconsent=ok",
+        "https://www.tgstorytime.com/viewstory.php?sid=9219",
+    ),
+    # Chyoa: both /story and /chapter collapse to /chapter form.
+    (
+        "https://chyoa.com/story/Insurance-Salesman-s.14",
+        "https://chyoa.com/chapter/Insurance-Salesman-s.14",
+    ),
+    # Dark Wanderer: strip /page-N from paginated thread URLs.
+    (
+        "https://darkwanderer.net/threads/foo.12345/page-5",
+        "https://darkwanderer.net/threads/foo.12345/",
+    ),
+    # GreatFeet: story path preserved verbatim.
+    (
+        "https://www.greatfeet.com/stories/ts1735.htm",
+        "https://www.greatfeet.com/stories/ts1735.htm",
     ),
 ])
 def test_canonical_url(raw, expected):
@@ -266,3 +302,108 @@ def test_erotica_site_slugs_have_labels():
 def test_search_erotica_empty_sites_returns_empty():
     # ``sites=[]`` with no usable entries short-circuits without HTTP.
     assert search_erotica("", sites=["nonexistent"]) == []
+
+
+# ── New scraper URL parsing ───────────────────────────────────────
+
+class TestTGStorytimeParsing:
+    def test_story_id(self):
+        assert (
+            TGStorytimeScraper.parse_story_id(
+                "https://www.tgstorytime.com/viewstory.php?sid=9219"
+            ) == 9219
+        )
+
+    def test_bare_id(self):
+        assert TGStorytimeScraper.parse_story_id("9219") == 9219
+
+    def test_rejects_bad_url(self):
+        with pytest.raises(ValueError):
+            TGStorytimeScraper.parse_story_id("https://example.com")
+
+
+class TestChyoaParsing:
+    def test_story_url(self):
+        kind, slug, num = ChyoaScraper.parse_story_id(
+            "https://chyoa.com/story/Insurance-Salesman-s.14"
+        )
+        assert (kind, slug, num) == ("story", "Insurance-Salesman-s", 14)
+
+    def test_chapter_url(self):
+        kind, slug, num = ChyoaScraper.parse_story_id(
+            "https://chyoa.com/chapter/Ooh-that-s-hot.17"
+        )
+        assert (kind, slug, num) == ("chapter", "Ooh-that-s-hot", 17)
+
+
+class TestDarkWandererParsing:
+    def test_thread_id(self):
+        assert (
+            DarkWandererScraper.parse_story_id(
+                "https://darkwanderer.net/threads/foo.12345/"
+            ) == 12345
+        )
+
+    def test_bare_id(self):
+        assert DarkWandererScraper.parse_story_id("12345") == 12345
+
+
+class TestGreatFeetParsing:
+    def test_story_id(self):
+        assert (
+            GreatFeetScraper.parse_story_id(
+                "https://www.greatfeet.com/stories/ts1735.htm"
+            ) == 1735
+        )
+
+    def test_bare_id(self):
+        assert GreatFeetScraper.parse_story_id("1735") == 1735
+
+
+# ── UX plumbing ───────────────────────────────────────────────────
+
+def test_erotica_results_carries_stats():
+    r = ErotiCAResults()
+    r.site_stats = {"mcstories": {"count": 8, "ok": True}}
+    r.exhausted_sites = {"mcstories"}
+    assert r.site_stats["mcstories"]["count"] == 8
+    assert "mcstories" in r.exhausted_sites
+
+
+def test_tag_site_count_femdom_well_covered():
+    # femdom must be on at least 4 sites; otherwise tag-picker
+    # annotation misleads the user about coverage.
+    assert tag_site_count("femdom") >= 4
+
+
+def test_tag_site_count_feet_includes_greatfeet():
+    # GreatFeet is the dedicated feet archive — the one we regretted
+    # missing. Guard against someone removing it from the feet list.
+    assert "greatfeet" in tag_sites_for("feet")
+
+
+def test_tag_site_count_every_vocabulary_tag_has_coverage():
+    # No tag should appear in the vocabulary with zero sites — that
+    # would be a broken entry telling the user "this tag works" when
+    # it doesn't.
+    for tag in EROTICA_TAG_VOCABULARY:
+        assert tag_site_count(tag) >= 1, f"tag {tag!r} has no sites"
+
+
+def test_normalise_tags_strips_coverage_annotation():
+    # GUI passes "femdom [5 sites]"; scraper needs bare "femdom".
+    assert _normalise_tags("femdom [5 sites], feet [5 sites]") == [
+        "femdom", "feet",
+    ]
+
+
+def test_tag_coverage_only_references_registered_sites():
+    # Every site listed under a tag must exist in the fan-out
+    # registry — otherwise tag selection would silently skip a site
+    # we claim to cover.
+    known_sites = set(EROTICA_SITE_SLUGS) - {"all"}
+    for tag, sites in TAG_SITE_COVERAGE.items():
+        for site in sites:
+            assert site in known_sites, (
+                f"tag {tag!r} references unknown site {site!r}"
+            )

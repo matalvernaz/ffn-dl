@@ -12,13 +12,17 @@ from urllib.parse import urlsplit, urlunsplit
 from .ao3 import AO3Scraper
 from .erotica import (
     AFFScraper,
+    ChyoaScraper,
+    DarkWandererScraper,
     FictionmaniaScraper,
+    GreatFeetScraper,
     LiteroticaScraper,
     LushStoriesScraper,
     MCStoriesScraper,
     NiftyScraper,
     SexStoriesScraper,
     StoriesOnlineScraper,
+    TGStorytimeScraper,
 )
 from .ficwad import FicWadScraper
 from .mediaminer import MediaMinerScraper
@@ -100,6 +104,33 @@ _STORY_URL_PATTERNS: list[tuple[type[BaseScraper], re.Pattern[str]]] = [
         ),
     ),
     (
+        TGStorytimeScraper,
+        re.compile(
+            r"https?://(?:www\.)?tgstorytime\.com/viewstory\.php\?sid=\d+",
+            re.I,
+        ),
+    ),
+    (
+        ChyoaScraper,
+        re.compile(
+            r"https?://(?:www\.)?chyoa\.com/(?:story|chapter)/[^/?#\s]+\.\d+",
+            re.I,
+        ),
+    ),
+    (
+        DarkWandererScraper,
+        re.compile(
+            r"https?://(?:www\.)?darkwanderer\.net/threads/[^/.]+\.\d+",
+            re.I,
+        ),
+    ),
+    (
+        GreatFeetScraper,
+        re.compile(
+            r"https?://(?:www\.)?greatfeet\.com/stories/ts\d+\.htm", re.I,
+        ),
+    ),
+    (
         FFNScraper,
         re.compile(r"https?://(?:www\.)?fanfiction\.net/s/\d+", re.I),
     ),
@@ -124,6 +155,10 @@ _HOSTNAME_TO_SCRAPER: list[tuple[str, type[BaseScraper]]] = [
     ("mcstories.com", MCStoriesScraper),
     ("lushstories.com", LushStoriesScraper),
     ("fictionmania.tv", FictionmaniaScraper),
+    ("tgstorytime.com", TGStorytimeScraper),
+    ("chyoa.com", ChyoaScraper),
+    ("darkwanderer.net", DarkWandererScraper),
+    ("greatfeet.com", GreatFeetScraper),
 ]
 
 # Scrapers whose is_author_url / is_series_url static methods should be
@@ -143,6 +178,10 @@ ALL_SCRAPERS: list[type[BaseScraper]] = [
     MCStoriesScraper,
     LushStoriesScraper,
     FictionmaniaScraper,
+    TGStorytimeScraper,
+    ChyoaScraper,
+    DarkWandererScraper,
+    GreatFeetScraper,
 ]
 
 # Erotica-specific scraper classes, exported for the unified Erotic
@@ -158,6 +197,10 @@ EROTICA_SCRAPERS: tuple[type[BaseScraper], ...] = (
     MCStoriesScraper,
     LushStoriesScraper,
     FictionmaniaScraper,
+    TGStorytimeScraper,
+    ChyoaScraper,
+    DarkWandererScraper,
+    GreatFeetScraper,
 )
 
 
@@ -289,6 +332,24 @@ _CANONICAL_RULES: list[tuple[str, str, re.Pattern[str], str]] = [
         ),
         "/stories/{}",
     ),
+    (
+        "chyoa.com", "chyoa.com",
+        # Chyoa URL shape: /story/<slug>.<id> or /chapter/<slug>.<id>.
+        # We canonicalise both to the chapter form because that's what
+        # the scraper operates on (the story URL redirects to the root
+        # chapter of the same tree).
+        re.compile(r"^/(?:story|chapter)/([^/?#\s]+\.\d+)/?$"),
+        "/chapter/{}",
+    ),
+    (
+        "darkwanderer.net", "darkwanderer.net",
+        re.compile(r"^/threads/([^/.]+\.\d+)"),
+        "/threads/{}/",
+    ),
+    (
+        "greatfeet.com", "www.greatfeet.com",
+        re.compile(r"^/stories/ts(\d+)\.htm$"), "/stories/ts{}.htm",
+    ),
 ]
 
 # Sites whose story id lives in the query string rather than the path.
@@ -296,6 +357,7 @@ _CANONICAL_RULES: list[tuple[str, str, re.Pattern[str], str]] = [
 # during its normal "strip query and fragment" cleanup.
 _AFF_NO_RE = re.compile(r"(?:^|[?&])no=(\d+)")
 _FM_STORY_RE = re.compile(r"(?:^|[?&])storyID=(\d+)", re.I)
+_TGS_SID_RE = re.compile(r"(?:^|[?&])sid=(\d+)", re.I)
 
 
 def canonical_url(url: str) -> str:
@@ -337,6 +399,18 @@ def canonical_url(url: str) -> str:
                 "https", "fictionmania.tv",
                 "/stories/readhtmlstory.html",
                 f"storyID={m.group(1)}", "",
+            ))
+
+    # TGStorytime ids live in ``?sid=<N>``. Canonical form strips the
+    # age-consent / chapter / textsize params that otherwise churn
+    # between URL variants for the same work.
+    if "tgstorytime.com" in netloc:
+        m = _TGS_SID_RE.search(parts.query or "")
+        if m:
+            return urlunsplit((
+                "https", "www.tgstorytime.com",
+                "/viewstory.php",
+                f"sid={m.group(1)}", "",
             ))
 
     for host_fragment, canonical_host, path_re, path_template in _CANONICAL_RULES:

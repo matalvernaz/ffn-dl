@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.22.0 — 2026-04-20
+
+### Add
+
+- **Four more erotica-site scrapers.** TGStorytime (TG parity with
+  Fictionmania — same "two large archives" footing gay erotica gets
+  from Nifty + Literotica), Chyoa (interactive CYOA fetish fiction,
+  single-chapter mode), Dark Wanderer (dedicated cuckold XenForo
+  community — thread starter's posts become chapters), and
+  GreatFeet (dedicated foot-fetish archive running since 1997).
+  Twelve erotica sites total now cover every common kink with at
+  least one, and most (feet, femdom, cuckold, TG) with 4+ cross-
+  referenceable archives.
+
+- **Tag-picker coverage annotation.** Each tag in the Erotic Story
+  Search multi-picker now shows how many sites carry it —
+  e.g. ``femdom [5 sites]``, ``chastity [3 sites]``, ``cuckold
+  [5 sites]`` — so users can tell well-covered kinks from niche
+  ones before running a search. The ``[N sites]`` suffix is
+  stripped before the tag hits the scrapers, so behaviour is
+  unchanged; it's purely a UX hint in the picker.
+
+### Change
+
+- **Site column added to search results.** Every row now shows
+  which archive it came from, in a "Site" column second from the
+  left. Per-site search windows (FFN, AO3, Royal Road, Literotica,
+  Wattpad) populate it with their own site key; the unified Erotic
+  Story Search fills it with the originating archive (literotica,
+  mcstories, darkwanderer, …). The "Site" column sits second so it
+  stays visible even in narrow windows.
+
+- **Per-site stats in search log.** Every erotica search now logs
+  one line per archive with the count it contributed:
+  ``sites — literotica: 8, mcstories: 3·exhausted, darkwanderer:
+  0·exhausted, …``. Failed archives land in a separate line:
+  ``failures — sofurry: FAIL (timeout)``. Previously a silently
+  failed or empty-returning site was indistinguishable from "no
+  matches at that site"; now it's explicit.
+
+- **Load More respects per-site exhaustion.** When a site returns
+  fewer than a full batch (or fails outright), it's marked exhausted
+  and skipped on subsequent Load More clicks. Previously every Load
+  More re-polled every archive, returning the same rows from sites
+  that had already given their full tail.
+
+- **Tag coverage table** (``TAG_SITE_COVERAGE``) maps every tag in
+  the unified vocabulary to its supporting sites. Covered by tests
+  so a future registration that references a dropped site trips
+  CI instead of silently breaking the tag picker.
+
+### Dropped candidates (this round)
+
+- SoFurry, DailyDiapers — Laravel/Apache SPA responses require a
+  JavaScript runtime we don't have. Deferred.
+- BigCloset TopShelf — Cloudflare Challenge (not Managed Challenge)
+  blocks anonymous scrapes; same root cause as Kristen Archives.
+
 ## 1.21.0 — 2026-04-20
 
 ### Add

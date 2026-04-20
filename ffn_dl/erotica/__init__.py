@@ -26,21 +26,29 @@ Sites considered and not included in this release:
 """
 
 from .aff import AFFScraper
+from .chyoa import ChyoaScraper
+from .darkwanderer import DarkWandererScraper
 from .fictionmania import FictionmaniaScraper
+from .greatfeet import GreatFeetScraper
 from .literotica import LiteroticaScraper
 from .lushstories import LushStoriesScraper
 from .mcstories import MCStoriesScraper
 from .nifty import NiftyScraper
 from .sexstories import SexStoriesScraper
 from .storiesonline import StoriesOnlineScraper
+from .tgstorytime import TGStorytimeScraper
 
 __all__ = [
     "AFFScraper",
+    "ChyoaScraper",
+    "DarkWandererScraper",
     "FictionmaniaScraper",
+    "GreatFeetScraper",
     "LiteroticaScraper",
     "LushStoriesScraper",
     "MCStoriesScraper",
     "NiftyScraper",
     "SexStoriesScraper",
     "StoriesOnlineScraper",
+    "TGStorytimeScraper",
 ]

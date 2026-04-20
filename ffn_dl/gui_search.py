@@ -21,14 +21,19 @@ from .gui_dialogs import MultiPickerDialog, SeriesPartsDialog
 
 
 _SEARCH_COLUMNS = [
-    ("Title", 260),
+    ("Title", 240),
+    ("Site", 100),
     ("Author", 120),
-    ("Fandom", 160),
+    ("Fandom", 140),
     ("Words", 70),
     ("Ch", 40),
     ("Rating", 80),
     ("Status", 90),
 ]
+# Column ordering: Site sits second so it's visible even in narrow
+# windows and the reader can group results by archive at a glance.
+# For per-site search frames (FFN, AO3, etc.) the Site cell stays
+# blank since every row comes from the same archive.
 
 
 def _ffn_search_spec():
@@ -140,20 +145,32 @@ def _wattpad_search_spec():
 
 
 def _erotica_search_spec():
-    """Unified "Erotic Story Search" — fans out across all eight
+    """Unified "Erotic Story Search" — fans out across all 12
     erotica sites at once. Tag search is the primary input (multi-
     picker dialog) and sits immediately after the query box, per
     feedback that buried tag UX (as in the old Literotica-only
-    search) makes this surface unusable."""
+    search) makes this surface unusable.
+
+    Tag options are annotated with their per-tag site-coverage count
+    (e.g. "femdom [5 sites]") so users can tell well-covered kinks
+    from niche ones before running a search that returns empty.
+    """
     from .erotica.search import (
         EROTICA_SITE_SLUGS,
         EROTICA_TAG_VOCABULARY,
         search_erotica,
+        tag_site_count,
     )
 
     min_words_choices = [
         "any", "1k+", "5k+", "10k+", "30k+", "50k+", "150k+",
     ]
+
+    annotated_tags = [
+        f"{tag} [{tag_site_count(tag)} sites]"
+        for tag in EROTICA_TAG_VOCABULARY
+    ]
+
     return {
         "label": "Erotic Story Search",
         "search_fn": search_erotica,
@@ -166,7 +183,7 @@ def _erotica_search_spec():
         "multi_pickers": [
             (
                 "Ta&gs:", "tags", "Pick erotica tags",
-                list(EROTICA_TAG_VOCABULARY),
+                annotated_tags,
             ),
         ],
         "text_filters": [
@@ -224,6 +241,10 @@ class SearchFrame(wx.Frame):
         self._raw_results = []
         self.next_page = 1
         self.last_query = None
+        # Erotica fan-out state: which sites have already yielded their
+        # full tail so Load More skips them instead of polling for the
+        # same rows over and over. Empty for every per-site frame.
+        self._exhausted_sites: set = set()
         self.last_filters = {}
 
         self._build_ui()
@@ -510,6 +531,7 @@ class SearchFrame(wx.Frame):
         self.results = []
         self._raw_results = []
         self.next_page = 1
+        self._exhausted_sites = set()
         self.last_query = query
         self.last_filters = filters
         filter_str = (
@@ -538,10 +560,25 @@ class SearchFrame(wx.Frame):
     def _run_search(self, query, filters, page, append):
         from .search import fetch_until_limit
         try:
-            page_results, next_page = fetch_until_limit(
-                self.search_fn, query,
-                limit=25, start_page=page, **filters,
-            )
+            # Erotica fan-out: bypass fetch_until_limit so the
+            # ErotiCAResults object (with its ``site_stats`` attr)
+            # survives instead of being flattened into a plain list.
+            # One call per page maps naturally to how the fan-out
+            # already pages per-site — we don't need fetch_until_limit's
+            # cross-page accumulation behaviour.
+            if self.site_key == "erotica":
+                page_results = self.search_fn(
+                    query,
+                    page=page,
+                    skip_sites=set(self._exhausted_sites),
+                    **filters,
+                )
+                next_page = page + 1
+            else:
+                page_results, next_page = fetch_until_limit(
+                    self.search_fn, query,
+                    limit=25, start_page=page, **filters,
+                )
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -560,6 +597,14 @@ class SearchFrame(wx.Frame):
 
     def _populate_results(self, new_results, next_page, append):
         from .search import collapse_ao3_series, collapse_literotica_series
+
+        # Erotica fan-out ships a list subclass carrying per-site
+        # stats + which archives are exhausted. Pull those off before
+        # we flatten to a plain list for the rest of the pipeline.
+        new_site_stats = getattr(new_results, "site_stats", None)
+        new_exhausted = getattr(new_results, "exhausted_sites", None)
+        if new_exhausted:
+            self._exhausted_sites = set(self._exhausted_sites) | set(new_exhausted)
 
         # Keep the raw (uncollapsed) results across load-more so we can
         # re-run collapse on the full set — otherwise parts of the same
@@ -589,22 +634,43 @@ class SearchFrame(wx.Frame):
                 row = ctrl.InsertItem(
                     ctrl.GetItemCount(), self._result_title(r),
                 )
-                ctrl.SetItem(row, 1, r.get("author", "") or "")
-                ctrl.SetItem(row, 2, r.get("fandom", "") or "")
-                ctrl.SetItem(row, 3, str(r.get("words", "")))
-                ctrl.SetItem(row, 4, str(r.get("chapters", "")))
-                ctrl.SetItem(row, 5, r.get("rating", "") or "")
-                ctrl.SetItem(row, 6, r.get("status", "") or "")
+                # Column 1 = Site. For per-site frames (FFN, AO3, …)
+                # the scraper populates ``site`` only on erotica
+                # fan-out rows — elsewhere we fall back to the frame's
+                # own site key so the column still tells the reader
+                # which archive the row came from.
+                site_cell = r.get("site") or self.site_key or ""
+                ctrl.SetItem(row, 1, str(site_cell))
+                ctrl.SetItem(row, 2, r.get("author", "") or "")
+                ctrl.SetItem(row, 3, r.get("fandom", "") or "")
+                ctrl.SetItem(row, 4, str(r.get("words", "")))
+                ctrl.SetItem(row, 5, str(r.get("chapters", "")))
+                ctrl.SetItem(row, 6, r.get("rating", "") or "")
+                ctrl.SetItem(row, 7, r.get("status", "") or "")
         finally:
             ctrl.Thaw()
 
+        # Load More disabled when:
+        #   • no new rows came back (normal end-of-results for per-site
+        #     frames), OR
+        #   • every erotica site is exhausted (so the next fan-out
+        #     would hit zero archives and return immediately).
+        all_erotica_exhausted = (
+            self.site_key == "erotica"
+            and new_site_stats is not None
+            and len(self._exhausted_sites) >= len(new_site_stats)
+        )
         self.load_more_btn.Enable(
-            bool(new_results) and not self.main_frame._downloading
+            bool(new_results)
+            and not all_erotica_exhausted
+            and not self.main_frame._downloading
         )
         if not self.results:
             self._log(
                 "No results found." if not append else "No more results."
             )
+            if new_site_stats:
+                self._log_per_site_stats(new_site_stats)
             return
 
         if append:
@@ -619,9 +685,33 @@ class SearchFrame(wx.Frame):
             focus_row = 0
             self._log(f"Found {len(self.results)} results.")
 
+        if new_site_stats:
+            self._log_per_site_stats(new_site_stats)
+
         ctrl.SetFocus()
         ctrl.Focus(focus_row)
         ctrl.Select(focus_row)
+
+    def _log_per_site_stats(self, stats: dict) -> None:
+        """Log a one-line summary of the fan-out: counts per archive
+        and any failures. Keeps users informed that, e.g., Dark
+        Wanderer is down today even though the rest of the results
+        look fine."""
+        ok_parts: list[str] = []
+        failed: list[str] = []
+        for site, info in sorted(stats.items()):
+            if not info.get("ok", True):
+                failed.append(
+                    f"{site}: FAIL ({info.get('error') or 'error'})"
+                )
+            else:
+                count = int(info.get("count", 0) or 0)
+                marker = "·exhausted" if info.get("exhausted") else ""
+                ok_parts.append(f"{site}: {count}{marker}")
+        if ok_parts:
+            self._log("  sites — " + ", ".join(ok_parts))
+        if failed:
+            self._log("  failures — " + "; ".join(failed))
 
     @staticmethod
     def _result_title(r):

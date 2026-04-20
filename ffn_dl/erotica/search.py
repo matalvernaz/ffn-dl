@@ -60,6 +60,10 @@ EROTICA_SITE_SLUGS: list[str] = [
     "mcstories",
     "lushstories",
     "fictionmania",
+    "tgstorytime",
+    "chyoa",
+    "darkwanderer",
+    "greatfeet",
 ]
 """Site-picker options for the unified search window. The first entry
 (``all``) triggers fan-out; everything else scopes to a single site."""
@@ -74,6 +78,10 @@ EROTICA_SITE_LABELS: dict[str, str] = {
     "mcstories": "MCStories",
     "lushstories": "Lushstories",
     "fictionmania": "Fictionmania",
+    "tgstorytime": "TGStorytime",
+    "chyoa": "Chyoa (interactive)",
+    "darkwanderer": "Dark Wanderer",
+    "greatfeet": "GreatFeet",
 }
 
 EROTICA_TAG_VOCABULARY: list[str] = [
@@ -479,6 +487,160 @@ def search_fictionmania(query: str, *, page: int = 1,
     return out
 
 
+def search_tgstorytime(query: str, *, page: int = 1,
+                       **_: object) -> list[dict]:
+    """TGStorytime category browse. No free-text search endpoint —
+    the newest-stories page is the easiest-to-scrape starting point;
+    we filter by query client-side.
+
+    Each story link is wrapped in an ``onclick="confirm(age_consent)"``
+    JavaScript shim for anonymous visitors; our age-consent query
+    params bypass it cleanly at fetch time so we just match the
+    bare ``viewstory.php?sid=<N>`` pattern."""
+    url = "https://www.tgstorytime.com/"
+    if page > 1:
+        url = f"https://www.tgstorytime.com/index.php?page={page}"
+    html = _fetch(url)
+    if not html:
+        return []
+    out: list[dict] = []
+    seen = set()
+    for m in re.finditer(
+        r"viewstory\.php\?sid=(\d+)[^'\"]*['\"][^>]*>([^<]+)<", html,
+    ):
+        sid, title = m.group(1), m.group(2).strip()
+        if sid in seen or not title or len(title) < 3:
+            continue
+        if not _matches_query(query, title):
+            continue
+        seen.add(sid)
+        out.append({
+            "title": title, "author": "",
+            "url": (
+                f"https://www.tgstorytime.com/viewstory.php"
+                f"?sid={sid}&ageconsent=ok&warning=3"
+            ),
+            "summary": "", "words": "?", "chapters": "?",
+            "rating": "M", "fandom": "", "status": "",
+            "site": "tgstorytime",
+        })
+        if len(out) >= PER_SITE_LIMIT:
+            break
+    return out
+
+
+def search_chyoa(query: str, *, page: int = 1,
+                 tags: Optional[list] = None, **_: object) -> list[dict]:
+    """Chyoa's ``/search/<q>`` endpoint returns chapter-level hits for
+    a query; without a query we default to the browse-popular page
+    filtered client-side."""
+    if query:
+        url = f"https://chyoa.com/search/{re.sub(r'[^A-Za-z0-9]+', '+', query)}"
+    else:
+        url = "https://chyoa.com/browse/popular"
+    if page > 1:
+        url += f"?page={page}"
+    html = _fetch(url)
+    if not html:
+        return []
+    out: list[dict] = []
+    seen = set()
+    for m in re.finditer(
+        r'href="(/(?:story|chapter)/[^"]+?\.(\d+))"[^>]*>([^<]+)<',
+        html,
+    ):
+        href, numeric, title = m.group(1), m.group(2), m.group(3).strip()
+        if numeric in seen or not title:
+            continue
+        if not _matches_query(query, title):
+            continue
+        seen.add(numeric)
+        out.append({
+            "title": title, "author": "",
+            "url": f"https://chyoa.com{href}",
+            "summary": "", "words": "?", "chapters": "?",
+            "rating": "M", "fandom": "", "status": "",
+            "site": "chyoa",
+        })
+        if len(out) >= PER_SITE_LIMIT:
+            break
+    return out
+
+
+def search_darkwanderer(query: str, *, page: int = 1,
+                        **_: object) -> list[dict]:
+    """Dark Wanderer XenForo: forum "New Posts" listing gives recent
+    story threads; we filter client-side by query."""
+    if query:
+        url = (
+            "https://darkwanderer.net/search/search?keywords="
+            f"{re.sub(r'[^A-Za-z0-9]+', '+', query)}&o=relevance"
+        )
+    else:
+        url = "https://darkwanderer.net/forums/"
+    html = _fetch(url)
+    if not html:
+        return []
+    out: list[dict] = []
+    seen = set()
+    for m in re.finditer(
+        r'href="(/threads/([^/.]+)\.(\d+)/?)"[^>]*>([^<]+)<',
+        html,
+    ):
+        href, slug, tid, title = (
+            m.group(1), m.group(2), m.group(3), m.group(4).strip(),
+        )
+        if tid in seen or not title or len(title) < 3:
+            continue
+        if not _matches_query(query, title, slug):
+            continue
+        seen.add(tid)
+        out.append({
+            "title": title, "author": "",
+            "url": f"https://darkwanderer.net{href.rstrip('/')}/",
+            "summary": "", "words": "?", "chapters": "?",
+            "rating": "M", "fandom": "cuckold", "status": "",
+            "site": "darkwanderer",
+        })
+        if len(out) >= PER_SITE_LIMIT:
+            break
+    return out
+
+
+def search_greatfeet(query: str, *, page: int = 1,
+                     **_: object) -> list[dict]:
+    """GreatFeet: ``/tickles.htm`` lists recent stories by ``ts<N>.htm``
+    href; older issues at ``/archiveN.htm`` (weekly issues 1..484+).
+    The index is pure static HTML so a single fetch gets us a batch
+    of story links to filter."""
+    del page  # GreatFeet's tickles.htm is a single page — no native
+    # pagination we can usefully page over.
+    url = "https://www.greatfeet.com/tickles.htm"
+    html = _fetch(url)
+    if not html:
+        return []
+    out: list[dict] = []
+    seen = set()
+    for m in re.finditer(r'href="[^"]*?/stories/ts(\d+)\.htm"', html):
+        sid = m.group(1)
+        if sid in seen:
+            continue
+        seen.add(sid)
+        title = f"GreatFeet story {sid}"
+        if not _matches_query(query, title):
+            continue
+        out.append({
+            "title": title, "author": "Anonymous",
+            "url": f"https://www.greatfeet.com/stories/ts{sid}.htm",
+            "summary": "", "words": "?", "chapters": "1",
+            "rating": "M", "fandom": "feet", "status": "",
+            "site": "greatfeet",
+        })
+        if len(out) >= PER_SITE_LIMIT:
+            break
+    return out
+
+
 def search_literotica_wrapped(query: str, *, page: int = 1,
                               tags: Optional[list] = None,
                               **_: object) -> list[dict]:
@@ -513,7 +675,115 @@ _SITE_FNS: dict[str, Callable[..., list[dict]]] = {
     "mcstories": search_mcstories,
     "lushstories": search_lushstories,
     "fictionmania": search_fictionmania,
+    "tgstorytime": search_tgstorytime,
+    "chyoa": search_chyoa,
+    "darkwanderer": search_darkwanderer,
+    "greatfeet": search_greatfeet,
 }
+
+
+TAG_SITE_COVERAGE: dict[str, list[str]] = {
+    # Which sites carry each tag as a first-class category or
+    # well-represented kink. Used by the tag picker to annotate each
+    # option with its site-count (see :func:`tag_site_count`) so users
+    # can see at a glance whether a tag is well-covered or niche.
+    # Entries only list sites that expose the tag as a native filter /
+    # search dimension; sites where it's just buried in free text don't
+    # count. Verified April 2026.
+    "anal": ["literotica", "storiesonline", "lushstories", "sexstories"],
+    "bdsm": ["literotica", "lushstories", "storiesonline", "mcstories"],
+    "bondage": ["literotica", "lushstories", "storiesonline", "mcstories"],
+    "bukkake": ["literotica", "sexstories"],
+    "celebrity": ["literotica", "storiesonline", "sexstories"],
+    "cheating": [
+        "literotica", "lushstories", "storiesonline", "sexstories",
+        "darkwanderer",
+    ],
+    "chastity": ["literotica", "storiesonline", "mcstories"],
+    "cuckold": [
+        "literotica", "lushstories", "storiesonline", "sexstories",
+        "darkwanderer",
+    ],
+    "dominance-submission": [
+        "literotica", "lushstories", "storiesonline", "mcstories",
+    ],
+    "exhibitionism": [
+        "literotica", "lushstories", "storiesonline", "mcstories",
+    ],
+    "femdom": [
+        "literotica", "lushstories", "storiesonline", "mcstories",
+    ],
+    "feet": [
+        "literotica", "lushstories", "storiesonline", "mcstories",
+        "greatfeet",
+    ],
+    "fisting": ["literotica", "sexstories"],
+    "futanari": ["literotica", "storiesonline", "mcstories", "tgstorytime"],
+    "gangbang": ["literotica", "lushstories", "storiesonline", "sexstories"],
+    "gay": [
+        "literotica", "lushstories", "storiesonline", "nifty",
+        "sexstories", "aff",
+    ],
+    "group-sex": [
+        "literotica", "lushstories", "storiesonline", "sexstories",
+        "mcstories",
+    ],
+    "harem": ["literotica", "storiesonline"],
+    "humiliation": [
+        "literotica", "lushstories", "storiesonline", "mcstories",
+    ],
+    "hypnosis": ["mcstories", "storiesonline", "literotica"],
+    "incest": [
+        "literotica", "storiesonline", "sexstories", "aff",
+        "mcstories",
+    ],
+    "interracial": [
+        "literotica", "lushstories", "storiesonline", "sexstories",
+        "darkwanderer",
+    ],
+    "lactation": ["literotica", "storiesonline", "sexstories"],
+    "lesbian": [
+        "literotica", "lushstories", "storiesonline", "nifty",
+        "sexstories", "aff",
+    ],
+    "masturbation": ["literotica", "lushstories", "sexstories"],
+    "mature": ["literotica", "lushstories", "storiesonline"],
+    "mind-control": ["mcstories", "storiesonline", "literotica", "chyoa"],
+    "non-consent": [
+        "literotica", "storiesonline", "mcstories", "sexstories",
+    ],
+    "oral": ["literotica", "lushstories", "sexstories"],
+    "orgy": ["literotica", "storiesonline", "sexstories", "mcstories"],
+    "polyamory": ["literotica", "storiesonline", "lushstories"],
+    "pregnancy": ["literotica", "storiesonline", "sexstories"],
+    "public-sex": ["literotica", "lushstories", "storiesonline"],
+    "roleplay": ["literotica", "lushstories", "chyoa"],
+    "rough": ["literotica", "lushstories", "sexstories"],
+    "spanking": ["literotica", "lushstories", "storiesonline", "mcstories"],
+    "swinging": ["literotica", "lushstories", "storiesonline", "darkwanderer"],
+    "teen": ["literotica", "lushstories", "storiesonline", "sexstories"],
+    "threesome": ["literotica", "lushstories", "storiesonline", "sexstories"],
+    "transgender": [
+        "literotica", "fictionmania", "tgstorytime", "storiesonline",
+        "mcstories",
+    ],
+    "voyeur": ["literotica", "lushstories", "storiesonline"],
+    "watersports": ["literotica", "storiesonline", "sexstories"],
+}
+
+
+def tag_site_count(tag: str) -> int:
+    """How many sites meaningfully cover this tag. Used by the GUI
+    multi-picker to annotate each entry with ``[N sites]`` so users
+    can tell femdom (many sites) from chastity (three sites) before
+    running a fruitless query."""
+    return len(TAG_SITE_COVERAGE.get(tag.lower(), []))
+
+
+def tag_sites_for(tag: str) -> list[str]:
+    """Site slugs that meaningfully cover ``tag``. Empty list means
+    the tag isn't in the unified vocabulary."""
+    return list(TAG_SITE_COVERAGE.get(tag.lower(), []))
 
 
 def _normalise_sites(sites, sites_choice) -> Optional[list]:
@@ -529,14 +799,47 @@ def _normalise_sites(sites, sites_choice) -> Optional[list]:
     return None
 
 
+_TAG_COVERAGE_SUFFIX_RE = re.compile(r"\s*\[\d+\s+sites?\]\s*$", re.I)
+"""Strips the "[5 sites]" annotation the GUI tag picker appends to
+each option. Keeps the scraper-facing tag list clean."""
+
+
 def _normalise_tags(tags) -> list[str]:
     """Accept either a Python list or the comma-separated string the
-    multi-picker dialog writes into its text control. Drop empties."""
+    multi-picker dialog writes into its text control. Drop empties
+    and strip the GUI's ``[N sites]`` coverage annotation."""
     if tags is None:
         return []
     if isinstance(tags, str):
-        return [t.strip() for t in tags.split(",") if t.strip()]
-    return [str(t).strip() for t in tags if str(t).strip()]
+        raw = [t.strip() for t in tags.split(",") if t.strip()]
+    else:
+        raw = [str(t).strip() for t in tags if str(t).strip()]
+    return [_TAG_COVERAGE_SUFFIX_RE.sub("", t).strip() for t in raw if t]
+
+
+class ErotiCAResults(list):
+    """``list`` subclass that carries per-site stats alongside the
+    merged result rows.
+
+    Rationale: the GUI's SearchFrame treats search results as a plain
+    ``list[dict]`` (so ``fetch_until_limit`` can iterate without
+    knowing which site it's talking to), but the unified search also
+    needs to surface *per-site* health — how many hits each archive
+    returned, which ones failed, and which ones are exhausted. Rather
+    than break the contract or thread a second return value through
+    ``fetch_until_limit``, we subclass ``list`` and hang the stats
+    dict off an attribute. Callers that don't care keep seeing a list
+    of dicts; the erotica SearchFrame peeks at ``.site_stats`` for
+    the summary panel and ``.exhausted_sites`` for load-more gating.
+    """
+
+    site_stats: dict
+    exhausted_sites: set
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.site_stats = {}
+        self.exhausted_sites = set()
 
 
 def search_erotica(
@@ -550,8 +853,9 @@ def search_erotica(
     min_words: str = "",
     category: str = "",
     fandom: str = "",
+    skip_sites: Optional[set] = None,
     **_: object,
-) -> list[dict]:
+) -> "ErotiCAResults":
     """Fan-out search across every registered erotica site.
 
     Args:
@@ -579,16 +883,16 @@ def search_erotica(
     """
     resolved_sites = _normalise_sites(sites, sites_choice)
     tag_list = _normalise_tags(tags_picked if tags_picked is not None else tags)
+    skip_set = set(skip_sites or ())
     if resolved_sites is None:
-        active = list(_SITE_FNS)
+        active = [s for s in _SITE_FNS if s not in skip_set]
     else:
-        active = [s for s in resolved_sites if s in _SITE_FNS]
+        active = [
+            s for s in resolved_sites if s in _SITE_FNS and s not in skip_set
+        ]
     if not active:
-        return []
+        return ErotiCAResults()
 
-    # "any" is the no-op label on the GUI min-words dropdown — treat
-    # it as an empty filter here so the threshold parser doesn't try
-    # to cast it to an int.
     min_words_val = "" if min_words in ("", "any") else min_words
 
     kwargs = {
@@ -598,26 +902,56 @@ def search_erotica(
         "fandom": fandom,
     }
 
-    merged: list[dict] = []
+    merged = ErotiCAResults()
+    # Per-site stats: count of hits, ok flag, error message (or None).
+    # The GUI summary panel reads this to show "MCStories: 8, SOL:
+    # 12, SoFurry: FAIL (timeout)" so users know which sites contributed
+    # versus which silently failed vs. returned zero hits.
+    site_stats: dict[str, dict] = {
+        s: {"count": 0, "ok": True, "error": None, "exhausted": False}
+        for s in active
+    }
+
     # ThreadPoolExecutor — every site's search is network-bound, so
-    # 8 concurrent HTTP requests complete in about as long as the
-    # slowest one. Each site function swallows its own errors and
-    # returns [] on failure, so a dead archive doesn't sink the batch.
+    # concurrent HTTP requests complete in about as long as the
+    # slowest one. Each site function swallows its own errors, but we
+    # also catch here to flip the per-site ``ok`` flag so the GUI can
+    # surface the failure instead of silently omitting a site.
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as ex:
         futures = {ex.submit(_SITE_FNS[s], query, **kwargs): s for s in active}
         for fut in concurrent.futures.as_completed(futures):
             site_slug = futures[fut]
             try:
                 site_results = fut.result() or []
+                site_stats[site_slug]["count"] = len(site_results)
+                # Anything short of a full batch means we've hit the
+                # tail of whatever ordering this site uses — mark it
+                # exhausted so Load More doesn't re-poll for a page
+                # that'll just return the same rows again.
+                if len(site_results) < PER_SITE_LIMIT:
+                    site_stats[site_slug]["exhausted"] = True
+                    merged.exhausted_sites.add(site_slug)
             except Exception as exc:
                 logger.warning("erotica search (%s) failed: %s", site_slug, exc)
+                site_stats[site_slug].update(
+                    ok=False, error=str(exc) or exc.__class__.__name__,
+                    exhausted=True,
+                )
+                merged.exhausted_sites.add(site_slug)
                 site_results = []
             for r in site_results:
                 r.setdefault("site", site_slug)
             merged.extend(site_results)
 
     if min_words_val:
-        merged = _filter_by_min_words(merged, min_words_val)
+        filtered = _filter_by_min_words(merged, min_words_val)
+        # Preserve the stats across the filter rebuild.
+        new_merged = ErotiCAResults(filtered)
+        new_merged.site_stats = site_stats
+        new_merged.exhausted_sites = merged.exhausted_sites
+        merged = new_merged
+    else:
+        merged.site_stats = site_stats
 
     # Stable ordering: by site first (alphabetical) then by title — so
     # users can scan results grouped by archive without the run order
