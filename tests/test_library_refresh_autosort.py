@@ -291,3 +291,103 @@ def test_apply_library_autosort_sets_routing_when_configured(
     assert args._library_autosort is True
     assert args._library_template == "{fandom}/{title}.{ext}"
     assert args._library_misc == "Other"
+
+
+# ── TTL skip ────────────────────────────────────────────────────
+
+
+def test_build_refresh_queue_ttl_skips_recently_probed(tmp_path: Path):
+    """A story whose last_probed stamp is inside the TTL window should
+    fall into ``skipped`` rather than the probe queue. The skip message
+    explicitly names the time-since-probe so the user can see why."""
+    from ffn_dl.library.index import LibraryIndex
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(lib, title="Recent", url="https://www.fanfiction.net/s/10/1/")
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    # Stamp the one story we just indexed as "probed 5 minutes ago".
+    idx = LibraryIndex.load(idx_path)
+    idx.mark_probed(lib, ["https://www.fanfiction.net/s/10"])
+    # mark_probed uses _now_iso() — that's "just now", well within a
+    # 1-hour TTL window, so the skip path should fire below.
+
+    messages: list[str] = []
+    queue, skipped = build_refresh_queue(
+        lib,
+        index_path=idx_path,
+        recheck_interval_s=60 * 60,
+        progress=messages.append,
+    )
+    assert queue == []
+    assert len(skipped) == 1
+    assert any("ago" in m and "force-recheck" in m for m in messages)
+
+
+def test_build_refresh_queue_ttl_zero_probes_everything(tmp_path: Path):
+    """TTL=0 (the CLI default) preserves the pre-TTL behaviour — every
+    indexed story lands in the probe queue regardless of last_probed."""
+    from ffn_dl.library.index import LibraryIndex
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(lib, title="Freshly probed", url="https://www.fanfiction.net/s/11/1/")
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    idx = LibraryIndex.load(idx_path)
+    idx.mark_probed(lib, ["https://www.fanfiction.net/s/11"])
+
+    queue, skipped = build_refresh_queue(
+        lib, index_path=idx_path, recheck_interval_s=0,
+    )
+    assert len(queue) == 1
+    assert skipped == []
+
+
+def test_build_refresh_queue_ttl_missing_last_probed_is_probed(tmp_path: Path):
+    """An indexed story without a last_probed stamp (never probed under
+    this build, or only scanned) must fall through to the probe queue
+    even with TTL set — we don't want a one-time scan to mask new work
+    from the first update-library run."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(lib, title="Unstamped", url="https://www.fanfiction.net/s/12/1/")
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+    # Deliberately skip mark_probed so last_probed stays absent.
+
+    queue, skipped = build_refresh_queue(
+        lib, index_path=idx_path, recheck_interval_s=60 * 60,
+    )
+    assert len(queue) == 1
+    assert skipped == []
+
+
+def test_mark_probed_survives_rescan(tmp_path: Path):
+    """LibraryIndex.record() preserves last_probed when a rescan rewrites
+    the entry. Without this, the post-update rescan after
+    --update-library would wipe the stamp we just set, defeating the
+    TTL on the very next run."""
+    from ffn_dl.library.index import LibraryIndex
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(lib, title="Sticky", url="https://www.fanfiction.net/s/13/1/")
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    idx = LibraryIndex.load(idx_path)
+    idx.mark_probed(
+        lib, ["https://www.fanfiction.net/s/13"],
+        timestamp="2026-04-19T12:00:00Z",
+    )
+
+    # Simulate the rescan that --update-library runs at the end.
+    scan(lib, index_path=idx_path)
+
+    reloaded = LibraryIndex.load(idx_path)
+    [(_url, entry)] = list(reloaded.stories_in(lib))
+    assert entry.get("last_probed") == "2026-04-19T12:00:00Z"

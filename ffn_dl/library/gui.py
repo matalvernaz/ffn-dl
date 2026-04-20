@@ -148,6 +148,17 @@ class LibraryDialog(wx.Dialog):
         self.update_btn.Bind(wx.EVT_BUTTON, self._on_check_updates)
         btn_row.Add(self.update_btn, 0, wx.RIGHT, 6)
 
+        self.force_update_btn = wx.Button(
+            panel, label="&Force Full Recheck",
+        )
+        self.force_update_btn.SetToolTip(
+            "Ignore the recent-check TTL and probe every indexed story."
+        )
+        self.force_update_btn.Bind(
+            wx.EVT_BUTTON, lambda e: self._on_check_updates(e, force=True),
+        )
+        btn_row.Add(self.force_update_btn, 0, wx.RIGHT, 6)
+
         self.review_btn = wx.Button(panel, label="Review &Ambiguous...")
         self.review_btn.Bind(wx.EVT_BUTTON, self._on_review)
         btn_row.Add(self.review_btn, 0, wx.RIGHT, 6)
@@ -215,6 +226,7 @@ class LibraryDialog(wx.Dialog):
         self.scan_btn.Enable(not busy)
         self.reorg_btn.Enable(not busy)
         self.update_btn.Enable(not busy)
+        self.force_update_btn.Enable(not busy)
         self.review_btn.Enable(not busy)
 
     def _post_status(self, line: str) -> None:
@@ -270,12 +282,17 @@ class LibraryDialog(wx.Dialog):
         self._append_status(f"Scan failed: {exc}")
         self._set_busy(False)
 
-    def _on_check_updates(self, event: wx.Event) -> None:
+    def _on_check_updates(self, event: wx.Event, *, force: bool = False) -> None:
         root = self._current_path()
         if root is None:
             return
         self._save_prefs()
-        self._append_status(f"Checking {root} for updates...")
+        if force:
+            self._append_status(
+                f"Forcing full recheck of {root} (ignoring recent-probe TTL)..."
+            )
+        else:
+            self._append_status(f"Checking {root} for updates...")
         self._set_busy(True)
 
         # Lazy-import cli inside the worker so the module-load graph
@@ -284,12 +301,21 @@ class LibraryDialog(wx.Dialog):
         def worker():
             try:
                 from .. import cli
+                from .index import LibraryIndex
+                from .refresh import DEFAULT_GUI_RECHECK_INTERVAL_S
                 from .scanner import scan as rescan
 
-                args = default_refresh_args()
+                recheck_interval = (
+                    0 if force else DEFAULT_GUI_RECHECK_INTERVAL_S
+                )
+                args = default_refresh_args(
+                    recheck_interval_s=recheck_interval,
+                    force_recheck=force,
+                )
                 probe_queue, skipped = build_refresh_queue(
                     root,
                     skip_complete=False,
+                    recheck_interval_s=recheck_interval,
                     progress=self._post_status,
                 )
                 if not probe_queue and not skipped:
@@ -305,6 +331,17 @@ class LibraryDialog(wx.Dialog):
                     label="Library update",
                     progress=self._post_status,
                 )
+
+                if probe_queue:
+                    try:
+                        idx = LibraryIndex.load()
+                        idx.mark_probed(
+                            root, [item["url"] for item in probe_queue],
+                        )
+                    except Exception as exc:
+                        self._post_status(
+                            f"Warning: could not record probe timestamps: {exc}"
+                        )
 
                 try:
                     rescan(root)

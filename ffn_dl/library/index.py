@@ -22,7 +22,8 @@ Schema is versioned. v1:
               "format": "epub|html|txt",
               "confidence": "high|medium|low",
               "chapter_count": N,
-              "last_checked": "<ISO-8601 UTC>"
+              "last_checked": "<ISO-8601 UTC>",
+              "last_probed": "<ISO-8601 UTC>"  # optional
             }
           },
           "untrackable": [
@@ -165,7 +166,18 @@ class LibraryIndex:
                     dupes.append(rel)
                 return False
 
-            lib["stories"][key] = {
+            # Preserve fields the scanner doesn't rewrite (last_probed,
+            # duplicate_relpaths) so a re-scan never forgets that the
+            # update path already hit the remote for this URL. Without
+            # this merge, rescan_library() after --update-library would
+            # wipe last_probed and defeat the TTL skip on the next run.
+            existing_preserved = {}
+            if existing is not None:
+                for k in ("last_probed", "duplicate_relpaths"):
+                    if k in existing:
+                        existing_preserved[k] = existing[k]
+
+            entry_record = {
                 "relpath": rel,
                 "title": md.title,
                 "author": md.author,
@@ -178,6 +190,8 @@ class LibraryIndex:
                 "chapter_count": md.chapter_count,
                 "last_checked": _now_iso(),
             }
+            entry_record.update(existing_preserved)
+            lib["stories"][key] = entry_record
             return True
 
         lib["untrackable"].append({
@@ -195,6 +209,29 @@ class LibraryIndex:
 
     def mark_scan_complete(self, root: Path) -> None:
         self._library(root)["last_scan"] = _now_iso()
+
+    def mark_probed(
+        self, root: Path, urls: list[str], *, timestamp: str | None = None,
+    ) -> int:
+        """Stamp ``last_probed`` for every URL in ``urls``.
+
+        Returns how many entries were actually updated — URLs absent
+        from the index (e.g. a story that got removed between probe
+        and stamp) are silently skipped. Saves once at the end so a
+        library-update pass does a single disk write rather than N.
+        """
+        stamp = timestamp or _now_iso()
+        stories = self._library(root)["stories"]
+        touched = 0
+        for url in urls:
+            entry = stories.get(url)
+            if entry is None:
+                continue
+            entry["last_probed"] = stamp
+            touched += 1
+        if touched:
+            self.save()
+        return touched
 
     def clear_library(self, root: Path) -> None:
         """Drop all entries for a library root. Used when the user

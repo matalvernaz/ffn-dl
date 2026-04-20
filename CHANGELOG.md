@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.20.15 — 2026-04-19
+
+### Add
+
+- **TTL skip for `--update-library` and GUI Check for Updates.** Big
+  libraries were slow to re-check because nothing was tracking which
+  stories had already been probed recently. Each index entry now
+  carries a `last_probed` timestamp, stamped after every successful
+  probe pass (both CLI and GUI paths), and `build_refresh_queue`
+  skips stories whose stamp is inside a caller-specified window.
+  - CLI: new `--recheck-interval SECONDS` flag on `--update-library`
+    (default `0` — probe everything, preserving prior behaviour), plus
+    `--force-recheck` as an explicit "ignore the TTL this run" switch.
+  - GUI: Check for Updates now defaults to a 1-hour TTL so a second
+    click five minutes later is near-instant. A new "Force Full
+    Recheck" button sits next to it for users who want every story
+    reprobed regardless of when it was last checked.
+- **`LibraryIndex.record` now preserves `last_probed` across rescan.**
+  Without this, the post-update rescan after `--update-library`
+  would wipe the stamp we'd just written and defeat the TTL on the
+  very next run. `duplicate_relpaths` is preserved by the same merge
+  logic.
+
 ## 1.20.14 — 2026-04-19
 
 ### Add

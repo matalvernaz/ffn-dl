@@ -1217,9 +1217,13 @@ def _handle_update_library(args: argparse.Namespace) -> None:
     mode_bits.append(f"{workers} probe worker{'s' if workers != 1 else ''}")
     mode = f" ({', '.join(mode_bits)})"
 
+    recheck_interval = 0 if args.force_recheck else int(
+        args.recheck_interval or 0
+    )
     probe_queue, skipped = build_refresh_queue(
         root_resolved,
         skip_complete=args.skip_complete,
+        recheck_interval_s=recheck_interval,
     )
     if not probe_queue and not skipped:
         print(
@@ -1240,6 +1244,21 @@ def _handle_update_library(args: argparse.Namespace) -> None:
         skipped_count=len(skipped),
         label="Library update",
     )
+
+    # Stamp last_probed for the URLs we actually touched so the next
+    # --update-library pass with a --recheck-interval can skip them.
+    # Done before the post-update rescan so a successful rescan picks
+    # up the stamp and carries it through into the refreshed entry.
+    if probe_queue and not args.dry_run:
+        try:
+            from .library.index import LibraryIndex
+            idx = LibraryIndex.load()
+            idx.mark_probed(
+                root_resolved, [item["url"] for item in probe_queue],
+            )
+        except (OSError, ValueError) as exc:
+            logger.debug("Failed to stamp last_probed", exc_info=True)
+            print(f"\nWarning: could not record probe timestamps: {exc}")
 
     # Refresh the index so chapter counts reflect any updates we just
     # applied. Cheap compared to the downloads themselves, and keeps
@@ -1523,6 +1542,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Concurrent chapter-count probes during --update-all "
             "(default: 5; set to 1 to serialise)"
+        ),
+    )
+    parser.add_argument(
+        "--recheck-interval",
+        type=int,
+        default=0,
+        metavar="SECONDS",
+        help=(
+            "With --update-library: skip stories whose index "
+            "last_probed timestamp is within SECONDS of now. Useful "
+            "when iterating on a big library — a value like 3600 "
+            "makes a second pass minutes later near-instant. "
+            "Default: 0 (probe every story)."
+        ),
+    )
+    parser.add_argument(
+        "--force-recheck",
+        action="store_true",
+        help=(
+            "With --update-library: ignore --recheck-interval and "
+            "probe every story. Equivalent to --recheck-interval 0."
         ),
     )
     parser.add_argument(
