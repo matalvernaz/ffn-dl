@@ -325,6 +325,21 @@ class LibraryDialog(wx.Dialog):
                     wx.CallAfter(self._update_finished)
                     return
 
+                # Surface the TTL decision up front so users who click
+                # Check for Updates twice in a row can see whether the
+                # recent-probe skip is firing (N stories in TTL) or
+                # whether they've hit a case where no entries have a
+                # ``last_probed`` stamp yet (fresh index / pre-TTL
+                # upgrade) and everything ends up queued.
+                if recheck_interval > 0:
+                    ttl_hours = recheck_interval / 3600
+                    self._post_status(
+                        f"TTL {ttl_hours:.1f}h: {len(skipped)} recently-"
+                        f"probed story(ies) skipped, {len(probe_queue)} "
+                        f"to probe. "
+                        f"(Click Force Full Recheck to ignore the TTL.)"
+                    )
+
                 cli._run_update_queue(
                     probe_queue, args, args.probe_workers,
                     skipped_count=len(skipped),

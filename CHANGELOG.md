@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.23.2 — 2026-04-20
+
+### Change
+
+- **Library update TTL raised from 1 hour to 6 hours.** One hour was
+  short enough that users who clicked Check for Updates, closed the
+  dialog, and came back a couple hours later hit a full re-probe
+  and assumed the TTL was broken. Six hours catches the "same
+  session" and "came back later today" cases without gatekeeping
+  next-morning probes. Force Full Recheck still bypasses, and the
+  CLI flag still takes any value.
+
+- **Check for Updates prints the TTL decision up front.** The
+  status pane now starts an update scan with a line like
+  ``TTL 6.0h: 183 recently-probed story(ies) skipped, 12 to probe.
+  (Click Force Full Recheck to ignore the TTL.)`` so it's obvious
+  whether the skip is firing or everything's getting queued because
+  no entries have a ``last_probed`` stamp yet (common on the first
+  probe after a fresh scan or an upgrade from a pre-TTL version).
+
 ## 1.23.1 — 2026-04-20
 
 ### Fix

@@ -198,15 +198,16 @@ def build_refresh_queue(
     return probe_queue, skipped
 
 
-DEFAULT_GUI_RECHECK_INTERVAL_S = 60 * 60
+DEFAULT_GUI_RECHECK_INTERVAL_S = 6 * 60 * 60
 """TTL the GUI's Check for Updates flow passes by default.
 
-One hour balances two use cases: a user who just ran a check and
-notices a missed story can retry without waiting, and a user who
-reopens the dialog a few minutes later after adjusting settings
-doesn't burn minutes re-probing everything they just probed. The
-Force Full Recheck button bypasses it when the user genuinely wants
-a fresh probe of the whole library.
+Six hours rather than one because real-world usage clusters into
+"open the dialog, poke around, close it, come back later today" —
+one-hour expiry was short enough that users who clicked the button
+again after lunch got a surprise full re-probe. Force Full Recheck
+still bypasses the TTL when the user genuinely wants a fresh sweep
+(e.g., suspecting the upstream site changed its chapter count
+detection); the CLI's --recheck-interval flag accepts any value.
 """
 
 
