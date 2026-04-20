@@ -927,7 +927,7 @@ class FFNScraper(BaseScraper):
         story_url = f"{FFN_BASE}/s/{story_id}"
 
         ch1_url = f"{story_url}/1"
-        logger.info("Fetching story metadata...")
+        logger.info("Fetching FFN story %s metadata...", story_id)
         page = self._fetch(ch1_url)
         soup = BeautifulSoup(page, "lxml")
 
@@ -935,6 +935,10 @@ class FFNScraper(BaseScraper):
         num_chapters = meta["num_chapters"]
         chapter_titles = meta["chapter_titles"]
         self._save_meta_cache(story_id, meta)
+        logger.info(
+            "Downloading FFN %s: %r by %s (%d chapters)",
+            story_id, meta["title"], meta["author"], num_chapters,
+        )
 
         story = Story(
             id=story_id,

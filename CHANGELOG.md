@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.23.6 — 2026-04-20
+
+### Diagnostics
+
+- **Tag FFN log lines with the story ID and title.** Batch runs
+  (``--update-all``, multi-story CLI calls) previously emitted a
+  bare ``Fetching story metadata...`` followed by ``Fetching chapter
+  N/M`` with no hint of which story was in flight — so if chapter 50
+  was the one 403-looping, you couldn't tell what to retry by hand.
+  Metadata line now prints the story ID up front, and once the meta
+  parse lands we log a single ``Downloading FFN <id>: <title> by
+  <author> (<N> chapters)`` header before the chapter loop starts.
+  AO3 already did this; other scrapers (FicWad, etc.) still don't.
+
 ## 1.23.5 — 2026-04-20
 
 ### Diagnostics
