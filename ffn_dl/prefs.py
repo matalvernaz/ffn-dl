@@ -34,6 +34,11 @@ KEY_LIBRARY_INDEX_PATH = "library_index_path"  # blank → program config dir
 KEY_LIBRARY_MISC_FOLDER = "library_misc_folder"
 KEY_LIBRARY_AMBIGUOUS_PROMPT = "library_ambiguous_prompt"
 KEY_LIBRARY_REORGANIZE_CONFIRM_EACH = "library_reorganize_confirm_each"
+# Has the GUI already offered the user the one-time "your scanned
+# library is the obvious default download folder, want to use it?"
+# prompt. Flipped to True on the first answer (yes or no); we never
+# re-ask so users who opt out aren't nagged on every launch.
+KEY_LIBRARY_DEFAULT_PROMPTED = "library_default_prompted"
 # Per-tab JSON blobs: {"query": "...", "filters": {key: value, ...}}
 KEY_SEARCH_STATE_FFN = "search_state_ffn"
 KEY_SEARCH_STATE_AO3 = "search_state_ao3"

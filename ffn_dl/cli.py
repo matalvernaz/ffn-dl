@@ -959,6 +959,7 @@ def _run_update_queue(
     label: str = "Update-all",
     progress=print,
     on_probe_complete=None,
+    cancel_event: "threading.Event | None" = None,
 ) -> int:
     """Run the probe + download cycle on a pre-built queue.
 
@@ -978,6 +979,13 @@ def _run_update_queue(
     Failures are not reported because the TTL should allow a retry
     on the next update. Runs from inside the probe thread pool, so
     the callback must be thread-safe.
+
+    ``cancel_event`` (optional) is a ``threading.Event`` the caller
+    may set to request an early, cooperative abort — worker probes
+    short-circuit to a "cancelled" outcome and Phase 3 breaks before
+    starting the next story. Used by the GUI's library window so
+    closing it mid-run stops upstream traffic instead of leaving a
+    zombie worker grinding for another hour.
 
     Returns the exit code: 0 on success, 1 if any story failed.
     """
@@ -1022,6 +1030,14 @@ def _run_update_queue(
         completed_count = [0]
 
         def probe_entry(scraper, entry):
+            # Caller-requested abort: drop out before the HTTP call so
+            # closing the library window doesn't keep hammering upstream.
+            if cancel_event is not None and cancel_event.is_set():
+                entry["error"] = "cancelled"
+                entry["cancelled"] = True
+                with probe_progress_lock:
+                    completed_count[0] += 1
+                return
             # ``probe_answered`` = we got a definitive answer from upstream,
             # whether the story exists (chapter count) or is confirmed gone
             # (StoryNotFoundError). Both deserve a ``last_probed`` stamp so
@@ -1117,9 +1133,19 @@ def _run_update_queue(
     total = len(probe_queue)
     cancelled = False
     for i, entry in enumerate(probe_queue, 1):
+        # Cooperative cancel: don't start another story once the caller
+        # has asked us to stop. Announced once per run so the status
+        # pane reflects why the loop terminated early.
+        if cancel_event is not None and cancel_event.is_set():
+            progress(f"\n{label} cancelled by user.")
+            cancelled = True
+            break
         rel = entry["rel"]
         progress(f"[{i}/{total}] {rel}")
 
+        if entry.get("cancelled"):
+            progress(f"  Cancelled before probe.")
+            continue
         if "error" in entry:
             progress(f"  Probe failed: {entry['error']}")
             failed.append(rel)

@@ -102,6 +102,12 @@ class MainFrame(wx.Frame):
         # site_key → open SearchFrame (lazy-created on first menu invocation)
         self._search_frames = {}
         self._watchlist_frame = None
+        self._library_frame = None
+        # Per-session record of fandom-subfolder create decisions:
+        # fandom-folder name → True (create) / False (don't create).
+        # Re-asked every launch so the user stays in control if they
+        # rearrange folders by hand between sessions.
+        self._fandom_folder_decisions: dict[str, bool] = {}
         self._log_queue = deque()
         self._log_lock = threading.Lock()
         self._build_ui()
@@ -109,6 +115,9 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_CLOSE, self._on_close)
         self.Centre()
         self._start_update_check()
+        # Deferred so the main window paints first — a modal dialog
+        # popping up during the paint cycle looks like a crash.
+        wx.CallAfter(self._maybe_offer_library_as_default)
         self._start_watchlist_poller()
 
     def _build_ui(self):
@@ -684,6 +693,13 @@ class MainFrame(wx.Frame):
         out = self.prefs.get(_p.KEY_OUTPUT_DIR)
         if out:
             self.output_ctrl.SetValue(out)
+        else:
+            # No explicit save location stored yet — if the user has a
+            # configured library, default to its root so fandom-folder
+            # auto-routing kicks in immediately on the first download.
+            library_root = (self.prefs.get(_p.KEY_LIBRARY_PATH, "") or "").strip()
+            if library_root:
+                self.output_ctrl.SetValue(library_root)
 
         self.hr_stars_ctrl.SetValue(self.prefs.get_bool(_p.KEY_HR_AS_STARS))
         self.strip_notes_ctrl.SetValue(self.prefs.get_bool(_p.KEY_STRIP_NOTES))
@@ -1370,9 +1386,171 @@ class MainFrame(wx.Frame):
         from .sites import detect_scraper
         return detect_scraper(url)()
 
+    def _resolve_output_dir(self, story, fmt: str) -> str:
+        """Pick the save folder for ``story``, auto-routing into the
+        library's fandom subfolder when the user's Save-to folder
+        matches the configured library root.
+
+        Mirrors the CLI's ``_apply_library_autosort`` +
+        ``_library_subdir_for`` behaviour so library-wide downloads
+        sort the same way whether you start them from the GUI or the
+        command line. If a fandom subfolder is missing, the user is
+        asked once per-session before we create it — the answer is
+        cached on ``_fandom_folder_decisions`` so subsequent downloads
+        of the same fandom don't re-prompt.
+        """
+        from . import cli, prefs as _p
+
+        raw_output = (self.output_ctrl.GetValue() or "").strip()
+        if not raw_output:
+            return raw_output
+        base = Path(raw_output).expanduser()
+
+        library_raw = (self.prefs.get(_p.KEY_LIBRARY_PATH, "") or "").strip()
+        if not library_raw:
+            return str(base)
+        library_root = Path(library_raw).expanduser()
+        try:
+            same_root = base.resolve() == library_root.resolve()
+        except OSError:
+            same_root = str(base) == str(library_root)
+        if not same_root:
+            return str(base)
+
+        from types import SimpleNamespace
+        args_like = SimpleNamespace(
+            output=str(library_root),
+            _library_autosort=True,
+            _library_template=(
+                self.prefs.get(_p.KEY_LIBRARY_PATH_TEMPLATE)
+                or "{fandom}/{title} - {author}.{ext}"
+            ),
+            _library_misc=(
+                self.prefs.get(_p.KEY_LIBRARY_MISC_FOLDER) or "Misc"
+            ),
+            format=fmt,
+        )
+        subdir = cli._library_subdir_for(story, args_like)
+        if subdir is None or str(subdir) in ("", "."):
+            return str(library_root)
+
+        target = library_root / subdir
+        if target.is_dir():
+            return str(target)
+
+        # First-time fandom: ask the user before creating the folder.
+        # Cache their answer (per-fandom, per-session) so we don't
+        # re-ask on the second Harry Potter fic of the session.
+        fandom_key = str(subdir)
+        decision = self._fandom_folder_decisions.get(fandom_key)
+        if decision is None:
+            decision = self._ask_create_fandom_folder(fandom_key, target)
+            self._fandom_folder_decisions[fandom_key] = decision
+        if decision:
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                return str(target)
+            except OSError as exc:
+                self._log(
+                    f"Could not create {target}: {exc}. "
+                    "Saving into library root instead."
+                )
+        return str(library_root)
+
+    def _ask_create_fandom_folder(self, fandom_key: str, target) -> bool:
+        """Prompt the user to create a missing fandom subfolder.
+
+        Runs on the main thread — every download worker funnels through
+        ``_export_story`` via ``wx.CallAfter``-scheduled callbacks, but
+        the export itself happens from the worker, so we marshal the
+        message box explicitly. Returns True if the user accepted.
+        """
+        import threading as _th
+
+        answer = {"value": False}
+        done = _th.Event()
+
+        def prompt():
+            choice = wx.MessageBox(
+                f"Create folder '{fandom_key}' for this fandom?\n\n"
+                f"Full path:\n{target}",
+                "New fandom folder",
+                wx.YES_NO | wx.ICON_QUESTION,
+                self,
+            )
+            answer["value"] = choice == wx.YES
+            done.set()
+
+        if wx.IsMainThread():
+            prompt()
+        else:
+            wx.CallAfter(prompt)
+            done.wait()
+        return answer["value"]
+
+    def _maybe_offer_library_as_default(self) -> None:
+        """One-time offer: if the user has scanned a library but hasn't
+        set it as their default download folder, ask once.
+
+        Silent no-op in every other case: already asked, already set,
+        no library scanned, no scanned root with stories. The pref
+        flag is flipped regardless of the user's answer so we don't
+        nag on every launch.
+        """
+        from . import prefs as _p
+
+        if self.prefs.get_bool(_p.KEY_LIBRARY_DEFAULT_PROMPTED):
+            return
+        if (self.prefs.get(_p.KEY_LIBRARY_PATH, "") or "").strip():
+            return
+        try:
+            from .library.index import LibraryIndex
+        except Exception:
+            return
+        try:
+            idx = LibraryIndex.load()
+            roots = idx.library_roots()
+        except Exception:
+            return
+        # Pick the root with the most tracked stories — that's
+        # overwhelmingly the user's real library even if they poked
+        # one-off scans elsewhere.
+        best_root: str | None = None
+        best_count = 0
+        for root_str in roots:
+            try:
+                count = sum(1 for _ in idx.stories_in(Path(root_str)))
+            except Exception:
+                count = 0
+            if count > best_count:
+                best_count = count
+                best_root = root_str
+        if not best_root or best_count == 0:
+            return
+
+        choice = wx.MessageBox(
+            (
+                f"You have a scanned library at:\n\n{best_root}\n\n"
+                f"({best_count} tracked stor"
+                f"{'y' if best_count == 1 else 'ies'})\n\n"
+                "Use this folder as your default save location so new "
+                "downloads sort into the right fandom folder "
+                "automatically?"
+            ),
+            "ffn-dl — Set library as default?",
+            wx.YES_NO | wx.ICON_QUESTION,
+            self,
+        )
+        self.prefs.set_bool(_p.KEY_LIBRARY_DEFAULT_PROMPTED, True)
+        if choice == wx.YES:
+            self.prefs.set(_p.KEY_LIBRARY_PATH, best_root)
+            self.output_ctrl.SetValue(best_root)
+            self.prefs.set(_p.KEY_OUTPUT_DIR, best_root)
+            self._log(f"Library root set: {best_root}")
+
     def _export_story(self, story):
         fmt = self.format_ctrl.GetString(self.format_ctrl.GetSelection())
-        output_dir = self.output_ctrl.GetValue()
+        output_dir = self._resolve_output_dir(story, fmt)
         template = self.name_ctrl.GetValue()
         hr_as_stars = self.hr_stars_ctrl.GetValue()
         strip_notes = self.strip_notes_ctrl.GetValue()
@@ -1846,18 +2024,32 @@ class MainFrame(wx.Frame):
             self._watchlist_poller.reconfigure()
 
     def _on_library_menu(self, event):
-        """Open the library-management dialog.
+        """Open the library-management window (non-modal).
 
-        Lazy import keeps gui.py's startup cost unaffected for users
-        who never touch the library features.
+        Modeless so users can kick off a scan or update run and flip
+        back to the main window to download something else in the
+        meantime. Lazy import keeps gui.py's startup cost unaffected
+        for users who never touch the library features.
         """
-        from .library.gui import LibraryDialog
+        if self._library_frame is not None:
+            try:
+                self._library_frame.Raise()
+                self._library_frame.SetFocus()
+                return
+            except RuntimeError:
+                # Frame was destroyed without going through our
+                # closed-notify callback — reset and open a fresh one.
+                self._library_frame = None
 
-        dlg = LibraryDialog(self, self.prefs)
-        try:
-            dlg.ShowModal()
-        finally:
-            dlg.Destroy()
+        from .library.gui import LibraryFrame
+
+        frame = LibraryFrame(self, self.prefs)
+        self._library_frame = frame
+        frame.Show()
+
+    def _notify_library_frame_closed(self):
+        """Called by LibraryFrame._on_close so the menu reopens cleanly."""
+        self._library_frame = None
 
     def _on_watchlist_menu(self, event):
         """Open the watchlist manager (non-modal). Reuses the same

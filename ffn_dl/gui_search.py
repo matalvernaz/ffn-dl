@@ -338,11 +338,18 @@ class SearchFrame(wx.Frame):
             wx.StaticText(panel, label="&Results:"),
             0, wx.LEFT | wx.TOP, pad,
         )
+        # Multi-select + native checkboxes. Each Title cell also carries a
+        # leading ``[x] `` / ``[ ] `` prefix that mirrors the tick state —
+        # the wxPython ListCtrl checkbox's MSAA reporting is unreliable
+        # with NVDA (same issue as the CheckListBox pattern noted in
+        # CLAUDE.md), so the prefix is the source of truth a screen
+        # reader actually hears. Space toggles the focused row.
         self.results_ctrl = wx.ListCtrl(
             panel,
-            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SUNKEN,
+            style=wx.LC_REPORT | wx.BORDER_SUNKEN,
         )
         self.results_ctrl.SetName(f"{self.spec['label']} results")
+        self.results_ctrl.EnableCheckBoxes(True)
         for i, (col_label, width) in enumerate(_SEARCH_COLUMNS):
             self.results_ctrl.InsertColumn(i, col_label, width=width)
         self.results_ctrl.Bind(
@@ -351,6 +358,13 @@ class SearchFrame(wx.Frame):
         self.results_ctrl.Bind(
             wx.EVT_LIST_ITEM_ACTIVATED, lambda e: self._on_result_activated(),
         )
+        self.results_ctrl.Bind(
+            wx.EVT_LIST_ITEM_CHECKED, self._on_result_checked,
+        )
+        self.results_ctrl.Bind(
+            wx.EVT_LIST_ITEM_UNCHECKED, self._on_result_checked,
+        )
+        self.results_ctrl.Bind(wx.EVT_CHAR_HOOK, self._on_results_char_hook)
         sizer.Add(self.results_ctrl, 1, wx.EXPAND | wx.ALL, pad)
 
         # Summary
@@ -467,17 +481,21 @@ class SearchFrame(wx.Frame):
 
     def apply_busy(self, busy):
         self.search_btn.Enable(not busy)
-        has_selection = self.results_ctrl.GetFirstSelected() != -1
-        selected_is_series = False
-        if has_selection:
-            idx = self.results_ctrl.GetFirstSelected()
-            if 0 <= idx < len(self.results):
-                selected_is_series = bool(
-                    self.results[idx].get("is_series")
-                )
-        self.search_dl_btn.Enable(not busy and has_selection)
+        has_ticked = bool(self._checked_rows())
+        focused_idx = self.results_ctrl.GetFirstSelected()
+        has_focus = focused_idx != -1
+        focused_is_series = False
+        if has_focus and 0 <= focused_idx < len(self.results):
+            focused_is_series = bool(
+                self.results[focused_idx].get("is_series")
+            )
+        # Download button fires on ticked rows first, else on the
+        # focused row — either way needs something to act on.
+        self.search_dl_btn.Enable(not busy and (has_ticked or has_focus))
+        # Show Parts is only meaningful for a single series row; it
+        # ignores ticks and works off the focused row.
         self.show_parts_btn.Enable(
-            not busy and has_selection and selected_is_series
+            not busy and has_focus and focused_is_series
         )
         self.load_more_btn.Enable(not busy and self.last_query is not None)
         # Pick-Multiple is enabled whenever we have at least one
@@ -683,7 +701,8 @@ class SearchFrame(wx.Frame):
             ctrl.DeleteAllItems()
             for r in self.results:
                 row = ctrl.InsertItem(
-                    ctrl.GetItemCount(), self._result_title(r),
+                    ctrl.GetItemCount(),
+                    self._prefixed_title(r, checked=False),
                 )
                 # Column 1 = Site. For per-site frames (FFN, AO3, …)
                 # the scraper populates ``site`` only on erotica
@@ -767,12 +786,61 @@ class SearchFrame(wx.Frame):
         if failed:
             self._log("  failures — " + "; ".join(failed))
 
+    # Screen-reader affordance: the Title cell always shows the
+    # current tick state so NVDA reads "[x] …" / "[ ] …" as part of
+    # the row instead of relying on the MSAA checkbox announcement
+    # that is known to be flaky.
+    _CHECKED_PREFIX = "[x] "
+    _UNCHECKED_PREFIX = "[ ] "
+
     @staticmethod
     def _result_title(r):
         if r.get("is_series"):
             parts = len(r.get("series_parts") or [])
             return f"[Series · {parts} part(s)] {r['title']}"
         return r.get("title", "")
+
+    @classmethod
+    def _prefixed_title(cls, r, *, checked: bool) -> str:
+        prefix = cls._CHECKED_PREFIX if checked else cls._UNCHECKED_PREFIX
+        return prefix + cls._result_title(r)
+
+    def _refresh_title_prefix(self, row: int) -> None:
+        if not (0 <= row < len(self.results)):
+            return
+        self.results_ctrl.SetItem(
+            row, 0,
+            self._prefixed_title(
+                self.results[row],
+                checked=self.results_ctrl.IsItemChecked(row),
+            ),
+        )
+
+    def _checked_rows(self) -> list[int]:
+        return [
+            i for i in range(self.results_ctrl.GetItemCount())
+            if self.results_ctrl.IsItemChecked(i)
+        ]
+
+    def _on_result_checked(self, event):
+        self._refresh_title_prefix(event.GetIndex())
+        # Refresh download-button enable state — going from zero ticks
+        # to one should enable it even if no row is wx-selected.
+        self.apply_busy(bool(self.main_frame._downloading))
+        event.Skip()
+
+    def _on_results_char_hook(self, event):
+        # wxPython's native space-to-toggle on EnableCheckBoxes is
+        # flaky across platforms; binding it explicitly guarantees
+        # keyboard users can tick the focused row. EVT_LIST_ITEM_CHECKED
+        # still fires so the [x] prefix stays consistent.
+        if event.GetKeyCode() == wx.WXK_SPACE:
+            row = self.results_ctrl.GetFocusedItem()
+            if 0 <= row < self.results_ctrl.GetItemCount():
+                new_state = not self.results_ctrl.IsItemChecked(row)
+                self.results_ctrl.CheckItem(row, new_state)
+                return
+        event.Skip()
 
     def _on_result_select(self, event):
         idx = event.GetIndex()
@@ -794,19 +862,31 @@ class SearchFrame(wx.Frame):
             else:
                 self.summary_ctrl.SetValue(summary or "(no summary)")
                 self.show_parts_btn.Disable()
-            self.search_dl_btn.Enable(not self.main_frame._downloading)
+            # Delegated to apply_busy so ticks and focus both feed into
+            # one consistent rule set.
+            self.apply_busy(self.main_frame._downloading)
         event.Skip()
 
     def _on_search_download(self):
-        idx = self.results_ctrl.GetFirstSelected()
+        if self.main_frame._downloading:
+            return
+        ticked = self._checked_rows()
+        if len(ticked) > 1:
+            self._download_batch([self.results[i] for i in ticked])
+            return
+        # Zero or one ticks: act on the tick if present, otherwise on
+        # the focused row. Preserves the "arrow down, press Download"
+        # flow for users who don't care about multi-select.
+        if ticked:
+            idx = ticked[0]
+        else:
+            idx = self.results_ctrl.GetFirstSelected()
         if idx < 0 or idx >= len(self.results):
             return
         picked = self.results[idx]
         url = picked.get("url")
         if not url:
             self._log("Error: selected result has no URL.")
-            return
-        if self.main_frame._downloading:
             return
         self.main_frame._set_busy(True, kind="download")
         if picked.get("is_series"):
@@ -838,6 +918,33 @@ class SearchFrame(wx.Frame):
                 target=self.main_frame._run_download,
                 args=(url,), daemon=True,
             ).start()
+
+    def _download_batch(self, rows: list[dict]) -> None:
+        """Download every ticked row as a batch.
+
+        Series rows flatten into their parts — same policy as
+        ``_on_pick_multiple`` — so a user who ticks one standalone row
+        and one series row gets every part of the series plus the
+        standalone story, all in one queued batch.
+        """
+        urls: list[str] = []
+        for r in rows:
+            if r.get("is_series") and r.get("series_parts"):
+                for part in r["series_parts"]:
+                    if part.get("url"):
+                        urls.append(part["url"])
+            elif r.get("url"):
+                urls.append(r["url"])
+        if not urls:
+            self._log("Nothing downloadable in the ticked rows.")
+            return
+        self.main_frame._set_busy(True, kind="download")
+        self._log(f"Starting batch download of {len(urls)} ticked stories.")
+        threading.Thread(
+            target=self.main_frame._run_picked_batch,
+            args=(urls, self.site_key),
+            daemon=True,
+        ).start()
 
     def _on_result_activated(self):
         # Enter/double-click: series rows open the parts dialog so

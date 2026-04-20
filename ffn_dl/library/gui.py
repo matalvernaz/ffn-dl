@@ -40,25 +40,38 @@ _TEMPLATE_HINT = (
 )
 
 
-class LibraryDialog(wx.Dialog):
-    """Hub for library settings + scan/reorganize actions."""
+class LibraryFrame(wx.Frame):
+    """Hub for library settings + scan/reorganize actions.
+
+    Modeless so a scan or update run can be launched and the main
+    window stays interactive — the user can start downloading a new
+    story while the library check grinds on in the background.
+    """
 
     def __init__(self, parent: wx.Window, prefs):
         super().__init__(
             parent,
             title="Library",
-            size=(640, 440),
-            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+            size=(640, 460),
+            style=wx.DEFAULT_FRAME_STYLE,
         )
         self._prefs = prefs
         # _alive guards worker-thread callbacks — they fire through
-        # wx.CallAfter and can land after the dialog is destroyed
+        # wx.CallAfter and can land after the window is destroyed
         # (user closed it mid-scan). EVT_CLOSE flips the flag before
         # wx tears down the widgets.
         self._alive = True
+        # Cancel plumbing for the long Check-for-Updates run. The flag
+        # stays None except while a worker is alive; the worker owns
+        # the corresponding ``threading.Event`` and polls it between
+        # probes and between downloads.
+        self._update_cancel_event: threading.Event | None = None
+        self._update_running = False
         self.Bind(wx.EVT_CLOSE, self._on_close_event)
         self._build_ui()
         self._load_prefs()
+        # Escape closes the window (mirrors the old dialog affordance).
+        self._install_escape_accel()
 
     # ── UI construction ────────────────────────────────────────
 
@@ -185,6 +198,14 @@ class LibraryDialog(wx.Dialog):
         self.review_btn.Bind(wx.EVT_BUTTON, self._on_review)
         btn_row.Add(self.review_btn, 0, wx.RIGHT, 6)
 
+        # Cancel button sits next to Check for Updates so the stop
+        # action is adjacent to the start action. Disabled unless a
+        # run is in flight.
+        self.cancel_btn = wx.Button(panel, label="Ca&ncel Update")
+        self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel_update)
+        self.cancel_btn.Disable()
+        btn_row.Add(self.cancel_btn, 0, wx.RIGHT, 6)
+
         btn_row.AddStretchSpacer(1)
 
         close_btn = wx.Button(panel, id=wx.ID_CLOSE, label="&Close")
@@ -193,7 +214,6 @@ class LibraryDialog(wx.Dialog):
         sizer.Add(btn_row, 0, wx.EXPAND | wx.ALL, 8)
 
         panel.SetSizer(sizer)
-        self.SetEscapeId(wx.ID_CLOSE)
 
     # ── Preference plumbing ────────────────────────────────────
 
@@ -251,6 +271,25 @@ class LibraryDialog(wx.Dialog):
         self.force_recheck_chk.Enable(not busy)
         self.refetch_all_chk.Enable(not busy)
         self.review_btn.Enable(not busy)
+        # Cancel is only useful while an update run is live; scan and
+        # reorganize are short-lived phase-2-only operations so they
+        # don't wire into cancel_event at all.
+        self.cancel_btn.Enable(busy and self._update_running)
+
+    def _install_escape_accel(self) -> None:
+        """Make Escape close the frame, same affordance the old dialog had."""
+        close_id = wx.NewIdRef()
+        self.Bind(wx.EVT_MENU, lambda e: self.Close(), id=int(close_id))
+        self.SetAcceleratorTable(wx.AcceleratorTable([
+            (wx.ACCEL_NORMAL, wx.WXK_ESCAPE, int(close_id)),
+        ]))
+
+    def _on_cancel_update(self, event: wx.Event) -> None:
+        if self._update_cancel_event is None or not self._update_running:
+            return
+        self._update_cancel_event.set()
+        self._append_status("Cancel requested — finishing current step...")
+        self.cancel_btn.Disable()
 
     def _post_status(self, line: str) -> None:
         """Thread-safe status-pane append. Used as the progress callback
@@ -343,7 +382,13 @@ class LibraryDialog(wx.Dialog):
             )
         else:
             self._append_status(f"Checking {root} for updates...")
+        # Fresh cancel event per run — creating it up here so the
+        # worker closure captures the exact instance the Cancel button
+        # toggles.
+        self._update_cancel_event = threading.Event()
+        self._update_running = True
         self._set_busy(True)
+        cancel_event = self._update_cancel_event
 
         # Lazy-import cli inside the worker so the module-load graph
         # stays library-independent (cli imports library, not the
@@ -451,6 +496,7 @@ class LibraryDialog(wx.Dialog):
                     label="Library update",
                     progress=self._post_status,
                     on_probe_complete=on_probe_complete,
+                    cancel_event=cancel_event,
                 )
 
                 # Final flush picks up the trailing <25 stamps that
@@ -472,6 +518,8 @@ class LibraryDialog(wx.Dialog):
         threading.Thread(target=worker, daemon=True).start()
 
     def _update_finished(self) -> None:
+        self._update_running = False
+        self._update_cancel_event = None
         if not self._alive:
             return
         self._set_busy(False)
@@ -578,22 +626,46 @@ class LibraryDialog(wx.Dialog):
         self._set_busy(False)
 
     def _on_close_event(self, event: wx.Event) -> None:
+        # Mid-run close: confirm so the user isn't surprised when a
+        # library update they kicked off evaporates. Veto the close if
+        # they back out. If they say yes, flip the cancel flag so the
+        # worker stops promptly; the close proceeds and the worker
+        # threads finish out against a dead window (all their
+        # callbacks are _alive-guarded).
+        if self._update_running and self._update_cancel_event is not None:
+            can_veto = event.CanVeto()
+            choice = wx.MessageBox(
+                "An update check is still running. Cancel it and close?",
+                "Library — Update in progress",
+                wx.YES_NO | wx.ICON_QUESTION, self,
+            )
+            if choice != wx.YES:
+                if can_veto:
+                    event.Veto()
+                    return
+            else:
+                self._update_cancel_event.set()
         # Flip the alive flag before wx starts tearing down widgets so
         # any worker callback queued through wx.CallAfter sees a dead
-        # dialog and bails instead of touching destroyed controls.
+        # window and bails instead of touching destroyed controls.
         self._alive = False
         self._save_prefs()
-        # The dialog is opened via ShowModal() (see gui.MainFrame's
-        # library menu handler), so the Close button / window X /
-        # Escape key all need to end the modal loop explicitly —
-        # ``event.Skip()`` on its own lets wx destroy the window but
-        # leaves the caller's ShowModal() blocked, which is what made
-        # the Close button feel inert. EndModal is a no-op for
-        # modeless callers, so this path stays safe either way.
-        if self.IsModal():
-            self.EndModal(wx.ID_CLOSE)
-        else:
-            event.Skip()
+        # Let the main frame drop its reference so the menu item can
+        # reopen cleanly next time.
+        parent = self.GetParent()
+        notify = getattr(parent, "_notify_library_frame_closed", None)
+        if callable(notify):
+            try:
+                notify()
+            except Exception:
+                pass
+        event.Skip()
+
+
+# Backward-compat alias: older code (and tests) imported ``LibraryDialog``.
+# The class is now a Frame but we keep the old name as a pointer so any
+# lingering references keep resolving.
+LibraryDialog = LibraryFrame
 
 
 class ReorganizePreviewDialog(wx.Dialog):

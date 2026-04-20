@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.23.15 — 2026-04-20
+
+### Feature
+
+- **Search results are now tickable.** Every site's search frame now
+  shows a native checkbox plus a ``[x]`` / ``[ ]`` prefix on the
+  Title column so NVDA announces the selection state clearly. Space
+  toggles the focused row, and "Download Selected" now downloads
+  every ticked row as a batch instead of just the single
+  arrow-highlighted one. Falls back to the focused row when nothing
+  is ticked, so the old "arrow down and press Download" flow still
+  works unchanged.
+
+- **GUI downloads auto-sort into library fandom folders.** When the
+  Save-to folder matches the configured library root, new downloads
+  drop into ``<library>/<fandom>/`` using the same template the CLI
+  already uses for ``--update-all``. First time a fandom is needed
+  the GUI asks before creating the folder; later downloads of the
+  same fandom skip the prompt. On first launch after scanning a
+  library, the GUI offers once to promote the library root to the
+  default save location so the auto-routing takes effect without
+  any pref-digging.
+
+### Change
+
+- **Library manager is now modeless.** The window no longer blocks
+  the rest of the app — you can kick off a library update and keep
+  downloading new stories from the main window while it runs.
+  Re-opening the menu item raises the existing window instead of
+  stacking duplicates. Matches the Watchlist window's model.
+
+- **Library update check is cancellable.** A new "Cancel Update"
+  button next to "Check for Updates" stops the probe + download run
+  cooperatively: in-flight probes short-circuit, Phase 3 breaks
+  between stories. Closing the library window mid-run now prompts
+  ("An update check is still running — cancel it and close?") so
+  users aren't surprised when a background run keeps hammering
+  upstream after the window is gone.
+
 ## 1.23.13 — 2026-04-20
 
 ### Change
