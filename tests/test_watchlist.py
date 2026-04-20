@@ -437,6 +437,41 @@ def test_disabled_watches_are_skipped(tmp_path):
     assert spy.calls == []
 
 
+def test_run_once_watch_ids_filter_polls_only_selected(tmp_path):
+    store = WatchlistStore(tmp_path / "w.json")
+    kept = Watch(
+        type=WATCH_TYPE_STORY,
+        target="https://example/works/1",
+        channels=["pushover"],
+        last_seen=5,
+    )
+    skipped = Watch(
+        type=WATCH_TYPE_STORY,
+        target="https://example/works/2",
+        channels=["pushover"],
+        last_seen=5,
+    )
+    store.add(kept)
+    store.add(skipped)
+
+    polled_urls: list[str] = []
+
+    class _RecordingScraper:
+        def get_chapter_count(self, url):
+            polled_urls.append(url)
+            return 5
+
+    results = run_once(
+        store, _FakePrefs(),
+        watch_ids={kept.id},
+        scraper_factory=lambda url: _RecordingScraper(),
+        notifier=_NotifierSpy(),
+    )
+
+    assert [r.watch_id for r in results] == [kept.id]
+    assert polled_urls == ["https://example/works/1"]
+
+
 def test_scraper_exception_is_captured_not_raised(tmp_path):
     store = WatchlistStore(tmp_path / "w.json")
     store.add(Watch(

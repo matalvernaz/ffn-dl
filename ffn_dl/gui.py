@@ -100,6 +100,7 @@ class MainFrame(wx.Frame):
         self._last_clip = ""
         # site_key → open SearchFrame (lazy-created on first menu invocation)
         self._search_frames = {}
+        self._watchlist_frame = None
         self._log_queue = deque()
         self._log_lock = threading.Lock()
         self._build_ui()
@@ -1639,6 +1640,13 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_library_menu, library_item)
         bar.Append(library_menu, "&Library")
 
+        watchlist_menu = wx.Menu()
+        watchlist_item = watchlist_menu.Append(
+            wx.ID_ANY, "&Manage watchlist...\tCtrl+W",
+        )
+        self.Bind(wx.EVT_MENU, self._on_watchlist_menu, watchlist_item)
+        bar.Append(watchlist_menu, "&Watchlist")
+
         view_menu = wx.Menu()
         log_submenu = wx.Menu()
         self._log_level_items = {}
@@ -1775,6 +1783,30 @@ class MainFrame(wx.Frame):
             dlg.ShowModal()
         finally:
             dlg.Destroy()
+
+    def _on_watchlist_menu(self, event):
+        """Open the watchlist manager (non-modal). Reuses the same
+        frame on re-invocation so Ctrl+W doesn't spawn duplicates.
+        """
+        if self._watchlist_frame is not None:
+            try:
+                self._watchlist_frame.Raise()
+                self._watchlist_frame.SetFocus()
+                return
+            except RuntimeError:
+                # The frame was destroyed without going through our
+                # closed-notify callback — reset and open a new one.
+                self._watchlist_frame = None
+
+        from .gui_watchlist import WatchlistFrame
+
+        frame = WatchlistFrame(self)
+        self._watchlist_frame = frame
+        frame.Show()
+
+    def _notify_watchlist_frame_closed(self):
+        """Called by WatchlistFrame._on_close so Ctrl+W reopens cleanly."""
+        self._watchlist_frame = None
 
     def _on_check_updates_menu(self, event):
         """Manual trigger: unlike the silent launch check, this surfaces

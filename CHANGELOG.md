@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.20.13 — 2026-04-19
+
+### Add
+
+- **Watchlist manager window (Watchlist → Manage watchlist, Ctrl+W).**
+  The watchlist has been CLI-only since 1.20.0 — add/list/remove/run
+  all lived behind `--watchlist-*` flags. It now has a proper
+  wxPython manager (`ffn_dl/gui_watchlist.py`) with a list view
+  showing every watch's type, site, target, last-checked timestamp,
+  and current status, plus buttons for Add Story URL, Add Author
+  URL, Add Search, Remove, Pause/Resume, Run Now (all enabled
+  watches), and Run Selected (polls just the highlighted row).
+  Keyboard shortcuts: Delete removes the highlighted watch, F5
+  refreshes the view, Ctrl+R runs all. Accessibility: every control
+  has a descriptive `SetName` so NVDA announces a useful label, and
+  the display-only list lets the screen reader read each column
+  verbatim without the `[x] ` prefix trick the checkable dialogs
+  need.
+- **`watchlist.run_once` gained a `watch_ids` keyword argument.**
+  When supplied as a set of watch ids, the runner restricts polling
+  to those watches; when omitted it behaves exactly as before.
+  "Run Selected" uses this to poll a single watch without bypassing
+  the cooldown and notification machinery the rest of the system
+  relies on.
+
 ## 1.20.12 — 2026-04-19
 
 ### Add

@@ -466,6 +466,7 @@ def run_once(
     store: WatchlistStore,
     prefs,
     *,
+    watch_ids: Optional[set[str]] = None,
     scraper_factory: ScraperFactory = default_scraper_factory,
     notifier: Notifier = dispatch_notification,
     now: Callable[[], float] = time.time,
@@ -475,6 +476,9 @@ def run_once(
     Contract:
 
     * Disabled watches are skipped (and absent from the returned list).
+    * When ``watch_ids`` is provided, polling is further restricted to
+      watches whose id is in the set — used by the GUI's "Run Selected"
+      button. ``None`` polls all enabled watches (the default).
     * Each enabled watch's ``last_checked_at`` and ``last_error`` are
       always updated and persisted, even if polling raised.
     * Scraper exceptions are caught per-watch; one failing site never
@@ -488,6 +492,8 @@ def run_once(
     results: list[PollResult] = []
     for watch in store.all():
         if not watch.enabled:
+            continue
+        if watch_ids is not None and watch.id not in watch_ids:
             continue
 
         try:
