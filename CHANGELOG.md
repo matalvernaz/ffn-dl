@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.23.0 — 2026-04-20
+
+### Add
+
+- **Pick Multiple button in erotica search.** Replaces Load More
+  with the same tick-multiple-and-bulk-download flow an author-URL
+  paste gets — the checklist dialog with sort/filter/select-all,
+  opened pre-populated with every row from the current search.
+  Tick ten stories, hit Download, they queue sequentially through
+  the main frame's batch runner (same path bookmarks and author
+  batches already use).
+
+  Load More is hidden on the erotica frame because the fan-out
+  already pulls from all 12 sites at once — paginating one site
+  rarely buys more than ticking what you want from the first batch.
+  Per-site search frames (FFN, AO3, Royal Road, Literotica,
+  Wattpad) keep Load More and the single-row Download Selected
+  unchanged.
+
+  Series rows expand into their part list when fed to the picker so
+  users can tick individual Literotica chapters even after the
+  series collapse hides them behind a single parent row.
+
+### Fix
+
+- **Series collapse now applies to erotica results.** The fan-out
+  was skipping ``collapse_literotica_series`` because the site key
+  was ``"erotica"`` rather than ``"literotica"``, so numbered
+  chapters of the same Literotica work were showing as separate
+  rows ("Ch. 02", "Pt. 03", "- 4"). Literotica's collapse
+  function already matches on URL shape and leaves non-Literotica
+  rows untouched, so running it over the merged batch is the
+  right fix — other sites' rows pass through unchanged.
+
 ## 1.22.1 — 2026-04-20
 
 ### Fix

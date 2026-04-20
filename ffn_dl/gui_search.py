@@ -381,11 +381,32 @@ class SearchFrame(wx.Frame):
         self.show_parts_btn.Disable()
         dl_row.Add(self.show_parts_btn, 0, wx.RIGHT, 8)
 
+        # Pick-Multiple opens the same author-page-style checklist
+        # dialog used for author-URL downloads — works, tick what you
+        # want, bulk download. Only meaningful for the unified erotica
+        # frame because it's the one that tends to return a large
+        # batch from many sources at once; per-site frames keep their
+        # single-row Download Selected flow unchanged.
+        self.pick_multi_btn = wx.Button(panel, label="&Pick Multiple...")
+        self.pick_multi_btn.Bind(
+            wx.EVT_BUTTON, lambda e: self._on_pick_multiple(),
+        )
+        self.pick_multi_btn.Disable()
+        if self.site_key != "erotica":
+            self.pick_multi_btn.Hide()
+        dl_row.Add(self.pick_multi_btn, 0, wx.RIGHT, 8)
+
         self.load_more_btn = wx.Button(panel, label="Load &More")
         self.load_more_btn.Bind(
             wx.EVT_BUTTON, lambda e: self._on_load_more(),
         )
         self.load_more_btn.Disable()
+        if self.site_key == "erotica":
+            # Erotica frame uses the picker for multi-download; the
+            # fan-out already batches across sites, so paginating one
+            # more page rarely buys much over just ticking the rows
+            # you care about in the picker.
+            self.load_more_btn.Hide()
         dl_row.Add(self.load_more_btn, 0)
         sizer.Add(dl_row, 0, wx.ALL, pad)
 
@@ -459,6 +480,10 @@ class SearchFrame(wx.Frame):
             not busy and has_selection and selected_is_series
         )
         self.load_more_btn.Enable(not busy and self.last_query is not None)
+        # Pick-Multiple is enabled whenever we have at least one
+        # result and aren't mid-download. The button is hidden on
+        # per-site frames so we don't need a site-key check here.
+        self.pick_multi_btn.Enable(not busy and bool(self.results))
 
     # ── Multi-picker ──────────────────────────────────────────
 
@@ -637,6 +662,14 @@ class SearchFrame(wx.Frame):
             processed = collapse_ao3_series(raw)
         elif self.site_key == "literotica":
             processed = collapse_literotica_series(raw)
+        elif self.site_key == "erotica":
+            # The erotica fan-out mixes rows from every archive, but
+            # Literotica is still the site most likely to return
+            # numbered chapters as individual rows (``Ch. 02``, ``Pt.
+            # 03`` …). Run Literotica's series collapse over the full
+            # merged batch — the function matches on Literotica URL
+            # shapes and leaves every other site's rows untouched.
+            processed = collapse_literotica_series(raw)
         else:
             processed = list(raw)
 
@@ -682,6 +715,9 @@ class SearchFrame(wx.Frame):
             bool(new_results)
             and not all_erotica_exhausted
             and not self.main_frame._downloading
+        )
+        self.pick_multi_btn.Enable(
+            bool(self.results) and not self.main_frame._downloading
         )
         if not self.results:
             self._log(
@@ -813,6 +849,55 @@ class SearchFrame(wx.Frame):
                 self._on_show_parts()
                 return
         self._on_search_download()
+
+    def _on_pick_multiple(self):
+        """Open the author-page-style StoryPickerDialog pre-populated
+        with the current search results.
+
+        This gives erotica search the same tick-multiple-and-bulk-
+        download flow an author page gets — which is the natural fit
+        for "I searched 'femdom' and want to grab ten of these" far
+        better than clicking each row and downloading it one at a
+        time. Series rows expand into their part list so users can
+        tick individual parts too.
+        """
+        if not self.results or self.main_frame._downloading:
+            return
+        works = []
+        for r in self.results:
+            if r.get("is_series") and r.get("series_parts"):
+                for part in r["series_parts"]:
+                    if part.get("url"):
+                        works.append(part)
+            elif r.get("url"):
+                works.append(r)
+        if not works:
+            self._log("Nothing downloadable in the current results.")
+            return
+        title = f"Pick stories — {self.spec['label']}"
+        self.main_frame._open_picker(
+            title, works, self._handle_picker_selection,
+        )
+
+    def _handle_picker_selection(self, picked_urls):
+        """Callback from the picker dialog — kick off a batch download
+        of every ticked URL. The MainFrame's busy guard already stops
+        the user from triggering a second batch mid-download; we just
+        delegate to its existing queue runner so bookmarks, author
+        batches, and erotica-picker batches share one code path."""
+        if not picked_urls:
+            return
+        if self.main_frame._downloading:
+            return
+        self.main_frame._set_busy(True, kind="download")
+        self._log(
+            f"Starting batch download of {len(picked_urls)} picked stories."
+        )
+        threading.Thread(
+            target=self.main_frame._run_picked_batch,
+            args=(picked_urls, "erotica"),
+            daemon=True,
+        ).start()
 
     def _on_show_parts(self):
         idx = self.results_ctrl.GetFirstSelected()
