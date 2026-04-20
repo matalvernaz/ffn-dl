@@ -902,24 +902,64 @@ def _run_update_queue(
     would_update: list[tuple[str, int, int]] = []
 
     # Phase 2 (concurrent): remote chapter-count probes.
+    #
+    # Partition by site class so we can (a) share one scraper per site
+    # across every probe, which reuses its curl_cffi HTTP/2 connection
+    # and skips the ~300–600 ms TLS handshake after the first request;
+    # and (b) honour the site's own ``concurrency`` attribute — FFN
+    # captcha-bans on bulk regardless of pacing, so its group must
+    # stay at 1 worker even when ``--probe-workers`` is higher. The
+    # global ``workers`` value is now an upper cap, not a fan-out count.
     if probe_queue:
         progress(f"\nProbing {len(probe_queue)} stories for new chapters...")
 
-        def probe_one(entry):
-            scraper = _build_scraper(entry["url"], args)
-            return scraper.get_chapter_count(entry["url"])
+        _PROBE_EXPECTED_ERRORS = (
+            RateLimitError, CloudflareBlockError, StoryNotFoundError,
+            AO3LockedError, ValueError,
+        )
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(probe_one, entry) for entry in probe_queue]
-            for entry, fut in zip(probe_queue, futures):
-                try:
-                    entry["remote"] = fut.result()
-                except (RateLimitError, CloudflareBlockError,
-                        StoryNotFoundError, AO3LockedError, ValueError) as exc:
-                    entry["error"] = exc
-                except (OSError, RuntimeError) as exc:
-                    logger.debug("Chapter-count probe failed", exc_info=True)
-                    entry["error"] = exc
+        by_site: dict[type, list[dict]] = {}
+        for entry in probe_queue:
+            site_cls = _detect_site(entry["url"])
+            by_site.setdefault(site_cls, []).append(entry)
+
+        def probe_entry(scraper, entry):
+            try:
+                entry["remote"] = scraper.get_chapter_count(entry["url"])
+            except _PROBE_EXPECTED_ERRORS as exc:
+                entry["error"] = exc
+            except (OSError, RuntimeError) as exc:
+                logger.debug("Chapter-count probe failed", exc_info=True)
+                entry["error"] = exc
+
+        def run_site_group(site_cls, entries):
+            scraper = _build_scraper(entries[0]["url"], args)
+            site_workers = max(1, min(workers, scraper.concurrency))
+            with ThreadPoolExecutor(
+                max_workers=site_workers,
+                thread_name_prefix=f"probe-{site_cls.site_name}",
+            ) as pool:
+                for _ in pool.map(
+                    lambda e: probe_entry(scraper, e), entries,
+                ):
+                    pass
+
+        if len(by_site) == 1:
+            cls, entries = next(iter(by_site.items()))
+            run_site_group(cls, entries)
+        else:
+            # Run every site group in parallel so a slow-rate-limited
+            # group (e.g. FFN, serialised) doesn't gate the others.
+            with ThreadPoolExecutor(
+                max_workers=len(by_site),
+                thread_name_prefix="probe-site",
+            ) as outer:
+                site_futures = [
+                    outer.submit(run_site_group, cls, entries)
+                    for cls, entries in by_site.items()
+                ]
+                for fut in site_futures:
+                    fut.result()
         progress("")
 
     # Phase 3 (serial): apply the decisions. Any actual downloads run

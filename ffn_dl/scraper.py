@@ -4,6 +4,7 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Optional, Union
@@ -136,11 +137,42 @@ class BaseScraper:
         self.concurrency = max(1, int(concurrency))
         self._fetch_count = 0
         self._browser = "chrome"
+        # curl_cffi sessions wrap a libcurl easy handle that is NOT safe to
+        # share across threads. We keep one session per thread via
+        # ``_tls.session`` so the same scraper can be reused by a
+        # thread-pooled probe/download loop without races. ``self.session``
+        # is the main-thread session and stays exposed for legacy callers
+        # (and tests that monkey-patch it).
+        self._tls = threading.local()
+        # ``_state_lock`` guards the shared AIMD state (``_current_delay``,
+        # ``_fetch_count``) and the ``_browser`` rotation. curl session
+        # objects themselves are not shared, so they don't need the lock.
+        self._state_lock = threading.Lock()
         self.session = curl_requests.Session(impersonate=self._browser)
+        self._tls.session = self.session
+
+    def _session(self):
+        """Return the curl_cffi session for the current thread, lazily
+        created on first use. Worker threads in a shared-scraper probe/
+        download pool call this instead of touching ``self.session``."""
+        sess = getattr(self._tls, "session", None)
+        if sess is None:
+            sess = curl_requests.Session(impersonate=self._browser)
+            self._tls.session = sess
+        return sess
 
     def _rotate_browser(self) -> None:
-        self._browser = random.choice(BROWSERS)
-        self.session = curl_requests.Session(impersonate=self._browser)
+        # Pick a new impersonation profile (shared state) and swap out
+        # the *current thread's* session. Other threads keep their
+        # existing sessions until they naturally create a fresh one —
+        # rotating every thread in lockstep would throw away useful
+        # HTTP/2 connection reuse on threads that weren't rate-limited.
+        with self._state_lock:
+            self._browser = random.choice(BROWSERS)
+        new_sess = curl_requests.Session(impersonate=self._browser)
+        self._tls.session = new_sess
+        if threading.current_thread() is threading.main_thread():
+            self.session = new_sess
         logger.debug("Rotated to browser impersonation: %s", self._browser)
 
     def _check_for_blocks(self, html: str) -> None:
@@ -157,8 +189,9 @@ class BaseScraper:
         gets injected into the page but the original DOM is preserved,
         so scraper selectors still match.
         """
+        sess = self._session()
         try:
-            avail = self.session.get(
+            avail = sess.get(
                 f"https://archive.org/wayback/available?url={url}",
                 timeout=self.timeout,
             )
@@ -170,7 +203,7 @@ class BaseScraper:
                 return None
             snap_url = snap["url"]
             logger.info("Falling back to Wayback snapshot: %s", snap_url)
-            page = self.session.get(snap_url, timeout=self.timeout)
+            page = sess.get(snap_url, timeout=self.timeout)
             if page.status_code == 200:
                 return page.text
         except Exception as exc:
@@ -207,7 +240,7 @@ class BaseScraper:
             StoryNotFoundError: upstream returned 404.
             CloudflareBlockError: a Cloudflare challenge page was served.
         """
-        sess = session if session is not None else self.session
+        sess = session if session is not None else self._session()
         backoff = INITIAL_BACKOFF_S
         hit_rate_limit = False
         for attempt in range(self.max_retries):
@@ -284,8 +317,20 @@ class BaseScraper:
         raise RateLimitError(f"Failed after {self.max_retries} retries: {url}")
 
     def _delay(self) -> None:
-        self._fetch_count += 1
-        if self.chunk_size and self._fetch_count % self.chunk_size == 0:
+        with self._state_lock:
+            self._fetch_count += 1
+            chunk_hit = (
+                self.chunk_size
+                and self._fetch_count % self.chunk_size == 0
+            )
+            current = self._current_delay
+            if not chunk_hit and self.delay_range is None:
+                # AIMD: decay the shared counter *before* sleeping so
+                # concurrent workers see the updated value immediately.
+                self._current_delay = max(
+                    self.delay_floor, current * AIMD_DECAY_FACTOR,
+                )
+        if chunk_hit:
             wait = random.uniform(*self.chunk_delay_range)
             logger.info(
                 "Pausing %.0fs after %d chapters to stay under rate limits...",
@@ -296,24 +341,22 @@ class BaseScraper:
         if self.delay_range is not None:
             time.sleep(random.uniform(*self.delay_range))
             return
-        # AIMD: sleep the current delay (with a little jitter so we don't
-        # lock-step with server buckets), then decay toward the floor.
-        if self._current_delay > 0:
-            jitter = random.uniform(0, self._current_delay * 0.2)
-            time.sleep(self._current_delay + jitter)
-        self._current_delay = max(
-            self.delay_floor, self._current_delay * AIMD_DECAY_FACTOR,
-        )
+        if current > 0:
+            jitter = random.uniform(0, current * 0.2)
+            time.sleep(current + jitter)
 
     def _bump_delay_up(self) -> None:
         """AIMD multiplicative increase after a rate-limit hit."""
-        prev = self._current_delay
-        new_delay = max(prev * 2, AIMD_BUMP_FLOOR_S)
-        self._current_delay = min(self.delay_ceiling, new_delay)
-        if self._current_delay != prev:
+        with self._state_lock:
+            prev = self._current_delay
+            new_delay = max(prev * 2, AIMD_BUMP_FLOOR_S)
+            self._current_delay = min(self.delay_ceiling, new_delay)
+            bumped = self._current_delay != prev
+            current = self._current_delay
+        if bumped:
             logger.info(
                 "Rate-limit recovery: raising per-fetch delay %.1fs → %.1fs",
-                prev, self._current_delay,
+                prev, current,
             )
 
     def _fetch_parallel(self, urls: list[str]) -> list[str]:
@@ -468,6 +511,27 @@ FFN_BASE = "https://www.fanfiction.net"
 _FFN_RATING_ID_TO_LABEL = {
     "1": "K", "2": "K+", "3": "T", "4": "M",
 }
+
+_FFN_CHAP_SELECT_RE = re.compile(
+    r'<select[^>]*\bid=["\']?chap_select["\']?[^>]*>(.*?)</select>',
+    re.IGNORECASE | re.DOTALL,
+)
+_FFN_OPTION_RE = re.compile(r"<option\b", re.IGNORECASE)
+
+
+def _ffn_chapter_count_from_select(html: str) -> Optional[int]:
+    """Cheap regex probe for FFN's chapter count.
+
+    Scans for the ``chap_select`` dropdown and counts its ``<option>``
+    tags. Returns ``None`` when the dropdown is absent so callers fall
+    back to the full metadata parse — single-chapter works don't render
+    a dropdown, and any future markup change should also degrade safely.
+    """
+    match = _FFN_CHAP_SELECT_RE.search(html)
+    if not match:
+        return None
+    count = len(_FFN_OPTION_RE.findall(match.group(1)))
+    return count if count > 0 else None
 
 
 def _ffn_row_to_work(row, story_id, section):
@@ -782,6 +846,11 @@ class FFNScraper(BaseScraper):
     def get_chapter_count(self, url_or_id):
         story_id = self.parse_story_id(url_or_id)
         page = self._fetch(f"{FFN_BASE}/s/{story_id}/1")
+        count = _ffn_chapter_count_from_select(page)
+        if count is not None:
+            return count
+        # Fallback: full soup parse. Reached when chap_select is absent
+        # (single-chapter work) or FFN changes the markup.
         soup = BeautifulSoup(page, "lxml")
         meta = self._parse_metadata(soup)
         return meta["num_chapters"]

@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.20.7 — 2026-04-19
+
+### Performance
+
+- **`--update-all` / `--update-library` probes are dramatically faster.**
+  The probe loop used to build a fresh scraper (and a fresh curl_cffi
+  session) per story, paying a TLS handshake on every request and
+  ignoring each site's own safe-concurrency cap. The loop now
+  partitions the queue by site, builds one scraper per site that's
+  shared across all of its probes, and runs each site group in its
+  own pool sized to the site's `concurrency` — so FFN stays at 1
+  worker (it captcha-bans on parallel bulk fetching regardless of
+  `--probe-workers`) while RoyalRoad / FicWad / MediaMiner run their
+  safe 3-wide pool. Connection reuse on HTTPS requests after the
+  first on a given site drops roughly 300–600 ms per probe. On a
+  mixed 100-story library the wall-clock improvement is in the
+  minutes.
+- **FFN chapter-count probes skip the full HTML parse.** FFN's
+  `get_chapter_count` fetches chapter 1 and used to build a full lxml
+  tree just to count `<option>` tags in the `chap_select` dropdown.
+  A compiled regex over the response text gets the identical number
+  in microseconds, and falls through to the bs4 path unchanged when
+  the dropdown is absent (single-chapter works) or FFN changes the
+  markup.
+
+### Internal
+
+- `BaseScraper` now carries a thread-local curl_cffi session so a
+  single scraper instance can be reused safely across a worker pool.
+  `_rotate_browser` rotates only the calling thread's session;
+  `_bump_delay_up` / `_delay` hold a lock around the shared AIMD
+  counter so concurrent workers see consistent delay state.
+
 ## 1.20.6 — 2026-04-19
 
 ### Fix
