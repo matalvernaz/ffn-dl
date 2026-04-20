@@ -136,21 +136,6 @@ def build_refresh_queue(
             skipped.append(display_rel)
             continue
 
-        if recheck_interval_s > 0:
-            last_probed_epoch = _parse_iso_to_epoch(
-                entry.get("last_probed") or ""
-            )
-            if last_probed_epoch > 0:
-                age = now_epoch - last_probed_epoch
-                if age < recheck_interval_s:
-                    progress(
-                        f"  [skip] {display_rel}: checked "
-                        f"{_human_duration(age)} ago "
-                        "(use --force-recheck to override)"
-                    )
-                    skipped.append(display_rel)
-                    continue
-
         cached = _cached_chapter_count(path, entry)
         if cached is not None:
             local = cached
@@ -178,6 +163,58 @@ def build_refresh_queue(
                 )
                 skipped.append(display_rel)
                 continue
+
+        # Resume-without-reprobe: if a previous run recorded a remote
+        # chapter count larger than ``local`` and the file hasn't
+        # caught up yet, the story has a *pending* download waiting.
+        # Queue it with ``remote`` pre-filled so Phase 2 (probing)
+        # skips straight past it — this is what lets an interrupted
+        # --update-library batch resume without re-hitting upstream
+        # for every story that was already probed before the crash.
+        pending_remote = entry.get("remote_chapter_count")
+        if (
+            isinstance(pending_remote, int)
+            and pending_remote > local
+        ):
+            if skip_complete:
+                try:
+                    status = extract_status(path)
+                except Exception:
+                    status = ""
+                if status.lower() == "complete":
+                    progress(
+                        f"  [skip] {display_rel}: marked Complete "
+                        f"({local} chapters)"
+                    )
+                    skipped.append(display_rel)
+                    continue
+            progress(
+                f"  [resume] {display_rel}: {local} local / "
+                f"{pending_remote} upstream — queued without re-probing"
+            )
+            probe_queue.append({
+                "path": path,
+                "rel": display_rel,
+                "url": url,
+                "local": local,
+                "remote": pending_remote,
+            })
+            continue
+
+        if recheck_interval_s > 0:
+            last_probed_epoch = _parse_iso_to_epoch(
+                entry.get("last_probed") or ""
+            )
+            if last_probed_epoch > 0:
+                age = now_epoch - last_probed_epoch
+                if age < recheck_interval_s:
+                    progress(
+                        f"  [skip] {display_rel}: checked "
+                        f"{_human_duration(age)} ago "
+                        "(use --force-recheck to override)"
+                    )
+                    skipped.append(display_rel)
+                    continue
 
         if skip_complete:
             try:
@@ -218,6 +255,7 @@ def default_refresh_args(
     workers: int = 5,
     recheck_interval_s: int = 0,
     force_recheck: bool = False,
+    refetch_all: bool = False,
 ) -> Namespace:
     """Namespace with sensible defaults for callers that need to drive
     ``cli._build_scraper`` / ``cli._download_one`` without having gone
@@ -257,6 +295,7 @@ def default_refresh_args(
         probe_workers=workers,
         recheck_interval=recheck_interval_s,
         force_recheck=force_recheck,
+        refetch_all=refetch_all,
         # Export path knobs. ``name`` is the filename template; without
         # it, ``_download_one``'s export branch raises AttributeError.
         format=None,

@@ -354,11 +354,13 @@ class LibraryDialog(wx.Dialog):
                 # last-batch window on a crash.
                 STAMP_FLUSH_EVERY = 25
                 stamp_lock = threading.Lock()
-                pending_stamps: list[str] = []
+                pending_stamps: dict[str, int | None] = {}
 
                 def _flush_stamps_locked():
                     """Caller must hold ``stamp_lock``. Reloads the
-                    on-disk index, stamps all pending URLs, saves, and
+                    on-disk index, stamps all pending URLs (with their
+                    remote chapter counts so the next refresh can
+                    resume interrupted pending downloads), saves, and
                     clears the buffer. Reloading per-flush makes the
                     stamp survive a concurrent rescan — we merge into
                     whatever the current disk state is rather than
@@ -367,7 +369,7 @@ class LibraryDialog(wx.Dialog):
                         return
                     try:
                         idx = LibraryIndex.load()
-                        idx.mark_probed(root, list(pending_stamps))
+                        idx.mark_probed(root, dict(pending_stamps))
                     except Exception as exc:
                         logger.exception(
                             "probe-stamp flush failed (pending=%d)",
@@ -378,12 +380,20 @@ class LibraryDialog(wx.Dialog):
                         )
                     pending_stamps.clear()
 
-                def on_probe_complete(url: str) -> None:
+                def on_probe_complete(
+                    url: str, remote_count: int | None = None,
+                ) -> None:
                     """Called from a probe-worker thread once the
                     remote chapter count for ``url`` has been
-                    retrieved. Thread-safe via ``stamp_lock``."""
+                    retrieved. ``remote_count`` is the fresh upstream
+                    count (or ``None`` if the probe answered with
+                    "story gone"). Stored alongside ``last_probed``
+                    so a later refresh after this process dies can
+                    see remote > local and resume the download
+                    without re-probing. Thread-safe via ``stamp_lock``.
+                    """
                     with stamp_lock:
-                        pending_stamps.append(url)
+                        pending_stamps[url] = remote_count
                         if len(pending_stamps) >= STAMP_FLUSH_EVERY:
                             _flush_stamps_locked()
 

@@ -492,3 +492,177 @@ def test_mark_probed_survives_rescan(tmp_path: Path):
     reloaded = LibraryIndex.load(idx_path)
     [(_url, entry)] = list(reloaded.stories_in(lib))
     assert entry.get("last_probed") == "2026-04-19T12:00:00Z"
+
+
+def test_mark_probed_dict_form_stamps_remote_chapter_count(tmp_path: Path):
+    """The dict form of mark_probed records remote counts on every
+    entry so a later refresh can see remote > local and resume
+    without re-probing."""
+    from ffn_dl.library.index import LibraryIndex
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(
+        lib, title="Pending",
+        url="https://www.fanfiction.net/s/20/1/",
+    )
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    idx = LibraryIndex.load(idx_path)
+    idx.mark_probed(lib, {"https://www.fanfiction.net/s/20": 42})
+
+    reloaded = LibraryIndex.load(idx_path)
+    [(_url, entry)] = list(reloaded.stories_in(lib))
+    assert entry.get("remote_chapter_count") == 42
+    assert entry.get("last_probed"), "must also stamp last_probed"
+
+
+def test_mark_probed_none_count_clears_pending(tmp_path: Path):
+    """A probe that answered but with no count (StoryNotFoundError)
+    must clear any prior remote_chapter_count — otherwise a deleted
+    story would stay flagged as "needs update" forever."""
+    from ffn_dl.library.index import LibraryIndex
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(
+        lib, title="Ghost",
+        url="https://www.fanfiction.net/s/21/1/",
+    )
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    idx = LibraryIndex.load(idx_path)
+    idx.mark_probed(lib, {"https://www.fanfiction.net/s/21": 10})
+    # Confirm the count was stored
+    reloaded = LibraryIndex.load(idx_path)
+    [(_url, entry)] = list(reloaded.stories_in(lib))
+    assert entry.get("remote_chapter_count") == 10
+
+    # Now the story is gone upstream — mark with None.
+    idx = LibraryIndex.load(idx_path)
+    idx.mark_probed(lib, {"https://www.fanfiction.net/s/21": None})
+    reloaded = LibraryIndex.load(idx_path)
+    [(_url, entry)] = list(reloaded.stories_in(lib))
+    assert "remote_chapter_count" not in entry
+
+
+def test_build_refresh_queue_resumes_pending_without_reprobing(tmp_path: Path):
+    """Entries with remote_chapter_count > local land in the queue with
+    ``remote`` pre-filled — the probe phase sees it and skips the
+    upstream call. This is the resume-mid-batch path: an interrupted
+    run can finish its downloads on the next invocation without
+    re-probing the whole library."""
+    from ffn_dl.library.index import LibraryIndex
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    # File has 3 chapters on disk; remote has 5 (pending update from a
+    # previous probe that never got downloaded).
+    ffndl_epub(
+        lib, title="Pending Update",
+        url="https://www.fanfiction.net/s/30/1/",
+        chapters=3,
+    )
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    idx = LibraryIndex.load(idx_path)
+    idx.mark_probed(lib, {"https://www.fanfiction.net/s/30": 5})
+
+    messages: list[str] = []
+    queue, skipped = build_refresh_queue(
+        lib, index_path=idx_path, progress=messages.append,
+    )
+    assert len(queue) == 1
+    assert queue[0]["local"] == 3
+    assert queue[0]["remote"] == 5, "remote must be pre-filled to skip probe"
+    assert any("resume" in m for m in messages)
+
+
+def test_build_refresh_queue_pending_bypasses_ttl(tmp_path: Path):
+    """A pending-update entry queues even when the TTL would ordinarily
+    skip it — the whole point of the resume path is that the probe
+    already happened once, so we don't need to wait for TTL expiry
+    to finish the download it surfaced."""
+    from ffn_dl.library.index import LibraryIndex
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(
+        lib, title="Pending Within TTL",
+        url="https://www.fanfiction.net/s/31/1/",
+        chapters=2,
+    )
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    # Probe stamp is "just now" and remote > local — TTL would skip
+    # under old rules, but the pending check must fire first.
+    idx = LibraryIndex.load(idx_path)
+    idx.mark_probed(lib, {"https://www.fanfiction.net/s/31": 4})
+
+    queue, skipped = build_refresh_queue(
+        lib, index_path=idx_path, recheck_interval_s=60 * 60,
+    )
+    assert len(queue) == 1
+    assert skipped == []
+    assert queue[0]["remote"] == 4
+
+
+def test_build_refresh_queue_pending_resolved_falls_back_to_normal(tmp_path: Path):
+    """If remote_chapter_count == local, there's no pending work — the
+    entry goes through the normal TTL + probe flow, not the resume
+    shortcut."""
+    from ffn_dl.library.index import LibraryIndex
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(
+        lib, title="Resolved",
+        url="https://www.fanfiction.net/s/32/1/",
+        chapters=3,
+    )
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    idx = LibraryIndex.load(idx_path)
+    # remote matches local — no pending work
+    idx.mark_probed(lib, {"https://www.fanfiction.net/s/32": 3})
+
+    queue, skipped = build_refresh_queue(
+        lib, index_path=idx_path, recheck_interval_s=0,
+    )
+    # TTL=0 means we'd probe this normally (no pre-filled remote)
+    assert len(queue) == 1
+    assert "remote" not in queue[0]
+
+
+def test_index_record_preserves_remote_chapter_count_across_rescan(
+    tmp_path: Path,
+):
+    """rescan_library() must preserve remote_chapter_count on existing
+    entries — otherwise the resume-on-next-run path gets defeated by
+    the rescan that --update-library runs at the end of every
+    library-update pass."""
+    from ffn_dl.library.index import LibraryIndex
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(
+        lib, title="Keep Remote",
+        url="https://www.fanfiction.net/s/33/1/",
+    )
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    idx = LibraryIndex.load(idx_path)
+    idx.mark_probed(lib, {"https://www.fanfiction.net/s/33": 99})
+
+    # Rescan (as happens after --update-library) must not wipe the count
+    scan(lib, index_path=idx_path)
+
+    reloaded = LibraryIndex.load(idx_path)
+    [(_url, entry)] = list(reloaded.stories_in(lib))
+    assert entry.get("remote_chapter_count") == 99

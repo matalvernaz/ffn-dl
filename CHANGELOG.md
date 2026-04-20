@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.23.10 — 2026-04-20
+
+### Performance
+
+- **Merge-in-place updates: reuse existing chapters from disk instead
+  of re-downloading every chapter on every update.** The old flow
+  downloaded each updated story twice — once for the new chapters
+  (``skip_chapters=existing``), then again from scratch so the
+  exporter had all chapters in memory. The second pass was supposed
+  to hit the local chapter cache, but for any story originally
+  downloaded by another tool, or whose cache had been cleared, it
+  re-fetched every chapter from upstream. A 175-chapter fic with 20
+  new chapters paid a ~20 minute FFN re-download tax for nothing.
+  Now the update path reads chapters 1..existing back out of the
+  on-disk export and concatenates them with the fresh new ones,
+  cutting updates to a single short download. New ``--refetch-all``
+  CLI flag + Update File with Fresh Copy (Ctrl+Shift+U) GUI entry
+  bypass the shortcut for the (rare) case where an author silently
+  revised old chapters. Only ffn-dl's own HTML and EPUB exports are
+  read back — TXT is lossy (HTML already stripped) so TXT updates
+  automatically fall back to the full re-download. Non-ffn-dl or
+  hand-edited files also fall back gracefully with a user-visible
+  log line explaining why.
+
+### Fix
+
+- **Resume interrupted library updates without re-probing every
+  story.** A ``--update-library`` run that crashed or was killed
+  after probing but before downloading used to lose every probe
+  answer — the next run re-probed the entire library before
+  discovering the same pending work. Now each successful probe
+  stamps both ``last_probed`` *and* ``remote_chapter_count`` onto
+  the library index. On the next refresh, entries where
+  ``remote_chapter_count > chapter_count`` are queued for download
+  with ``remote`` pre-filled, so the probe phase skips the network
+  call entirely and goes straight to the download. Pending entries
+  also bypass the probe-recency TTL — no point waiting an hour to
+  finish a download we already know is needed. ``on_probe_complete``
+  now takes ``(url, remote_count)`` (``remote_count`` is ``None``
+  for story-gone answers so the pending flag is cleared cleanly).
+
+### Diagnostics
+
+- **Per-chapter progress lines now surface in the library GUI's
+  update log.** ``_download_one`` used to hardcode ``print()`` for
+  chapter progress, which dropped into ``sys.stdout`` and never
+  reached the library window. It now takes an optional
+  ``status_callback`` that the library GUI wires to its own log
+  surface, so a long library update shows ``[155/175] Chapter Title``
+  live instead of sitting silent for minutes per story and feeling
+  like a hang.
+
 ## 1.23.9 — 2026-04-20
 
 ### Fix

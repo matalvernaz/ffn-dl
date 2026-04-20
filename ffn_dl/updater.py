@@ -5,7 +5,19 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .models import Chapter
+
 logger = logging.getLogger(__name__)
+
+
+class ChaptersNotReadableError(Exception):
+    """Raised when an existing story file can't be parsed back into Chapter objects.
+
+    Callers should treat this as "the merge-in-place shortcut isn't
+    available for this file" and fall back to a full re-download. The
+    message carries the reason (unsupported format, corrupt file,
+    markup mismatch) so the fallback log line is actionable.
+    """
 
 
 @dataclass
@@ -872,3 +884,206 @@ def extract_metadata(filepath: Path | str) -> "FileMetadata":
     if not md.chapter_count:
         md.chapter_count = count_chapters(path)
     return md
+
+
+# ── Chapter-body readers (merge-in-place support) ─────────────────
+#
+# read_chapters() recovers the ordered list of Chapter objects from an
+# existing ffn-dl export. Used by the update flow to merge just-
+# downloaded new chapters with the ones already on disk, skipping the
+# "re-download everything for export" round-trip. Only ffn-dl's own
+# export shapes are supported — FanFicFare/FicHub/AO3-native files
+# raise :class:`ChaptersNotReadableError` so the caller falls back to
+# a full re-download.
+
+
+_HTML_CHAPTER_BLOCK_RE = re.compile(
+    r'<div\b[^>]*\sclass\s*=\s*"[^"]*\bchapter\b[^"]*"[^>]*>'
+    r'(?P<body>.*?)'
+    r'</div>\s*<hr\s*/?>',
+    re.IGNORECASE | re.DOTALL,
+)
+"""Match one ``<div class="chapter" id="chapter-N">...</div><hr>`` block.
+
+Anchored on the trailing ``</div><hr>`` because chapter divs can contain
+nested blockquotes/divs — a simple ``.*?</div>`` would stop at the first
+inner closing tag. The ``<hr>`` terminator is stable in the exporter
+output and never appears inside chapter prose.
+"""
+
+_HTML_CHAPTER_ID_RE = re.compile(
+    r'\bid\s*=\s*"chapter-(\d+)"', re.IGNORECASE,
+)
+
+_HTML_CHAPTER_TITLE_RE = re.compile(
+    r'<h2[^>]*>(?P<title>.*?)</h2>', re.IGNORECASE | re.DOTALL,
+)
+
+_TXT_CHAPTER_HEADER_RE = re.compile(
+    r'^---\s+(?P<title>.+?)\s+---\s*$', re.MULTILINE,
+)
+
+_DEFAULT_CHAPTER_TITLE_FMT = "Chapter {n}"
+
+
+def _strip_opening_tag(block: str) -> str:
+    """Drop the leading ``<div ...>`` from an HTML chapter block match.
+
+    The block regex captures everything between ``<div class="chapter"``
+    and the trailing ``</div><hr>`` in a single group, but the <div>'s
+    own opening tag is included. Strip it so the caller gets clean
+    inner HTML starting at the chapter's ``<h2>``.
+    """
+    # _HTML_CHAPTER_BLOCK_RE's body group starts after the opening tag
+    # already; defensive helper kept for symmetry with future formats.
+    return block
+
+
+def _read_html_chapters(path: Path) -> list[Chapter]:
+    """Parse an ffn-dl HTML export into ordered Chapter objects.
+
+    Recovers both ``chapter.number`` (from the ``id="chapter-N"``
+    attribute) and ``chapter.title`` (from the leading ``<h2>``),
+    preserving the body HTML verbatim so a re-export produces the
+    same content. Raises :class:`ChaptersNotReadableError` when the
+    file has no recognisable chapter divs — which is how we detect
+    non-ffn-dl HTML that happens to carry our extension.
+    """
+    text = path.read_text(encoding="utf-8", errors="replace")
+    chapters: list[Chapter] = []
+    seen_numbers: set[int] = set()
+
+    for fallback_index, match in enumerate(
+        _HTML_CHAPTER_BLOCK_RE.finditer(text), start=1,
+    ):
+        # The block match captures from right after the opening <div
+        # class="chapter..."> tag. Grab the opening tag separately so
+        # we can pull the id="chapter-N" attribute off it — that's
+        # how we recover ch.number reliably regardless of list order.
+        block_start = match.start()
+        opening_tag_end = text.find(">", block_start) + 1
+        opening_tag = text[block_start:opening_tag_end]
+
+        id_match = _HTML_CHAPTER_ID_RE.search(opening_tag)
+        if id_match:
+            number = int(id_match.group(1))
+        else:
+            # Older exports or hand-edits may drop the id — fall back
+            # to position. Duplicates here are caught below.
+            number = fallback_index
+
+        if number in seen_numbers:
+            raise ChaptersNotReadableError(
+                f"Duplicate chapter number {number} in {path.name}"
+            )
+        seen_numbers.add(number)
+
+        body = match.group("body")
+        title_match = _HTML_CHAPTER_TITLE_RE.search(body)
+        if title_match:
+            title = re.sub(r"\s+", " ", title_match.group("title")).strip()
+            # Chapter body used on re-export is everything *after* the
+            # h2 — the exporter writes the h2 itself from ch.title, so
+            # leaving it in would duplicate the heading.
+            body_html = body[title_match.end():].lstrip()
+        else:
+            title = _DEFAULT_CHAPTER_TITLE_FMT.format(n=number)
+            body_html = body
+
+        chapters.append(Chapter(number=number, title=title, html=body_html))
+
+    if not chapters:
+        raise ChaptersNotReadableError(
+            f"No ffn-dl chapter blocks found in {path.name}"
+        )
+
+    chapters.sort(key=lambda c: c.number)
+    return chapters
+
+
+def _read_epub_chapters(path: Path) -> list[Chapter]:
+    """Parse an ffn-dl EPUB export into ordered Chapter objects.
+
+    Reads each ``chapter_N.xhtml`` item in the EPUB, strips the leading
+    ``<h2>`` that the exporter adds from ``ch.title``, and returns the
+    remainder as the chapter body. Number comes from the filename so
+    out-of-order item listing (EPUB items aren't guaranteed to be in
+    spine order) doesn't matter.
+    """
+    try:
+        from ebooklib import epub
+    except ImportError as exc:
+        raise ChaptersNotReadableError(
+            "ebooklib required to read EPUB chapters"
+        ) from exc
+
+    try:
+        book = epub.read_epub(str(path))
+    except Exception as exc:
+        raise ChaptersNotReadableError(
+            f"Failed to read EPUB {path.name}: {exc}"
+        ) from exc
+
+    chapters: list[Chapter] = []
+    filename_number_re = re.compile(r"chapter_(\d+)\.xhtml$", re.IGNORECASE)
+
+    for item in book.get_items():
+        if not hasattr(item, "file_name"):
+            continue
+        m = filename_number_re.search(item.file_name)
+        if not m:
+            continue
+        number = int(m.group(1))
+        body = item.content.decode("utf-8", errors="replace")
+
+        title_match = _HTML_CHAPTER_TITLE_RE.search(body)
+        if title_match:
+            title = re.sub(r"\s+", " ", title_match.group("title")).strip()
+            body_html = body[title_match.end():].lstrip()
+        else:
+            title = _DEFAULT_CHAPTER_TITLE_FMT.format(n=number)
+            body_html = body
+
+        chapters.append(Chapter(number=number, title=title, html=body_html))
+
+    if not chapters:
+        raise ChaptersNotReadableError(
+            f"No chapter_*.xhtml items in {path.name}"
+        )
+
+    chapters.sort(key=lambda c: c.number)
+    return chapters
+
+
+def read_chapters(filepath: Path | str) -> list[Chapter]:
+    """Return the ordered list of Chapter objects from an existing export.
+
+    Supported formats: HTML and EPUB written by ffn-dl's own exporters.
+    TXT is lossy (HTML-to-text strips formatting with no clean round
+    trip back) and always raises :class:`ChaptersNotReadableError`;
+    callers fall back to a full re-download for those.
+
+    Raises :class:`ChaptersNotReadableError` for any unsupported
+    format, unreadable file, or file whose content doesn't match the
+    ffn-dl export shape — the merge-in-place caller uses that signal
+    to decide whether to take the shortcut or re-download.
+    """
+    path = Path(filepath)
+    if not path.exists():
+        raise ChaptersNotReadableError(f"File not found: {path}")
+
+    suffix = path.suffix.lower()
+    if suffix == ".html":
+        return _read_html_chapters(path)
+    if suffix == ".epub":
+        return _read_epub_chapters(path)
+    if suffix == ".txt":
+        # TXT is plain text — we'd have to re-wrap every paragraph in
+        # <p> tags to re-export as HTML/EPUB, and authors' original
+        # inline markup (italics, quotes, scene breaks) is already
+        # lost. Re-download is the faithful choice.
+        raise ChaptersNotReadableError(
+            "TXT exports are lossy; full re-download required"
+        )
+
+    raise ChaptersNotReadableError(f"Unsupported format: {suffix}")

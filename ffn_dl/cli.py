@@ -5,11 +5,12 @@ import logging
 import sys
 import threading
 from pathlib import Path
+from typing import Callable
 
 from .ao3 import AO3LockedError
 from .exporters import DEFAULT_TEMPLATE, EXPORTERS, check_format_deps
 from .erotica import LiteroticaScraper
-from .models import parse_chapter_spec
+from .models import Story, parse_chapter_spec
 from .scraper import (
     CloudflareBlockError,
     RateLimitError,
@@ -21,7 +22,13 @@ from .sites import (
     is_author_url as _is_author_url,
     is_series_url as _is_series_url,
 )
-from .updater import count_chapters, extract_source_url, extract_status
+from .updater import (
+    ChaptersNotReadableError,
+    count_chapters,
+    extract_source_url,
+    extract_status,
+    read_chapters,
+)
 from .wattpad import WattpadPaidStoryError
 
 logger = logging.getLogger(__name__)
@@ -391,6 +398,63 @@ def _build_scraper(url: str, args: argparse.Namespace):
     return scraper_cls(**kwargs)
 
 
+def _merge_with_existing(
+    new_story: Story,
+    scraper,
+    url: str,
+    chapter_spec,
+    *,
+    update_path: Path,
+    refetch_all: bool,
+    status: Callable[[str], None],
+    progress_callback,
+) -> Story:
+    """Return a complete Story by combining existing-file chapters with new ones.
+
+    The update flow downloads only the new chapters (skip_chapters=existing)
+    to save bandwidth, but the exporter needs the full chapter list. Rather
+    than re-downloading chapters 1..existing from the upstream site — which
+    burns minutes per story when the local chapter cache is empty — we read
+    them back out of ``update_path``. A roundtrip through our own HTML/EPUB
+    exporter recovers title, number, and body HTML verbatim.
+
+    Falls back to a full re-download when:
+
+    * ``refetch_all`` is set (user explicitly asked for a fresh copy —
+      surfaces as ``--refetch-all`` on the CLI and a Force Full Refresh
+      option in the GUI; covers the case where an author silently edited
+      old chapters).
+    * ``read_chapters`` raises — unsupported format (TXT), non-ffn-dl
+      export, or any other reason the existing file can't be parsed
+      back. Keeps the update working even when the shortcut can't.
+    """
+    if refetch_all:
+        status("\n  Re-downloading full story (--refetch-all)...")
+        return scraper.download(
+            url, skip_chapters=0, chapters=chapter_spec,
+            progress_callback=progress_callback,
+        )
+
+    try:
+        existing = read_chapters(update_path)
+    except ChaptersNotReadableError as exc:
+        logger.info("Can't merge in place (%s); re-downloading", exc)
+        status(f"\n  Couldn't read existing chapters ({exc}); re-downloading...")
+        return scraper.download(
+            url, skip_chapters=0, chapters=chapter_spec,
+            progress_callback=progress_callback,
+        )
+
+    status(
+        f"\n  Merging {len(existing)} existing chapter(s) with "
+        f"{len(new_story.chapters)} new."
+    )
+    merged = list(existing) + list(new_story.chapters)
+    merged.sort(key=lambda c: c.number)
+    new_story.chapters = merged
+    return new_story
+
+
 def _download_one(
     url: str,
     args: argparse.Namespace,
@@ -398,24 +462,35 @@ def _download_one(
     *,
     update_path: Path | None = None,
     existing_chapters: int = 0,
+    status_callback: Callable[[str], None] | None = None,
 ) -> bool:
-    """Download and export a single story. Returns True on success, False on error."""
+    """Download and export a single story. Returns True on success, False on error.
+
+    ``status_callback`` receives every human-readable status line —
+    the initial "Downloading..." message, each ``[N/T] chapter title``
+    progress line, and the final "Saved to:" summary. Defaults to
+    :func:`print` for CLI use; the library GUI passes its own callback
+    so the per-chapter lines show up in the update log window (without
+    this, the GUI goes silent for the duration of the download and
+    feels like a hang).
+    """
     scraper = _build_scraper(url, args)
+    status = status_callback if status_callback is not None else print
 
     def progress(current, total, title, cached):
         tag = " (cached)" if cached else ""
-        print(f"  [{current}/{total}] {title}{tag}")
+        status(f"  [{current}/{total}] {title}{tag}")
 
     try:
         check_format_deps(args.format)
         story_id = scraper.parse_story_id(url)
         if update_path:
-            print(
+            status(
                 f"Checking story {story_id} on {scraper.site_name} "
                 f"(existing file has {existing_chapters} chapters)..."
             )
         else:
-            print(f"Downloading story {story_id} from {scraper.site_name}...")
+            status(f"Downloading story {story_id} from {scraper.site_name}...")
 
         chapter_spec = parse_chapter_spec(getattr(args, "chapters", None))
         story = scraper.download(
@@ -431,28 +506,31 @@ def _download_one(
             from .exporters import _count_story_words
             counted = _count_story_words(story)
             words = f"{counted:,}" if counted else "?"
-        status = story.metadata.get("status", "Unknown")
+        story_status = story.metadata.get("status", "Unknown")
 
         if update_path and new_count == 0:
-            print(f"\n  Up to date — no new chapters.")
+            status("\n  Up to date — no new chapters.")
             return True
 
-        print()
-        print(f"  Title:    {story.title}")
-        print(f"  Author:   {story.author}")
+        status("")
+        status(f"  Title:    {story.title}")
+        status(f"  Author:   {story.author}")
         if update_path:
             total = existing_chapters + new_count
-            print(f"  Chapters: {total} ({new_count} new)")
+            status(f"  Chapters: {total} ({new_count} new)")
         else:
-            print(f"  Chapters: {new_count}")
-        print(f"  Words:    {words}")
-        print(f"  Status:   {status}")
+            status(f"  Chapters: {new_count}")
+        status(f"  Words:    {words}")
+        status(f"  Status:   {story_status}")
 
         if update_path:
-            # For update, we need the full story to re-export.
-            # Re-download everything (cache makes this fast).
-            print("\n  Re-exporting full story...")
-            story = scraper.download(url, skip_chapters=0, chapters=chapter_spec)
+            story = _merge_with_existing(
+                story, scraper, url, chapter_spec,
+                update_path=update_path,
+                refetch_all=getattr(args, "refetch_all", False),
+                status=status,
+                progress_callback=progress,
+            )
 
         # Library auto-sort: for fresh downloads only, route into
         # <library>/<fandom>/... based on the story's metadata.
@@ -468,9 +546,9 @@ def _download_one(
             from .tts import generate_audiobook
 
             def audio_progress(current, total, title):
-                print(f"  Synthesizing [{current}/{total}] {title}")
+                status(f"  Synthesizing [{current}/{total}] {title}")
 
-            print("\nGenerating audiobook...")
+            status("\nGenerating audiobook...")
             path = generate_audiobook(
                 story, str(output_dir),
                 progress_callback=audio_progress,
@@ -489,14 +567,14 @@ def _download_one(
                 hr_as_stars=args.hr_as_stars,
                 strip_notes=args.strip_notes,
             )
-        print(f"\nSaved to: {path}")
+        status(f"\nSaved to: {path}")
 
         if getattr(args, "send_to_kindle", None):
             try:
                 from .mailer import SMTPConfigError, send_file
 
                 send_file(args.send_to_kindle, path)
-                print(f"Emailed to: {args.send_to_kindle}")
+                status(f"Emailed to: {args.send_to_kindle}")
             except SMTPConfigError as exc:
                 print(f"Could not send: {exc}", file=sys.stderr)
             except (OSError, RuntimeError) as exc:
@@ -951,8 +1029,22 @@ def _run_update_queue(
             # limit, Cloudflare block, timeout) do *not* answer the
             # question and must stay unstamped so the retry happens.
             probe_answered = False
+            # Pre-filled by build_refresh_queue for resumed-pending entries
+            # (remote_chapter_count in the index beats local → skip probe).
+            if "remote" in entry:
+                with probe_progress_lock:
+                    completed_count[0] += 1
+                    progress(
+                        f"  [probe {completed_count[0]}/{total}] "
+                        f"{entry['rel']}: "
+                        f"{entry['remote']} chapter(s) upstream "
+                        "(from index — probe skipped)"
+                    )
+                return
+            remote_count: int | None = None
             try:
                 entry["remote"] = scraper.get_chapter_count(entry["url"])
+                remote_count = entry["remote"]
                 outcome = f"{entry['remote']} chapter(s) upstream"
                 probe_answered = True
             except StoryNotFoundError as exc:
@@ -978,7 +1070,7 @@ def _run_update_queue(
             # probe workers from reporting their own progress lines.
             if probe_answered and on_probe_complete is not None:
                 try:
-                    on_probe_complete(entry["url"])
+                    on_probe_complete(entry["url"], remote_count)
                 except Exception:  # pragma: no cover — callback is best-effort
                     logger.debug(
                         "on_probe_complete callback raised", exc_info=True,
@@ -1062,6 +1154,7 @@ def _run_update_queue(
             ok = _download_one(
                 entry["url"], args, output_dir,
                 update_path=path, existing_chapters=local,
+                status_callback=progress,
             )
         except KeyboardInterrupt:
             progress("\nCancelled.")
@@ -1300,10 +1393,12 @@ def _handle_update_library(args: argparse.Namespace) -> None:
     # Updates. Flushes every N probes so a Ctrl+C mid-run keeps the
     # work done so far — previously an interrupted 800-story probe
     # left no trace of the completed entries and the next run
-    # re-checked every one of them.
+    # re-checked every one of them. As of the resume-aware refactor
+    # we also carry the per-URL remote chapter count so build_refresh_queue
+    # on the next run can spot pending downloads without re-probing.
     _STAMP_FLUSH_EVERY = 25
     _stamp_lock = threading.Lock()
-    _pending_stamps: list[str] = []
+    _pending_stamps: dict[str, int | None] = {}
 
     def _flush_stamps_locked() -> None:
         if not _pending_stamps or args.dry_run:
@@ -1311,7 +1406,7 @@ def _handle_update_library(args: argparse.Namespace) -> None:
         try:
             from .library.index import LibraryIndex
             idx = LibraryIndex.load()
-            idx.mark_probed(root_resolved, list(_pending_stamps))
+            idx.mark_probed(root_resolved, dict(_pending_stamps))
         except (OSError, ValueError) as exc:
             logger.exception(
                 "probe-stamp flush failed (pending=%d)",
@@ -1320,9 +1415,9 @@ def _handle_update_library(args: argparse.Namespace) -> None:
             print(f"Warning: probe-stamp flush failed: {exc}")
         _pending_stamps.clear()
 
-    def _on_probe_complete(url: str) -> None:
+    def _on_probe_complete(url: str, remote_count: int | None = None) -> None:
         with _stamp_lock:
-            _pending_stamps.append(url)
+            _pending_stamps[url] = remote_count
             if len(_pending_stamps) >= _STAMP_FLUSH_EVERY:
                 _flush_stamps_locked()
 
@@ -1654,6 +1749,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "With --update-library: ignore --recheck-interval and "
             "probe every story. Equivalent to --recheck-interval 0."
+        ),
+    )
+    parser.add_argument(
+        "--refetch-all",
+        action="store_true",
+        help=(
+            "During updates, re-download every chapter from upstream "
+            "instead of merging newly-downloaded chapters with the "
+            "ones already in your existing file. Use when you suspect "
+            "an author silently revised old chapters — the default "
+            "merge-in-place reuses the existing file's chapter bodies."
         ),
     )
     parser.add_argument(

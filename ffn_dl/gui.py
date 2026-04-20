@@ -1153,7 +1153,7 @@ class MainFrame(wx.Frame):
         dlg.ShowModal()
         dlg.Destroy()
 
-    def _on_update(self, event):
+    def _on_update(self, event, *, refetch_all: bool = False):
         if self._downloading:
             return
         dlg = wx.FileDialog(
@@ -1182,12 +1182,31 @@ class MainFrame(wx.Frame):
         self.output_ctrl.SetValue(str(Path(path).parent))
 
         self._set_busy(True, kind="download")
-        self._log(f"Updating: {url} (existing file has {existing} chapters)")
+        mode = " (fresh re-download)" if refetch_all else ""
+        self._log(
+            f"Updating{mode}: {url} (existing file has {existing} chapters)"
+        )
         threading.Thread(
             target=self._run_download, args=(url,),
-            kwargs={"skip_chapters": existing, "is_update": True},
+            kwargs={
+                "skip_chapters": existing,
+                "is_update": True,
+                "update_path": Path(path),
+                "refetch_all": refetch_all,
+            },
             daemon=True,
         ).start()
+
+    def _on_update_refetch_all(self, event):
+        """Update handler that forces a full upstream re-fetch.
+
+        Merge-in-place is the default for updates — it reads existing
+        chapters back out of the local file instead of re-downloading
+        them. This variant bypasses the shortcut for the (rare) case
+        where an author silently revised old chapters and the user
+        wants the refreshed text.
+        """
+        self._on_update(event, refetch_all=True)
 
     # ── Search frames (opened via Search menu or Ctrl+1..5) ──
 
@@ -1388,10 +1407,14 @@ class MainFrame(wx.Frame):
             hr_as_stars=hr_as_stars, strip_notes=strip_notes,
         )
 
-    def _run_download(self, url, skip_chapters=0, is_update=False):
+    def _run_download(
+        self, url, skip_chapters=0, is_update=False,
+        update_path=None, refetch_all=False,
+    ):
         try:
             from .ao3 import AO3Scraper
             from .erotica import LiteroticaScraper
+            from .updater import ChaptersNotReadableError, read_chapters
 
             scraper = self._scraper_for(url)
 
@@ -1433,8 +1456,43 @@ class MainFrame(wx.Frame):
                 return
 
             if is_update:
-                self._log(f"Found {len(story.chapters)} new chapters. Re-exporting...")
-                story = scraper.download(url, progress_callback=progress, skip_chapters=0)
+                new_count = len(story.chapters)
+                # Merge-in-place: read existing chapters from disk and
+                # concatenate with the just-downloaded new ones. Avoids
+                # re-downloading every chapter from upstream just to
+                # re-export, which used to silently take minutes per
+                # story on libraries without a populated local cache.
+                # ``refetch_all`` bypasses the shortcut so users who
+                # suspect an author revised old chapters can still pull
+                # a fresh copy on demand.
+                merged = None
+                if not refetch_all and update_path is not None:
+                    try:
+                        merged = read_chapters(update_path)
+                    except ChaptersNotReadableError as exc:
+                        self._log(
+                            f"Couldn't read existing chapters ({exc}); "
+                            "re-downloading full story..."
+                        )
+
+                if merged is not None:
+                    self._log(
+                        f"Found {new_count} new chapter(s). Merging "
+                        f"with {len(merged)} existing."
+                    )
+                    story.chapters = sorted(
+                        merged + list(story.chapters), key=lambda c: c.number,
+                    )
+                else:
+                    label = (
+                        "Re-downloading full story (fresh copy requested)..."
+                        if refetch_all
+                        else f"Found {new_count} new chapters. Re-exporting..."
+                    )
+                    self._log(label)
+                    story = scraper.download(
+                        url, progress_callback=progress, skip_chapters=0,
+                    )
 
             self._log(f"\n  Title:    {story.title}")
             self._log(f"  Author:   {story.author}")
@@ -1607,6 +1665,18 @@ class MainFrame(wx.Frame):
         bar = wx.MenuBar()
 
         file_menu = wx.Menu()
+        update_item = file_menu.Append(
+            wx.ID_ANY, "&Update File...\tCtrl+U",
+        )
+        self.Bind(wx.EVT_MENU, self._on_update, update_item)
+        update_fresh_item = file_menu.Append(
+            wx.ID_ANY,
+            "Update File with &Fresh Copy...\tCtrl+Shift+U",
+        )
+        self.Bind(
+            wx.EVT_MENU, self._on_update_refetch_all, update_fresh_item,
+        )
+        file_menu.AppendSeparator()
         self._confirm_close_item = file_menu.AppendCheckItem(
             wx.ID_ANY, "&Warn before closing during downloads",
         )

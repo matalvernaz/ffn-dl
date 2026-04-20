@@ -6,8 +6,10 @@ long probe cycle (800+ FFN stories at 6 s/probe = ~80 minutes) lost
 every stamp, so the *next* Check for Updates re-probed every story
 they had already checked. These tests guard against that regression:
 
-* ``_run_update_queue`` fires ``on_probe_complete(url)`` for every
-  successful probe, never for failures.
+* ``_run_update_queue`` fires ``on_probe_complete(url, remote_count)``
+  for every successful probe, never for failures. The ``remote_count``
+  is ``None`` when the probe answered with "story gone" so the
+  pending-download marker is cleared cleanly.
 * Pending stamps get flushed to the index in batches so a partial
   run leaves persistent progress on disk.
 """
@@ -43,6 +45,63 @@ def _fake_scraper(results):
     return scraper
 
 
+def test_probe_entry_skips_network_when_remote_prefilled(monkeypatch):
+    """Pending-download entries carry ``remote`` in the queue already
+    (build_refresh_queue read it from the index). ``probe_entry`` must
+    treat those as answered and never call ``get_chapter_count`` —
+    otherwise the resume path still spends a full probe budget on
+    entries we already know the answer for."""
+    from ffn_dl import cli
+    from pathlib import Path
+
+    call_count = [0]
+
+    def raise_if_called(url):
+        call_count[0] += 1
+        raise AssertionError(
+            "probe_entry should not hit the network for pre-filled entries"
+        )
+
+    fake = types.SimpleNamespace(
+        site_name="fake",
+        concurrency=1,
+        get_chapter_count=raise_if_called,
+    )
+    monkeypatch.setattr(cli, "_build_scraper", lambda url, args: fake)
+    monkeypatch.setattr(cli, "_detect_site", lambda url: _FakeSiteClass)
+
+    # All three entries arrive with remote already known (from a prior
+    # interrupted run's stored remote_chapter_count).
+    probe_queue = [
+        {
+            "path": Path(f"/tmp/x{i}.epub"), "rel": f"x{i}.epub",
+            "url": f"https://example.com/s/{i}",
+            "local": 5, "remote": 10,
+        }
+        for i in range(1, 4)
+    ]
+
+    probed: list[tuple[str, int | None]] = []
+
+    def on_complete(url, remote_count=None):
+        probed.append((url, remote_count))
+
+    args = types.SimpleNamespace(dry_run=True, format="html")
+    cli._run_update_queue(
+        probe_queue, args, workers=1,
+        skipped_count=0,
+        label="test",
+        progress=lambda _: None,
+        on_probe_complete=on_complete,
+    )
+
+    # No network calls happened — the resume fast path skipped them all.
+    assert call_count[0] == 0
+    # Resumed entries don't need on_probe_complete to re-stamp: their
+    # remote is already in the index from the probe that discovered it.
+    assert probed == []
+
+
 def test_probe_complete_callback_fires_on_definitive_answers(monkeypatch):
     """Callback fires whenever the probe got a *definitive* answer
     from upstream — either a chapter count (story exists) or a
@@ -73,10 +132,10 @@ def test_probe_complete_callback_fires_on_definitive_answers(monkeypatch):
         for i in range(1, 6)
     ]
 
-    probed = []
+    probed: list[tuple[str, int | None]] = []
 
-    def on_complete(url):
-        probed.append(url)
+    def on_complete(url, remote_count=None):
+        probed.append((url, remote_count))
 
     args = types.SimpleNamespace(dry_run=True, format="html")
 
@@ -88,11 +147,14 @@ def test_probe_complete_callback_fires_on_definitive_answers(monkeypatch):
         on_probe_complete=on_complete,
     )
 
-    # Stories 1, 2, 3 got a definitive answer; 4 and 5 didn't.
+    # Stories 1, 2, 3 got a definitive answer; 4 and 5 didn't. Story 2's
+    # StoryNotFoundError is answered-but-count-less (remote_count=None)
+    # so a prior pending-count marker gets cleared by the flush — 1 and
+    # 3 carry the fresh upstream counts through for resume support.
     assert probed == [
-        "https://example.com/s/1",
-        "https://example.com/s/2",
-        "https://example.com/s/3",
+        ("https://example.com/s/1", 10),
+        ("https://example.com/s/2", None),
+        ("https://example.com/s/3", 12),
     ]
     # The deletion also sets upstream_missing so the GUI can surface
     # the distinction between "dead upstream" and "network flaky".

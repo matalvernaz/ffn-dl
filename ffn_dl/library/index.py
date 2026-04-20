@@ -25,7 +25,8 @@ Schema is versioned. v1:
               "file_mtime": <float>,   # stat().st_mtime, for cache-invalidate
               "file_size": <int>,      # stat().st_size,  for cache-invalidate
               "last_checked": "<ISO-8601 UTC>",
-              "last_probed": "<ISO-8601 UTC>"  # optional
+              "last_probed": "<ISO-8601 UTC>",      # optional
+              "remote_chapter_count": N             # optional — latest probe's upstream count
             }
           },
           "untrackable": [
@@ -172,13 +173,20 @@ class LibraryIndex:
                 return False
 
             # Preserve fields the scanner doesn't rewrite (last_probed,
-            # duplicate_relpaths) so a re-scan never forgets that the
-            # update path already hit the remote for this URL. Without
-            # this merge, rescan_library() after --update-library would
-            # wipe last_probed and defeat the TTL skip on the next run.
+            # duplicate_relpaths, remote_chapter_count) so a re-scan
+            # never forgets that the update path already hit the remote
+            # for this URL. Without this merge, rescan_library() after
+            # --update-library would wipe last_probed and defeat the TTL
+            # skip on the next run — and wipe remote_chapter_count,
+            # losing the pending-update marker that lets an interrupted
+            # batch resume without re-probing every story.
             existing_preserved = {}
             if existing is not None:
-                for k in ("last_probed", "duplicate_relpaths"):
+                for k in (
+                    "last_probed",
+                    "remote_chapter_count",
+                    "duplicate_relpaths",
+                ):
                     if k in existing:
                         existing_preserved[k] = existing[k]
 
@@ -227,9 +235,30 @@ class LibraryIndex:
         self._library(root)["last_scan"] = _now_iso()
 
     def mark_probed(
-        self, root: Path, urls: list[str], *, timestamp: str | None = None,
+        self,
+        root: Path,
+        probed: "list[str] | dict[str, int | None]",
+        *,
+        timestamp: str | None = None,
     ) -> int:
-        """Stamp ``last_probed`` for every URL in ``urls``.
+        """Stamp ``last_probed`` (and optionally ``remote_chapter_count``).
+
+        ``probed`` is either:
+
+        * A ``list[str]`` of URLs — stamps ``last_probed`` only (the
+          original behaviour, preserved for the belt-and-braces pass
+          where the caller already flushed counts and is just making
+          sure every queued URL gets timestamped).
+        * A ``dict[str, int | None]`` mapping URL → remote chapter
+          count — stamps both ``last_probed`` and ``remote_chapter_count``
+          per entry. ``None`` means "probe answered but had no count"
+          (e.g. StoryNotFoundError); stamps ``last_probed`` and clears
+          any stale count so the TTL absorbs the dead story.
+
+        The count-aware shape is what enables resume-without-reprobe:
+        if the process dies mid-batch, a later run sees
+        ``remote_chapter_count > local`` on the unfinished entries and
+        can queue them for download directly.
 
         Returns how many entries were actually updated — URLs absent
         from the index (e.g. a story that got removed between probe
@@ -240,12 +269,29 @@ class LibraryIndex:
         stories = self._library(root)["stories"]
         touched = 0
         missed: list[str] = []
-        for url in urls:
+
+        if isinstance(probed, dict):
+            items: "list[tuple[str, int | None]]" = list(probed.items())
+        else:
+            items = [(url, None) for url in probed]
+
+        with_count_updates = isinstance(probed, dict)
+
+        for url, remote_count in items:
             entry = stories.get(url)
             if entry is None:
                 missed.append(url)
                 continue
             entry["last_probed"] = stamp
+            if with_count_updates:
+                if remote_count is None:
+                    # Probe answered with "no count available" —
+                    # StoryNotFoundError, deletion, etc. Clear any stale
+                    # pending-count so the next refresh doesn't treat a
+                    # ghost as needing a download.
+                    entry.pop("remote_chapter_count", None)
+                else:
+                    entry["remote_chapter_count"] = int(remote_count)
             touched += 1
         if touched:
             self.save()
@@ -255,7 +301,7 @@ class LibraryIndex:
         # stored library root, which silently drains stamps.
         logger.info(
             "mark_probed: stamped %d/%d under %r",
-            touched, len(urls), _normalize_root(root),
+            touched, len(items), _normalize_root(root),
         )
         if missed:
             logger.warning(
