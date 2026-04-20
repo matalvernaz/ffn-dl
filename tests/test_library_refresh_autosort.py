@@ -187,6 +187,18 @@ def test_default_refresh_args_honors_overrides():
     assert args.probe_workers == 9
 
 
+def test_default_refresh_args_carries_refetch_all():
+    """The library GUI's Fresh Copies button sets refetch_all=True.
+    ``_download_one`` reads ``args.refetch_all`` to decide whether to
+    skip the merge-in-place shortcut, so it has to survive the
+    Namespace round-trip without a getattr fallback silently eating it."""
+    args = default_refresh_args(refetch_all=True)
+    assert args.refetch_all is True
+
+    args_default = default_refresh_args()
+    assert args_default.refetch_all is False
+
+
 # ── Auto-sort ────────────────────────────────────────────────────
 
 

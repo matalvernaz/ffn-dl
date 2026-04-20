@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.23.12 — 2026-04-20
+
+### Feature
+
+- **Library manager: new "Update (Fresh Copies)" button.** Mirrors
+  the single-file ``--refetch-all`` / Ctrl+Shift+U escape hatch at
+  the library-wide level: re-download every chapter from upstream
+  instead of merging newly-downloaded chapters with the ones already
+  on disk. Slower, but catches silent author edits to old chapters
+  across a whole library in one pass. The existing "Check for
+  Updates" button still does the fast merge-in-place flow by default.
+
 ## 1.23.11 — 2026-04-20
 
 ### Fix

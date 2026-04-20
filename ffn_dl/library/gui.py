@@ -162,6 +162,20 @@ class LibraryDialog(wx.Dialog):
         )
         btn_row.Add(self.force_update_btn, 0, wx.RIGHT, 6)
 
+        self.refetch_all_btn = wx.Button(
+            panel, label="Update (Fres&h Copies)",
+        )
+        self.refetch_all_btn.SetToolTip(
+            "Re-download every chapter from upstream instead of merging "
+            "new chapters with the ones already on disk. Slower, but "
+            "catches silent author edits to old chapters."
+        )
+        self.refetch_all_btn.Bind(
+            wx.EVT_BUTTON,
+            lambda e: self._on_check_updates(e, refetch_all=True),
+        )
+        btn_row.Add(self.refetch_all_btn, 0, wx.RIGHT, 6)
+
         self.review_btn = wx.Button(panel, label="Review &Ambiguous...")
         self.review_btn.Bind(wx.EVT_BUTTON, self._on_review)
         btn_row.Add(self.review_btn, 0, wx.RIGHT, 6)
@@ -285,12 +299,23 @@ class LibraryDialog(wx.Dialog):
         self._append_status(f"Scan failed: {exc}")
         self._set_busy(False)
 
-    def _on_check_updates(self, event: wx.Event, *, force: bool = False) -> None:
+    def _on_check_updates(
+        self,
+        event: wx.Event,
+        *,
+        force: bool = False,
+        refetch_all: bool = False,
+    ) -> None:
         root = self._current_path()
         if root is None:
             return
         self._save_prefs()
-        if force:
+        if refetch_all:
+            self._append_status(
+                f"Updating {root} with fresh copies "
+                "(re-downloading every chapter)..."
+            )
+        elif force:
             self._append_status(
                 f"Forcing full recheck of {root} (ignoring recent-probe TTL)..."
             )
@@ -314,6 +339,7 @@ class LibraryDialog(wx.Dialog):
                 args = default_refresh_args(
                     recheck_interval_s=recheck_interval,
                     force_recheck=force,
+                    refetch_all=refetch_all,
                 )
                 probe_queue, skipped = build_refresh_queue(
                     root,
