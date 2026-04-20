@@ -522,7 +522,25 @@ class SearchFrame(wx.Frame):
         lit_cat_browse = (
             self.site_key == "literotica" and filters.get("category")
         )
-        if not query and not (list_browse or rr_filter_only or lit_cat_browse):
+        # Erotica fan-out: tag-only (or site + category/fandom) browses
+        # are valid without a query — the chosen kink IS the search
+        # target. Every back-end site's search function treats an empty
+        # query as "browse the tag/category" rather than "return
+        # everything", so the fan-out still produces a useful batch.
+        erotica_filter_only = (
+            self.site_key == "erotica"
+            and any(
+                filters.get(k)
+                for k in (
+                    "tags", "tags_picked", "sites_choice",
+                    "category", "fandom",
+                )
+            )
+        )
+        if not query and not (
+            list_browse or rr_filter_only or lit_cat_browse
+            or erotica_filter_only
+        ):
             self._log("Error: Please enter a search query.")
             return
         self.main_frame._set_busy(True, kind="search")

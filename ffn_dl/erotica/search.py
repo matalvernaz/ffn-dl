@@ -607,28 +607,53 @@ def search_darkwanderer(query: str, *, page: int = 1,
     return out
 
 
+_GREATFEET_TITLE_BOILERPLATE_RE = re.compile(
+    r"^\s*(?:new|updated|hot|click here|preview|picture of)\b",
+    re.I,
+)
+
+
 def search_greatfeet(query: str, *, page: int = 1,
                      **_: object) -> list[dict]:
     """GreatFeet: ``/tickles.htm`` lists recent stories by ``ts<N>.htm``
     href; older issues at ``/archiveN.htm`` (weekly issues 1..484+).
-    The index is pure static HTML so a single fetch gets us a batch
-    of story links to filter."""
-    del page  # GreatFeet's tickles.htm is a single page — no native
-    # pagination we can usefully page over.
+    The page is 1997-era HTML (unclosed ``<a>`` tags, inline font
+    styling) so we lean on BeautifulSoup to let it tolerate the
+    malformed markup, then read the link text as the story title."""
+    del page  # tickles.htm is a single page — archive pages handle
+    # older stories via a separate ``/archive<N>.htm`` route.
     url = "https://www.greatfeet.com/tickles.htm"
     html = _fetch(url)
     if not html:
         return []
+    soup = BeautifulSoup(html, "lxml")
     out: list[dict] = []
     seen = set()
-    for m in re.finditer(r'href="[^"]*?/stories/ts(\d+)\.htm"', html):
+    for a in soup.find_all(
+        "a", href=re.compile(r"/stories/ts(\d+)\.htm", re.I),
+    ):
+        m = re.search(r"/stories/ts(\d+)\.htm", a.get("href", ""))
+        if not m:
+            continue
         sid = m.group(1)
         if sid in seen:
             continue
-        seen.add(sid)
-        title = f"GreatFeet story {sid}"
+        # The real title sits as the link text; BS4 ignores the broken
+        # ``<a>`` close tag and pulls the text that precedes the next
+        # ``</font>``. We strip any trailing "Foot Fetish Offering"
+        # alt-text that rides along on the "new!" marker image.
+        title = a.get_text(" ", strip=True)
+        title = re.sub(
+            r"\s*(?:foot fetish offering|new!?)\s*", "", title, flags=re.I,
+        ).strip()
+        # Links that only carry a teaser image (no text) come back as
+        # empty; fall back to the id-derived placeholder so the row
+        # still has a title the reader can scan.
+        if not title or _GREATFEET_TITLE_BOILERPLATE_RE.match(title):
+            title = f"GreatFeet story {sid}"
         if not _matches_query(query, title):
             continue
+        seen.add(sid)
         out.append({
             "title": title, "author": "Anonymous",
             "url": f"https://www.greatfeet.com/stories/ts{sid}.htm",

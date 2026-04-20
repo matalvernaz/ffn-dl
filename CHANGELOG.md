@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.22.1 — 2026-04-20
+
+### Fix
+
+- **Erotica search with tags but no keyword now works.** The
+  SearchFrame's empty-query guard accepted Royal Road / Literotica
+  filter-only browses but blocked the erotica fan-out when only a
+  tag or site choice was set, responding with "Please enter a
+  search query." even though every back-end erotica function handles
+  empty queries fine (they treat them as "browse the tag"). Added an
+  ``erotica_filter_only`` branch alongside the RR/Lit ones.
+
+- **GreatFeet search results now show real story titles.** The
+  first pass just labeled every row ``GreatFeet story <N>`` because
+  the listing-page regex didn't reach the title text — GreatFeet's
+  1997-era HTML has unclosed ``<a>`` tags that browsers tolerate but
+  a naive regex skips over. BeautifulSoup handles the bad markup,
+  the link text pulls through as the title, and the marker-image
+  "Foot Fetish Offering" alt-text gets stripped so titles read
+  cleanly.
+
 ## 1.22.0 — 2026-04-20
 
 ### Add
