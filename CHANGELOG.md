@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.23.7 — 2026-04-20
+
+### Fix
+
+- **403 diagnostic was reporting an empty cookie jar even when one
+  existed.** curl_cffi's ``Session.cookies`` iterates as cookie
+  *names* (strings), not Cookie objects — so ``c.name`` raised
+  AttributeError inside the diagnostic, the ``except Exception``
+  swallowed it, and every line printed ``jar=[]``. Now reads from
+  ``sess.cookies.jar`` (the underlying ``http.cookiejar.CookieJar``)
+  and formats each entry as ``name@domain`` so you can see at a
+  glance whether ``__cf_bm`` is persisting across the 403→200 pair.
+
 ## 1.23.6 — 2026-04-20
 
 ### Diagnostics

@@ -203,8 +203,13 @@ class BaseScraper:
             headers = dict(resp.headers.items())
         except Exception:
             headers = {}
+        # curl_cffi's Cookies object iterates as cookie names (strings),
+        # not Cookie objects — the underlying jar is what holds Cookie
+        # records with .name/.value/.domain. Use the jar for an accurate
+        # picture of what the session will send back.
         try:
-            cookie_names = sorted({c.name for c in sess.cookies})
+            jar_cookies = list(sess.cookies.jar)
+            cookie_names = sorted({f"{c.name}@{c.domain}" for c in jar_cookies})
         except Exception:
             cookie_names = []
         body_prefix = ""
