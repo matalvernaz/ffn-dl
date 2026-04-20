@@ -139,6 +139,43 @@ def _wattpad_search_spec():
     }
 
 
+def _erotica_search_spec():
+    """Unified "Erotic Story Search" — fans out across all eight
+    erotica sites at once. Tag search is the primary input (multi-
+    picker dialog) and sits immediately after the query box, per
+    feedback that buried tag UX (as in the old Literotica-only
+    search) makes this surface unusable."""
+    from .erotica.search import (
+        EROTICA_SITE_SLUGS,
+        EROTICA_TAG_VOCABULARY,
+        search_erotica,
+    )
+
+    min_words_choices = [
+        "any", "1k+", "5k+", "10k+", "30k+", "50k+", "150k+",
+    ]
+    return {
+        "label": "Erotic Story Search",
+        "search_fn": search_erotica,
+        "filters": [
+            ("&Site:", "sites_choice", list(EROTICA_SITE_SLUGS)),
+            ("Min &words:", "min_words", min_words_choices),
+        ],
+        # Tags are the primary input — first multi-picker so the
+        # tab order lands users on tags directly after the query box.
+        "multi_pickers": [
+            (
+                "Ta&gs:", "tags", "Pick erotica tags",
+                list(EROTICA_TAG_VOCABULARY),
+            ),
+        ],
+        "text_filters": [
+            ("&Category (Lush/Nifty):", "category"),
+            ("&Fandom (AFF):", "fandom"),
+        ],
+    }
+
+
 class SearchFrame(wx.Frame):
     """Non-modal per-site search window.
 
@@ -157,6 +194,7 @@ class SearchFrame(wx.Frame):
         "royalroad": "Royal Road",
         "literotica": "Literotica",
         "wattpad": "Wattpad",
+        "erotica": "Erotic Story Search",
     }
 
     _PREF_KEY_BY_SITE = {
@@ -165,6 +203,7 @@ class SearchFrame(wx.Frame):
         "royalroad": "search_state_royalroad",
         "literotica": "search_state_literotica",
         "wattpad": "search_state_wattpad",
+        "erotica": "search_state_erotica",
     }
 
     def __init__(self, main_frame, site_key, spec):

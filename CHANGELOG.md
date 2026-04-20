@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.21.0 — 2026-04-20
+
+### Add
+
+- **Erotica subpackage with seven new site scrapers.** Added
+  ``ffn_dl/erotica/`` grouping every erotica-focused scraper under
+  one visible bucket, and populated it with scrapers for
+  Adult-FanFiction.org (AFF), StoriesOnline (SOL), Nifty, SexStories,
+  MCStories, Lushstories, and Fictionmania. Literotica moved into the
+  same subpackage so the erotica surface is one file tree — the rest
+  of the codebase now imports ``from .erotica import LiteroticaScraper``
+  instead of ``from .literotica``. Existing general-purpose scrapers
+  (AO3, FFN, FicWad, Royal Road, MediaMiner, Wattpad) are unchanged.
+  All eight erotica sites are wired into URL auto-detection,
+  ``canonical_url`` (with AFF/Fictionmania query-string id handling
+  so library dedup picks up every variant), clipboard URL extraction,
+  and the CLI download path.
+
+- **Unified "Erotic Story Search" window (Ctrl+6).** A single
+  SearchFrame that fans out across all eight erotica sites in
+  parallel, merges results, and tags each row with its origin site.
+  The site dropdown narrows to one archive when the user wants
+  site-specific browsing. **Tags are the primary input** (multi-
+  picker dialog, first focus position after the query box) — a
+  direct answer to the long-standing gripe that the Literotica-only
+  search buried tag entry. The unified tag vocabulary covers feet,
+  femdom, spanking, cuckold, MC, humiliation, transgender, and the
+  other cross-site common kinks; site-specific vocabularies
+  (MCStories two-letter codes, Lush category slugs, SOL colon-joined
+  tag URLs) are translated automatically.
+
+### Change
+
+- **BaseScraper now defines default ``is_author_url`` /
+  ``is_series_url`` static methods** returning False, so the seven
+  new scrapers (most of which have no author/series concept) don't
+  need to carry stub implementations. AO3, FFN, Literotica, SOL
+  still override with real checks.
+
+### Dropped candidates
+
+- ASSTR (domain offline — replaced with AFF as the "general tagged
+  adult fanfic" slot).
+- Kristen Archives (JS fingerprint gate requires a browser runtime).
+- BDSM Library (connection timed out on every probe).
+- BigCloset TopShelf, Dark Wanderer (structurally different — Drupal
+  and XenForo — and left for a follow-up release).
+
 ## 1.20.18 — 2026-04-19
 
 ### Add

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup
 
-from ffn_dl.literotica import LiteroticaScraper, _slug_to_id
+from ffn_dl.erotica.literotica import LiteroticaScraper, _slug_to_id
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

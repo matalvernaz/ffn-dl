@@ -491,6 +491,22 @@ class BaseScraper:
     def parse_story_id(url_or_id):
         raise NotImplementedError
 
+    @staticmethod
+    def is_author_url(url):
+        """True if ``url`` is an author / user profile page on this site.
+
+        Default implementation returns False — scrapers that want the
+        CLI and GUI to offer "download all stories by this author"
+        should override with a site-specific check."""
+        return False
+
+    @staticmethod
+    def is_series_url(url):
+        """True if ``url`` is a series / universe page grouping multiple
+        stories. Default False — AO3, Literotica, and StoriesOnline
+        override; the rest have no series concept."""
+        return False
+
     def download(self, url_or_id, progress_callback=None, skip_chapters=0, chapters=None):
         raise NotImplementedError
 

@@ -17,8 +17,8 @@ import re
 
 from bs4 import BeautifulSoup
 
-from .models import Chapter, Story, chapter_in_spec
-from .scraper import BaseScraper, StoryNotFoundError
+from ..models import Chapter, Story, chapter_in_spec
+from ..scraper import BaseScraper, StoryNotFoundError
 
 logger = logging.getLogger(__name__)
 

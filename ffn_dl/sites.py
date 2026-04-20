@@ -10,8 +10,17 @@ from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from .ao3 import AO3Scraper
+from .erotica import (
+    AFFScraper,
+    FictionmaniaScraper,
+    LiteroticaScraper,
+    LushStoriesScraper,
+    MCStoriesScraper,
+    NiftyScraper,
+    SexStoriesScraper,
+    StoriesOnlineScraper,
+)
 from .ficwad import FicWadScraper
-from .literotica import LiteroticaScraper
 from .mediaminer import MediaMinerScraper
 from .royalroad import RoyalRoadScraper
 from .scraper import BaseScraper, FFNScraper
@@ -49,6 +58,47 @@ _STORY_URL_PATTERNS: list[tuple[type[BaseScraper], re.Pattern[str]]] = [
             r"https?://(?:www\.|m\.)?wattpad\.com/(?:story/)?\d+", re.I
         ),
     ),
+    # ── Erotica subpackage ───────────────────────────────────────
+    (
+        AFFScraper,
+        re.compile(
+            r"https?://[a-z0-9-]+\.adult-fanfiction\.org/story\.php\?no=\d+",
+            re.I,
+        ),
+    ),
+    (
+        StoriesOnlineScraper,
+        re.compile(r"https?://(?:www\.)?storiesonline\.net/s/\d+", re.I),
+    ),
+    (
+        NiftyScraper,
+        re.compile(r"https?://(?:www\.)?nifty\.org/nifty/[a-z0-9/_-]+", re.I),
+    ),
+    (
+        SexStoriesScraper,
+        re.compile(r"https?://(?:www\.)?sexstories\.com/story/\d+", re.I),
+    ),
+    (
+        MCStoriesScraper,
+        re.compile(
+            r"https?://(?:www\.)?mcstories\.com/[A-Za-z][A-Za-z0-9_-]+/?",
+            re.I,
+        ),
+    ),
+    (
+        LushStoriesScraper,
+        re.compile(
+            r"https?://(?:www\.)?lushstories\.com/stories/[a-z0-9-]+/[a-z0-9-]+",
+            re.I,
+        ),
+    ),
+    (
+        FictionmaniaScraper,
+        re.compile(
+            r"https?://(?:www\.)?fictionmania\.tv/stories/read(?:html|text)story\.html\?storyID=\d+",
+            re.I,
+        ),
+    ),
     (
         FFNScraper,
         re.compile(r"https?://(?:www\.)?fanfiction\.net/s/\d+", re.I),
@@ -67,6 +117,13 @@ _HOSTNAME_TO_SCRAPER: list[tuple[str, type[BaseScraper]]] = [
     ("mediaminer.org", MediaMinerScraper),
     ("literotica.com", LiteroticaScraper),
     ("wattpad.com", WattpadScraper),
+    ("adult-fanfiction.org", AFFScraper),
+    ("storiesonline.net", StoriesOnlineScraper),
+    ("nifty.org", NiftyScraper),
+    ("sexstories.com", SexStoriesScraper),
+    ("mcstories.com", MCStoriesScraper),
+    ("lushstories.com", LushStoriesScraper),
+    ("fictionmania.tv", FictionmaniaScraper),
 ]
 
 # Scrapers whose is_author_url / is_series_url static methods should be
@@ -79,7 +136,29 @@ ALL_SCRAPERS: list[type[BaseScraper]] = [
     MediaMinerScraper,
     LiteroticaScraper,
     WattpadScraper,
+    AFFScraper,
+    StoriesOnlineScraper,
+    NiftyScraper,
+    SexStoriesScraper,
+    MCStoriesScraper,
+    LushStoriesScraper,
+    FictionmaniaScraper,
 ]
+
+# Erotica-specific scraper classes, exported for the unified Erotic
+# Story Search window. Keeping the tuple here (rather than inside
+# ``erotica/__init__.py``) lets callers ask "is this scraper erotica?"
+# without pulling in the whole erotica subpackage symbol table.
+EROTICA_SCRAPERS: tuple[type[BaseScraper], ...] = (
+    LiteroticaScraper,
+    AFFScraper,
+    StoriesOnlineScraper,
+    NiftyScraper,
+    SexStoriesScraper,
+    MCStoriesScraper,
+    LushStoriesScraper,
+    FictionmaniaScraper,
+)
 
 
 def detect_scraper(url: str) -> type[BaseScraper]:
@@ -186,7 +265,37 @@ _CANONICAL_RULES: list[tuple[str, str, re.Pattern[str], str]] = [
         # the /story/<id> form that the scraper uses as its canonical.
         re.compile(r"^/(?:story/)?(\d+)"), "/story/{}",
     ),
+    (
+        "storiesonline.net", "storiesonline.net",
+        re.compile(r"^/s/(\d+)"), "/s/{}",
+    ),
+    (
+        "nifty.org", "www.nifty.org",
+        re.compile(r"^/(nifty/[a-z0-9/_-]+?)/?$"), "/{}/",
+    ),
+    (
+        "sexstories.com", "www.sexstories.com",
+        re.compile(r"^/story/(\d+)"), "/story/{}",
+    ),
+    (
+        "mcstories.com", "mcstories.com",
+        re.compile(r"^/([A-Za-z][A-Za-z0-9_-]+)/?(?:index\.html)?$"),
+        "/{}/",
+    ),
+    (
+        "lushstories.com", "www.lushstories.com",
+        re.compile(
+            r"^/stories/([a-z0-9-]+/[a-z0-9][a-z0-9-]+)/?$", re.I,
+        ),
+        "/stories/{}",
+    ),
 ]
+
+# Sites whose story id lives in the query string rather than the path.
+# ``canonical_url`` special-cases these so we don't drop the query
+# during its normal "strip query and fragment" cleanup.
+_AFF_NO_RE = re.compile(r"(?:^|[?&])no=(\d+)")
+_FM_STORY_RE = re.compile(r"(?:^|[?&])storyID=(\d+)", re.I)
 
 
 def canonical_url(url: str) -> str:
@@ -207,6 +316,28 @@ def canonical_url(url: str) -> str:
     parts = urlsplit(raw)
     netloc = parts.netloc.lower()
     path = parts.path
+
+    # AFF is subdomain-per-fandom with id in ``?no=<N>`` — preserve both
+    # the subdomain (different subs carry different stories at the same
+    # id) and the query parameter while dropping everything else.
+    if netloc.endswith("adult-fanfiction.org"):
+        m = _AFF_NO_RE.search(parts.query or "")
+        if m:
+            return urlunsplit(
+                ("https", netloc, "/story.php", f"no={m.group(1)}", "")
+            )
+
+    # Fictionmania's id lives in ``?storyID=<N>`` on readhtmlstory.html.
+    # Canonical form pins it to the HTML-reader URL so the text-reader
+    # fallback still collapses to the same key.
+    if "fictionmania.tv" in netloc:
+        m = _FM_STORY_RE.search(parts.query or "")
+        if m:
+            return urlunsplit((
+                "https", "fictionmania.tv",
+                "/stories/readhtmlstory.html",
+                f"storyID={m.group(1)}", "",
+            ))
 
     for host_fragment, canonical_host, path_re, path_template in _CANONICAL_RULES:
         if host_fragment not in netloc:

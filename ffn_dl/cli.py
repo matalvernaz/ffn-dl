@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .ao3 import AO3LockedError
 from .exporters import DEFAULT_TEMPLATE, EXPORTERS, check_format_deps
-from .literotica import LiteroticaScraper
+from .erotica import LiteroticaScraper
 from .models import parse_chapter_spec
 from .scraper import (
     CloudflareBlockError,

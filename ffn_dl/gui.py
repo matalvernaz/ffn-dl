@@ -75,6 +75,7 @@ from .gui_dialogs import (
 from .gui_search import (
     SearchFrame,
     _ao3_search_spec,
+    _erotica_search_spec,
     _ffn_search_spec,
     _literotica_search_spec,
     _royalroad_search_spec,
@@ -1216,7 +1217,7 @@ class MainFrame(wx.Frame):
         try:
             from .ao3 import AO3Scraper
             from .cli import _merge_stories
-            from .literotica import LiteroticaScraper
+            from .erotica import LiteroticaScraper
 
             name = series_name
             work_urls = None
@@ -1390,7 +1391,7 @@ class MainFrame(wx.Frame):
     def _run_download(self, url, skip_chapters=0, is_update=False):
         try:
             from .ao3 import AO3Scraper
-            from .literotica import LiteroticaScraper
+            from .erotica import LiteroticaScraper
 
             scraper = self._scraper_for(url)
 
@@ -1596,6 +1597,10 @@ class MainFrame(wx.Frame):
         ("Ctrl+3", "royalroad", _royalroad_search_spec, "Search &Royal Road..."),
         ("Ctrl+4", "literotica", _literotica_search_spec, "Search &Literotica..."),
         ("Ctrl+5", "wattpad", _wattpad_search_spec, "Search &Wattpad..."),
+        (
+            "Ctrl+6", "erotica", _erotica_search_spec,
+            "&Erotic Story Search (all sites)...",
+        ),
     )
 
     def _build_menu_bar(self):
