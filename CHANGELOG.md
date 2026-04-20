@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.23.5 — 2026-04-20
+
+### Diagnostics
+
+- **Log headers and body prefix on HTTP 403, and again on the 200
+  that recovers from one.** Nearly every chapter fetch was eating a
+  403 first and succeeding on the quick retry, adding ~5 s per
+  chapter to library updates. Before tuning the backoff we need to
+  know *why* — a cookie that isn't persisting, a fingerprint the
+  impersonation profile isn't fooling, or a genuine Cloudflare gate
+  all look the same at warning level. The new ``_log_fetch_diagnostic``
+  emits a single DEBUG line on every 403 and on the success that
+  follows, with the current browser profile, cookie-jar names,
+  response headers, and the first 300 bytes of body. Diff the pair
+  to see what actually changed between the forbidden request and
+  the allowed one.
+
 ## 1.23.4 — 2026-04-20
 
 ### Fix

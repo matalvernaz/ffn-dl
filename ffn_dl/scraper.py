@@ -57,6 +57,11 @@ BLOCK_CHECK_PREFIX_BYTES = 2000
 The challenge page always puts its signature in the first kilobyte;
 AO3 has its own larger prefix (see ao3.py) for the adult-gate check."""
 
+DIAGNOSTIC_BODY_PREFIX_BYTES = 300
+"""How much of a non-200 body to emit in the debug diagnostic line.
+Enough to catch Cloudflare challenge markers, Turnstile widgets, and
+FFN's own denial templates without flooding the log."""
+
 
 class RateLimitError(Exception):
     """Raised when rate-limit retries are exhausted."""
@@ -183,6 +188,36 @@ class BaseScraper:
                 "Try increasing delays or waiting before retrying."
             )
 
+    def _log_fetch_diagnostic(self, resp, sess, label: str, url: str) -> None:
+        """Emit a DEBUG line describing a response, for 403 root-causing.
+
+        Captures the fields needed to tell apart cookie-jar drift,
+        Cloudflare gating, and impersonation-profile mismatches:
+        current browser profile, cookie-jar contents, response headers,
+        and (for non-200s) a body prefix where CF challenge pages put
+        their signature.
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        try:
+            headers = dict(resp.headers.items())
+        except Exception:
+            headers = {}
+        try:
+            cookie_names = sorted({c.name for c in sess.cookies})
+        except Exception:
+            cookie_names = []
+        body_prefix = ""
+        if resp.status_code != 200:
+            body_prefix = resp.text[:DIAGNOSTIC_BODY_PREFIX_BYTES].replace(
+                "\n", " ",
+            )
+        logger.debug(
+            "%s url=%s profile=%s status=%d jar=%s headers=%s body[:%d]=%r",
+            label, url, self._browser, resp.status_code, cookie_names,
+            headers, DIAGNOSTIC_BODY_PREFIX_BYTES, body_prefix,
+        )
+
     def _try_wayback(self, url: str) -> Optional[str]:
         """Ask archive.org for the latest snapshot of `url` and return its
         HTML body, or None if nothing is archived. The Wayback toolbar
@@ -243,6 +278,7 @@ class BaseScraper:
         sess = session if session is not None else self._session()
         backoff = INITIAL_BACKOFF_S
         hit_rate_limit = False
+        last_was_403 = False
         for attempt in range(self.max_retries):
             try:
                 resp = sess.get(url, timeout=self.timeout)
@@ -264,6 +300,11 @@ class BaseScraper:
 
             if resp.status_code == 200:
                 self._check_for_blocks(resp.text)
+                if last_was_403:
+                    self._log_fetch_diagnostic(
+                        sess=sess, resp=resp, url=url,
+                        label="200-after-403",
+                    )
                 if hit_rate_limit:
                     self._bump_delay_up()
                 return resp.text
@@ -289,6 +330,10 @@ class BaseScraper:
                 raise StoryNotFoundError(f"Not found: {url}")
 
             if resp.status_code == 403:
+                self._log_fetch_diagnostic(
+                    sess=sess, resp=resp, url=url, label="403",
+                )
+                last_was_403 = True
                 wait = FORBIDDEN_QUICK_RETRY_S + random.uniform(
                     0, FORBIDDEN_QUICK_RETRY_S,
                 )
