@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.23.4 — 2026-04-20
+
+### Fix
+
+- **Redact Lush's client-side Google Maps key from the test
+  fixture.** When I captured ``lush_story.html`` for parse tests,
+  it included Lushstories' own public Google Maps API key (sat in
+  their inline config blob on every page). GitHub's secret
+  scanner flagged it on the 1.23.1 push. Replaced the key with
+  ``REDACTED_GOOGLE_MAPS_KEY_FOR_TESTS_...`` so future commits
+  don't ship the same string. The key was never ours — any visit
+  to lushstories.com sees it in page source — but there's no
+  reason to keep it in our repo.
+
+  The key was in git history from commit d610bab (v1.23.1); that
+  history isn't rewritten since force-pushing would break every
+  clone and the key is already on the public site anyway. This
+  release stops bleeding it forward.
+
 ## 1.23.3 — 2026-04-20
 
 ### Fix
