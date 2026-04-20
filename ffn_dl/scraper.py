@@ -738,7 +738,17 @@ class FFNScraper(BaseScraper):
 
     def _check_for_blocks(self, html):
         super()._check_for_blocks(html)
+        # FFN's deleted-story page used to set ``<title>Story Not
+        # Found</title>``; sometime before 2026 they started serving
+        # the generic ``<title>FanFiction</title>`` with the message
+        # inside a ``<div class=panel_warning>`` → ``<span
+        # class='gui_warning'>Story Not Found</span>`` block instead.
+        # Match either shape so deleted stories still raise cleanly
+        # and library-update can stamp them as "definitively gone"
+        # instead of looping on a parse failure forever.
         if "<title>Story Not Found</title>" in html:
+            raise StoryNotFoundError("Story does not exist or has been removed.")
+        if "panel_warning" in html and "Story Not Found" in html:
             raise StoryNotFoundError("Story does not exist or has been removed.")
 
     @staticmethod

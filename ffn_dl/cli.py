@@ -944,11 +944,22 @@ def _run_update_queue(
         completed_count = [0]
 
         def probe_entry(scraper, entry):
-            probe_succeeded = False
+            # ``probe_answered`` = we got a definitive answer from upstream,
+            # whether the story exists (chapter count) or is confirmed gone
+            # (StoryNotFoundError). Both deserve a ``last_probed`` stamp so
+            # TTL can suppress the next probe. Transient failures (rate
+            # limit, Cloudflare block, timeout) do *not* answer the
+            # question and must stay unstamped so the retry happens.
+            probe_answered = False
             try:
                 entry["remote"] = scraper.get_chapter_count(entry["url"])
                 outcome = f"{entry['remote']} chapter(s) upstream"
-                probe_succeeded = True
+                probe_answered = True
+            except StoryNotFoundError as exc:
+                entry["error"] = exc
+                entry["upstream_missing"] = True
+                outcome = f"no longer on upstream: {exc}"
+                probe_answered = True
             except _PROBE_EXPECTED_ERRORS as exc:
                 entry["error"] = exc
                 outcome = f"probe failed: {exc}"
@@ -965,7 +976,7 @@ def _run_update_queue(
             # Fire the completion callback *outside* the progress lock
             # so the GUI's stamp-flush disk I/O doesn't block other
             # probe workers from reporting their own progress lines.
-            if probe_succeeded and on_probe_complete is not None:
+            if probe_answered and on_probe_complete is not None:
                 try:
                     on_probe_complete(entry["url"])
                 except Exception:  # pragma: no cover — callback is best-effort
@@ -1302,7 +1313,10 @@ def _handle_update_library(args: argparse.Namespace) -> None:
             idx = LibraryIndex.load()
             idx.mark_probed(root_resolved, list(_pending_stamps))
         except (OSError, ValueError) as exc:
-            logger.debug("probe-stamp flush failed", exc_info=True)
+            logger.exception(
+                "probe-stamp flush failed (pending=%d)",
+                len(_pending_stamps),
+            )
             print(f"Warning: probe-stamp flush failed: {exc}")
         _pending_stamps.clear()
 

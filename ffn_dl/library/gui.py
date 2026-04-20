@@ -16,10 +16,13 @@ thread and report back through ``wx.CallAfter``.
 
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 
 import wx
+
+logger = logging.getLogger(__name__)
 
 from .. import prefs as _prefs
 from .gui_logic import format_move_label
@@ -366,6 +369,10 @@ class LibraryDialog(wx.Dialog):
                         idx = LibraryIndex.load()
                         idx.mark_probed(root, list(pending_stamps))
                     except Exception as exc:
+                        logger.exception(
+                            "probe-stamp flush failed (pending=%d)",
+                            len(pending_stamps),
+                        )
                         self._post_status(
                             f"Warning: probe-stamp flush failed: {exc}"
                         )

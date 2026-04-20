@@ -43,6 +43,7 @@ Schema is versioned. v1:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from dataclasses import asdict
@@ -51,6 +52,8 @@ from pathlib import Path
 from typing import Iterator
 
 from .candidate import Confidence, StoryCandidate
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA_VERSION = 1
@@ -236,14 +239,29 @@ class LibraryIndex:
         stamp = timestamp or _now_iso()
         stories = self._library(root)["stories"]
         touched = 0
+        missed: list[str] = []
         for url in urls:
             entry = stories.get(url)
             if entry is None:
+                missed.append(url)
                 continue
             entry["last_probed"] = stamp
             touched += 1
         if touched:
             self.save()
+        # Observability hook. If touched < len(urls), the caller sent
+        # URLs that don't match any stored key — most often a path-
+        # normalisation mismatch between the probe's root and the
+        # stored library root, which silently drains stamps.
+        logger.info(
+            "mark_probed: stamped %d/%d under %r",
+            touched, len(urls), _normalize_root(root),
+        )
+        if missed:
+            logger.warning(
+                "mark_probed: %d URL(s) had no matching index entry: %r",
+                len(missed), missed[:5],
+            )
         return touched
 
     def clear_library(self, root: Path) -> None:

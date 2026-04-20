@@ -43,17 +43,26 @@ def _fake_scraper(results):
     return scraper
 
 
-def test_probe_complete_callback_fires_only_on_success(monkeypatch):
-    """Callback must not fire for probe failures — the TTL should
-    let the next run retry them. Passing only-succeeded URLs to the
-    GUI's flush buffer is the mechanism that makes this work."""
+def test_probe_complete_callback_fires_on_definitive_answers(monkeypatch):
+    """Callback fires whenever the probe got a *definitive* answer
+    from upstream — either a chapter count (story exists) or a
+    ``StoryNotFoundError`` (story confirmed gone). Both stamp
+    ``last_probed`` so the TTL suppresses the next probe. Transient
+    failures (rate-limit, Cloudflare block, timeout, parse errors)
+    stay unstamped so the next run retries them."""
     from ffn_dl import cli
-    from ffn_dl.scraper import StoryNotFoundError
+    from ffn_dl.scraper import (
+        CloudflareBlockError,
+        RateLimitError,
+        StoryNotFoundError,
+    )
 
     fake = _fake_scraper([
-        10,                         # story 1 → ok
-        StoryNotFoundError("404"),  # story 2 → fail
-        12,                         # story 3 → ok
+        10,                               # story 1 → ok (exists)
+        StoryNotFoundError("404"),        # story 2 → definitive (deleted)
+        12,                               # story 3 → ok (exists)
+        RateLimitError("429"),            # story 4 → transient
+        CloudflareBlockError("cf"),       # story 5 → transient
     ])
     monkeypatch.setattr(cli, "_build_scraper", lambda url, args: fake)
     monkeypatch.setattr(cli, "_detect_site", lambda url: _FakeSiteClass)
@@ -61,7 +70,7 @@ def test_probe_complete_callback_fires_only_on_success(monkeypatch):
     probe_queue = [
         {"path": Path(f"/tmp/x{i}.epub"), "rel": f"x{i}.epub",
          "url": f"https://example.com/s/{i}", "local": 5}
-        for i in range(1, 4)
+        for i in range(1, 6)
     ]
 
     probed = []
@@ -79,11 +88,17 @@ def test_probe_complete_callback_fires_only_on_success(monkeypatch):
         on_probe_complete=on_complete,
     )
 
-    # Exactly the two successful probes fire the callback.
+    # Stories 1, 2, 3 got a definitive answer; 4 and 5 didn't.
     assert probed == [
         "https://example.com/s/1",
+        "https://example.com/s/2",
         "https://example.com/s/3",
     ]
+    # The deletion also sets upstream_missing so the GUI can surface
+    # the distinction between "dead upstream" and "network flaky".
+    assert probe_queue[1].get("upstream_missing") is True
+    assert "upstream_missing" not in probe_queue[3]
+    assert "upstream_missing" not in probe_queue[4]
 
 
 def test_gui_batching_flushes_every_n_probes(tmp_path, monkeypatch):

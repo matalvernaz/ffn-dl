@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.23.9 — 2026-04-20
+
+### Fix
+
+- **Detect deleted FFN stories on the new error-page shape, and
+  stamp them so the TTL absorbs them instead of re-probing every
+  run.** FFN used to render missing stories with ``<title>Story
+  Not Found</title>``; sometime before 2026 they switched to the
+  generic ``<title>FanFiction</title>`` with the message buried in
+  a ``<div class=panel_warning>`` → ``<span class='gui_warning'>``
+  block. ``_check_for_blocks`` only matched the title shape, so
+  probes on deleted stories fell through to ``_parse_metadata``,
+  raised ``ValueError("Could not find story profile")``, got caught
+  by ``probe_entry`` as a transient failure, and were never stamped
+  — the same ~20 dead stories drained back into every library
+  update's probe queue forever. Now the panel_warning shape also
+  raises ``StoryNotFoundError``, and ``probe_entry`` fires
+  ``on_probe_complete`` on that error too (with an
+  ``upstream_missing: true`` flag on the queue entry) so TTL can
+  suppress the next probe. Transient failures (rate-limit,
+  Cloudflare block, timeout) still stay unstamped and retry next
+  run. Fixture ``tests/fixtures/ffn_story_not_found.html`` captures
+  the current live shape so future FFN redesigns won't silently
+  regress this again.
+
+### Diagnostics
+
+- **``LibraryIndex.mark_probed`` now logs stamped/missed URL
+  counts.** Previously silent — if a path-normalisation mismatch
+  between the probe's root and the stored library key sent every
+  URL to a phantom empty library, ``touched`` returned 0 and no one
+  noticed. The new INFO line (`mark_probed: stamped N/M under
+  <key>`) makes those leaks visible in the debug log, and a WARNING
+  line surfaces the first 5 URLs that didn't match any entry so the
+  root cause is pinpointable.
+- **Flush-failure handler in the GUI/CLI stamp loop now calls
+  ``logger.exception`` instead of only posting a UI warning.** The
+  previous ``except Exception`` swallowed tracebacks, so we had no
+  way to diagnose a flush that ran but failed silently. The full
+  stack now lands in the debug log alongside the user-facing
+  status line.
+
 ## 1.23.8 — 2026-04-20
 
 ### Perf

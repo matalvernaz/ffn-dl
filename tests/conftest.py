@@ -37,6 +37,11 @@ def ffn_story_html():
 
 
 @pytest.fixture(scope="session")
+def ffn_story_not_found_html():
+    return _load("ffn_story_not_found.html")
+
+
+@pytest.fixture(scope="session")
 def ffn_search_html():
     return _load("ffn_search.html")
 

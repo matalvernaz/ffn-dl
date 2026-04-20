@@ -4,7 +4,9 @@ from unittest import mock
 
 from bs4 import BeautifulSoup
 
-from ffn_dl.scraper import FFNScraper
+import pytest
+
+from ffn_dl.scraper import FFNScraper, StoryNotFoundError
 from ffn_dl.search import _parse_results
 
 
@@ -43,6 +45,37 @@ class TestMetadataParsing:
         assert meta["num_chapters"] >= 1
         # Every chapter dropdown entry must produce a title entry
         assert len(meta["chapter_titles"]) == meta["num_chapters"]
+
+
+class TestDeletedStoryDetection:
+    """FFN's deleted-story page used to carry ``<title>Story Not
+    Found</title>``; current (2026+) deployments keep the generic
+    ``<title>FanFiction</title>`` and put the message in a
+    ``<div class=panel_warning>`` → ``<span class='gui_warning'>``
+    block instead. ``_check_for_blocks`` must catch both shapes so
+    probes on dead stories raise ``StoryNotFoundError`` and the
+    library-update path can stamp them as definitively gone."""
+
+    def test_current_panel_warning_shape_raises(
+        self, ffn_story_not_found_html,
+    ):
+        scraper = FFNScraper(use_cache=False)
+        with pytest.raises(StoryNotFoundError):
+            scraper._check_for_blocks(ffn_story_not_found_html)
+
+    def test_legacy_title_shape_still_raises(self):
+        scraper = FFNScraper(use_cache=False)
+        legacy = (
+            "<html><head><title>Story Not Found</title></head>"
+            "<body>gone</body></html>"
+        )
+        with pytest.raises(StoryNotFoundError):
+            scraper._check_for_blocks(legacy)
+
+    def test_live_story_passes_cleanly(self, ffn_story_html):
+        scraper = FFNScraper(use_cache=False)
+        # Must not raise — a real story page has no Story-Not-Found marker.
+        scraper._check_for_blocks(ffn_story_html)
 
 
 class TestAuthorPageScoping:
