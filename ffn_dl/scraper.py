@@ -29,9 +29,13 @@ server bucket has reset, short enough to not look hung."""
 TIMEOUT_RETRY_SLEEP_S = 10
 """Fixed wait after a request-level timeout (not rate-limit) before retry."""
 
-FORBIDDEN_QUICK_RETRY_S = 5
-"""Initial wait on HTTP 403 — the site is usually gating a single fetch,
-not rate-limiting, so quick retry with browser rotation is fine."""
+FORBIDDEN_QUICK_RETRY_S = 2
+"""Initial wait on HTTP 403. Short because FFN's Cloudflare challenges
+unknown fingerprints on first contact but its edge cache is populated
+at the moment of the challenge — the retry almost always succeeds via
+``cf-cache-status: HIT``, not by passing the challenge, so we just need
+enough delay for the cache to be visible (2–4s with jitter). Longer
+sleeps were pure wasted time per chapter."""
 
 CONNECTION_ERROR_JITTER_S = 5
 """Extra random jitter (0..N seconds) added to the connection-error
@@ -61,6 +65,32 @@ DIAGNOSTIC_BODY_PREFIX_BYTES = 300
 """How much of a non-200 body to emit in the debug diagnostic line.
 Enough to catch Cloudflare challenge markers, Turnstile widgets, and
 FFN's own denial templates without flooding the log."""
+
+# Critical-CH client-hint values to match curl_cffi 0.15's "chrome"
+# impersonation (Chrome 146 on macOS 10.15.7 Intel). Real Chrome sends
+# the three low-entropy hints (``Sec-CH-UA``, ``-Mobile``, ``-Platform``)
+# on every request and the high-entropy ones below only when a prior
+# response advertised them via ``Accept-CH``. curl_cffi ships the low-
+# entropy set but never answers ``Critical-CH``, so FFN's Cloudflare —
+# which lists the full set in ``Critical-CH`` and challenges requests
+# missing them — 403s every first contact. Sending the high-entropy
+# hints proactively short-circuits the challenge.
+#
+# These values drift when curl_cffi bumps its Chrome target; update
+# them to match when refreshing the dependency. Keep them in sync
+# with the User-Agent curl_cffi injects (Chromium version + OS).
+_CHROMIUM_CLIENT_HINTS = {
+    "Sec-CH-UA-Bitness": '"64"',
+    "Sec-CH-UA-Arch": '"x86"',
+    "Sec-CH-UA-Full-Version": '"146.0.0.0"',
+    "Sec-CH-UA-Model": '""',
+    "Sec-CH-UA-Platform-Version": '"10.15.7"',
+    "Sec-CH-UA-Full-Version-List": (
+        '"Chromium";v="146.0.0.0", '
+        '"Not-A.Brand";v="24.0.0.0", '
+        '"Google Chrome";v="146.0.0.0"'
+    ),
+}
 
 
 class RateLimitError(Exception):
@@ -153,8 +183,17 @@ class BaseScraper:
         # ``_fetch_count``) and the ``_browser`` rotation. curl session
         # objects themselves are not shared, so they don't need the lock.
         self._state_lock = threading.Lock()
-        self.session = curl_requests.Session(impersonate=self._browser)
+        self.session = self._new_session()
         self._tls.session = self.session
+
+    def _new_session(self):
+        """Construct a curl_cffi Session with the current impersonation
+        and any extra headers the profile needs to look like the real
+        browser to a strict Cloudflare deployment (client hints)."""
+        sess = curl_requests.Session(impersonate=self._browser)
+        if self._browser in ("chrome", "edge"):
+            sess.headers.update(_CHROMIUM_CLIENT_HINTS)
+        return sess
 
     def _session(self):
         """Return the curl_cffi session for the current thread, lazily
@@ -162,7 +201,7 @@ class BaseScraper:
         download pool call this instead of touching ``self.session``."""
         sess = getattr(self._tls, "session", None)
         if sess is None:
-            sess = curl_requests.Session(impersonate=self._browser)
+            sess = self._new_session()
             self._tls.session = sess
         return sess
 
@@ -174,7 +213,7 @@ class BaseScraper:
         # HTTP/2 connection reuse on threads that weren't rate-limited.
         with self._state_lock:
             self._browser = random.choice(BROWSERS)
-        new_sess = curl_requests.Session(impersonate=self._browser)
+        new_sess = self._new_session()
         self._tls.session = new_sess
         if threading.current_thread() is threading.main_thread():
             self.session = new_sess
@@ -451,7 +490,7 @@ class BaseScraper:
             def fetch_one(url):
                 # Each worker gets its own session so concurrent libcurl
                 # handles don't race on the shared one.
-                session = curl_requests.Session(impersonate=self._browser)
+                session = self._new_session()
                 return self._fetch(url, session=session)
 
             with concurrent.futures.ThreadPoolExecutor(

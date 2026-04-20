@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.23.8 — 2026-04-20
+
+### Perf
+
+- **Send the high-entropy Sec-CH-UA-* client hints Cloudflare demands,
+  and halve the 403 retry backoff.** Root-caused the ubiquitous 403s
+  on FFN: the challenge response carries a ``Critical-CH`` header
+  listing nine client hints (``Sec-CH-UA-Bitness``, ``-Arch``,
+  ``-Full-Version``, ``-Full-Version-List``, ``-Model``,
+  ``-Platform-Version``, plus the three low-entropy ones curl_cffi
+  already sends). Real Chrome re-requests with those hints set;
+  curl_cffi never does. Without them, Cloudflare challenges every
+  first contact — the retry only succeeded because CF's edge cached
+  the real chapter HTML at the moment of the challenge (observed
+  ``cf-cache-status: HIT, age: 8`` in the 200 diagnostic). We now
+  pre-populate the six missing hints on every Chromium session with
+  values matching curl_cffi 0.15's ``chrome`` target (Chrome 146 on
+  macOS 10.15.7 Intel), so the first request should pass. Also
+  dropped ``FORBIDDEN_QUICK_RETRY_S`` from 5 to 2 seconds: even when
+  a retry does fire, the cache is populated immediately so a 2–4 s
+  wait (with jitter) is plenty. Net effect: fewer 403s, and each
+  remaining retry costs ~3 s instead of ~7 s. Across a 100-chapter
+  library update this recovers on the order of minutes.
+
 ## 1.23.7 — 2026-04-20
 
 ### Fix
