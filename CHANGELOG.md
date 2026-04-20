@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.23.11 — 2026-04-20
+
+### Fix
+
+- **Bump ``ffn_dl/__init__.py``'s ``__version__`` to match
+  ``pyproject.toml``.** 1.23.10 shipped with ``__init__.py`` still
+  reading ``1.23.9``; the installed build reported the old version
+  so the self-updater saw 1.23.9 vs GitHub's 1.23.10, re-updated,
+  relaunched, still read 1.23.9, and looped. Both version locations
+  have to move together — the build-windows workflow enforces a
+  match going forward so this can't happen again.
+
 ## 1.23.10 — 2026-04-20
 
 ### Performance
