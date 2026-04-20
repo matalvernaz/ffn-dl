@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.23.3 — 2026-04-20
+
+### Fix
+
+- **Incremental ``last_probed`` stamping.** ``last_probed`` was
+  getting stamped in one shot at the very end of a library update.
+  A user who closed the app mid-probe — easy to do during an
+  800-story FFN scan (6 s/probe × 800 = ~80 minutes) — lost every
+  stamp, so the *next* Check for Updates re-probed every story
+  they'd already checked. This matched the reported symptom: a log
+  showing TTL 6h / 0 skipped / 804 to probe even though the user
+  had Check-for-Updates'd earlier.
+
+  ``_run_update_queue`` now fires a per-URL ``on_probe_complete``
+  callback after each successful probe (failures intentionally skip
+  the callback so the TTL retries them next run). The GUI and CLI
+  update paths buffer those URLs in memory and flush to the index
+  in batches of 25, plus a final flush at the end. Worst-case
+  crash loses the last ~25 stamps instead of all N. Existing TTL
+  and Force Full Recheck behaviours unchanged.
+
+  Three new regression tests in
+  ``tests/test_library_incremental_probe_stamping.py`` guard the
+  contract: callback fires only on success, 25 stamps land on disk
+  before the buffer flushes at threshold, and the final flush
+  picks up the trailing under-threshold batch.
+
 ## 1.23.2 — 2026-04-20
 
 ### Change

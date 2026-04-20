@@ -880,6 +880,7 @@ def _run_update_queue(
     skipped_count: int,
     label: str = "Update-all",
     progress=print,
+    on_probe_complete=None,
 ) -> int:
     """Run the probe + download cycle on a pre-built queue.
 
@@ -892,6 +893,13 @@ def _run_update_queue(
     ``progress`` is a one-arg callable that receives each line of
     output. Defaults to ``print`` for CLI use; the GUI passes its own
     callback that marshals onto the main thread.
+
+    ``on_probe_complete`` (optional) is a callable fired with the
+    story URL after each *successful* probe — so the GUI can stamp
+    ``last_probed`` incrementally rather than in one shot at the end.
+    Failures are not reported because the TTL should allow a retry
+    on the next update. Runs from inside the probe thread pool, so
+    the callback must be thread-safe.
 
     Returns the exit code: 0 on success, 1 if any story failed.
     """
@@ -936,9 +944,11 @@ def _run_update_queue(
         completed_count = [0]
 
         def probe_entry(scraper, entry):
+            probe_succeeded = False
             try:
                 entry["remote"] = scraper.get_chapter_count(entry["url"])
                 outcome = f"{entry['remote']} chapter(s) upstream"
+                probe_succeeded = True
             except _PROBE_EXPECTED_ERRORS as exc:
                 entry["error"] = exc
                 outcome = f"probe failed: {exc}"
@@ -952,6 +962,16 @@ def _run_update_queue(
                     f"  [probe {completed_count[0]}/{total}] "
                     f"{entry['rel']}: {outcome}"
                 )
+            # Fire the completion callback *outside* the progress lock
+            # so the GUI's stamp-flush disk I/O doesn't block other
+            # probe workers from reporting their own progress lines.
+            if probe_succeeded and on_probe_complete is not None:
+                try:
+                    on_probe_complete(entry["url"])
+                except Exception:  # pragma: no cover — callback is best-effort
+                    logger.debug(
+                        "on_probe_complete callback raised", exc_info=True,
+                    )
 
         def run_site_group(site_cls, entries):
             scraper = _build_scraper(entries[0]["url"], args)
@@ -1265,17 +1285,48 @@ def _handle_update_library(args: argparse.Namespace) -> None:
         f"in {root_resolved}{mode}...\n"
     )
 
+    # Incremental stamping: same pattern as the GUI's Check for
+    # Updates. Flushes every N probes so a Ctrl+C mid-run keeps the
+    # work done so far — previously an interrupted 800-story probe
+    # left no trace of the completed entries and the next run
+    # re-checked every one of them.
+    _STAMP_FLUSH_EVERY = 25
+    _stamp_lock = threading.Lock()
+    _pending_stamps: list[str] = []
+
+    def _flush_stamps_locked() -> None:
+        if not _pending_stamps or args.dry_run:
+            return
+        try:
+            from .library.index import LibraryIndex
+            idx = LibraryIndex.load()
+            idx.mark_probed(root_resolved, list(_pending_stamps))
+        except (OSError, ValueError) as exc:
+            logger.debug("probe-stamp flush failed", exc_info=True)
+            print(f"Warning: probe-stamp flush failed: {exc}")
+        _pending_stamps.clear()
+
+    def _on_probe_complete(url: str) -> None:
+        with _stamp_lock:
+            _pending_stamps.append(url)
+            if len(_pending_stamps) >= _STAMP_FLUSH_EVERY:
+                _flush_stamps_locked()
+
     exit_code = _run_update_queue(
         probe_queue, args, workers,
         skipped_count=len(skipped),
         label="Library update",
+        on_probe_complete=_on_probe_complete,
     )
 
-    # Stamp last_probed for the URLs we actually touched so the next
-    # --update-library pass with a --recheck-interval can skip them.
-    # Done before the post-update rescan so a successful rescan picks
-    # up the stamp and carries it through into the refreshed entry.
+    # Final flush of any stamps under the batch threshold, plus a
+    # belt-and-braces pass over the entire probe_queue so any entry
+    # whose probe raised something unexpected (and so never hit
+    # on_probe_complete) still gets its timestamp. The double-stamp
+    # is cheap — a touched URL is skipped on the second pass.
     if probe_queue and not args.dry_run:
+        with _stamp_lock:
+            _flush_stamps_locked()
         try:
             from .library.index import LibraryIndex
             idx = LibraryIndex.load()

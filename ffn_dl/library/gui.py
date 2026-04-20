@@ -340,23 +340,58 @@ class LibraryDialog(wx.Dialog):
                         f"(Click Force Full Recheck to ignore the TTL.)"
                     )
 
+                # Incremental ``last_probed`` stamping: the previous
+                # "stamp everything at the end" pattern lost all work
+                # whenever a user closed the app mid-probe — an 80-minute
+                # FFN scan with 800+ stories is very easy to abandon
+                # before completion, and every abandoned run made the
+                # next one re-probe the entries we already checked.
+                # Buffer stamps in memory and flush to disk every N
+                # probes, plus once at the end. At worst we lose the
+                # last-batch window on a crash.
+                STAMP_FLUSH_EVERY = 25
+                stamp_lock = threading.Lock()
+                pending_stamps: list[str] = []
+
+                def _flush_stamps_locked():
+                    """Caller must hold ``stamp_lock``. Reloads the
+                    on-disk index, stamps all pending URLs, saves, and
+                    clears the buffer. Reloading per-flush makes the
+                    stamp survive a concurrent rescan — we merge into
+                    whatever the current disk state is rather than
+                    overwrite with our stale in-memory copy."""
+                    if not pending_stamps:
+                        return
+                    try:
+                        idx = LibraryIndex.load()
+                        idx.mark_probed(root, list(pending_stamps))
+                    except Exception as exc:
+                        self._post_status(
+                            f"Warning: probe-stamp flush failed: {exc}"
+                        )
+                    pending_stamps.clear()
+
+                def on_probe_complete(url: str) -> None:
+                    """Called from a probe-worker thread once the
+                    remote chapter count for ``url`` has been
+                    retrieved. Thread-safe via ``stamp_lock``."""
+                    with stamp_lock:
+                        pending_stamps.append(url)
+                        if len(pending_stamps) >= STAMP_FLUSH_EVERY:
+                            _flush_stamps_locked()
+
                 cli._run_update_queue(
                     probe_queue, args, args.probe_workers,
                     skipped_count=len(skipped),
                     label="Library update",
                     progress=self._post_status,
+                    on_probe_complete=on_probe_complete,
                 )
 
-                if probe_queue:
-                    try:
-                        idx = LibraryIndex.load()
-                        idx.mark_probed(
-                            root, [item["url"] for item in probe_queue],
-                        )
-                    except Exception as exc:
-                        self._post_status(
-                            f"Warning: could not record probe timestamps: {exc}"
-                        )
+                # Final flush picks up the trailing <25 stamps that
+                # never hit the batch threshold.
+                with stamp_lock:
+                    _flush_stamps_locked()
 
                 try:
                     rescan(root)
