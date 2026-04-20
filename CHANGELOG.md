@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.20.12 — 2026-04-19
+
+### Add
+
+- **Background watchlist polling while the GUI is running.** The
+  `KEY_WATCH_AUTOPOLL` and `KEY_WATCH_POLL_INTERVAL_S` prefs have
+  existed since 1.20.0 but nothing in the GUI read them — autopoll
+  required running `--watchlist-run` from cron or Task Scheduler.
+  A new `WatchlistPoller` (`ffn_dl/watchlist_poller.py`) now spins
+  up a daemon thread on launch when autopoll is enabled, reusing
+  the same `watchlist.run_once` entry point the CLI flag uses. The
+  interval is clamped at startup to `watchlist.MIN_POLL_INTERVAL_S`
+  (5 minutes) so a corrupt config can't hammer sites, and results
+  route through the root logger so they land in both the GUI status
+  pane and the rotating file log. The thread is a daemon and
+  `stop()` is non-blocking, so closing the app never hangs waiting
+  for a sleep to wake up.
+- **Preferences mutation is now live for the poll thread.** The
+  Preferences dialog's OK handler (via `apply_preferences`) calls
+  `WatchlistPoller.reconfigure()`, which reads the current autopoll
+  and interval values and starts/stops/retargets the thread without
+  requiring a restart. The next Preferences release (1.20.13) will
+  expose the toggle itself in a new Watchlist tab — this release
+  just plumbs the thread so that tab has something to talk to.
+
 ## 1.20.11 — 2026-04-19
 
 ### Change

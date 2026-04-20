@@ -107,6 +107,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_CLOSE, self._on_close)
         self.Centre()
         self._start_update_check()
+        self._start_watchlist_poller()
 
     def _build_ui(self):
         root = wx.Panel(self)
@@ -768,6 +769,8 @@ class MainFrame(wx.Frame):
             except (RuntimeError, AttributeError):
                 logger.debug("frame.Destroy on close failed", exc_info=True)
         self._search_frames.clear()
+        if getattr(self, "_watchlist_poller", None) is not None:
+            self._watchlist_poller.stop()
         try:
             self._save_prefs()
         except (RuntimeError, OSError):
@@ -849,6 +852,21 @@ class MainFrame(wx.Frame):
                 self._confirm_close_item.Check(False)
 
         return result == wx.ID_YES
+
+    # ── Watchlist autopoll ───────────────────────────────────
+
+    def _start_watchlist_poller(self):
+        """Instantiate the watchlist poller and, if the user has
+        autopoll enabled, start its background thread. The poller is
+        kept around in either case so the Preferences dialog can flip
+        autopoll on/off at runtime by calling ``reconfigure()``.
+        """
+        from . import prefs as _p
+        from .watchlist_poller import WatchlistPoller
+
+        self._watchlist_poller = WatchlistPoller(self.prefs)
+        if self.prefs.get_bool(_p.KEY_WATCH_AUTOPOLL):
+            self._watchlist_poller.start()
 
     # ── Update check ─────────────────────────────────────────
 
@@ -1738,6 +1756,11 @@ class MainFrame(wx.Frame):
             self._confirm_close_item.Check(
                 self.prefs.get_bool(_p.KEY_CONFIRM_CANCEL_ON_CLOSE)
             )
+
+        # Watchlist autopoll — reconfigure picks up interval changes
+        # and starts/stops the thread to match the current pref.
+        if getattr(self, "_watchlist_poller", None) is not None:
+            self._watchlist_poller.reconfigure()
 
     def _on_library_menu(self, event):
         """Open the library-management dialog.
