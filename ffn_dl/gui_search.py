@@ -162,21 +162,21 @@ def _erotica_search_spec():
         tag_site_count,
     )
 
-    min_words_choices = [
-        "any", "1k+", "5k+", "10k+", "30k+", "50k+", "150k+",
-    ]
-
     annotated_tags = [
         f"{tag} [{tag_site_count(tag)} sites]"
         for tag in EROTICA_TAG_VOCABULARY
     ]
 
+    # ``min_words`` intentionally omitted from the GUI: most erotica
+    # sites don't expose word counts on their listing pages, so the
+    # filter was close to a no-op in practice — dropping it keeps the
+    # form honest. The fan-out still accepts the kwarg if a scripted
+    # caller wants to supply one.
     return {
         "label": "Erotic Story Search",
         "search_fn": search_erotica,
         "filters": [
             ("&Site:", "sites_choice", list(EROTICA_SITE_SLUGS)),
-            ("Min &words:", "min_words", min_words_choices),
         ],
         # Tags are the primary input — first multi-picker so the
         # tab order lands users on tags directly after the query box.

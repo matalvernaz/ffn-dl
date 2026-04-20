@@ -139,10 +139,22 @@ class AFFScraper(BaseScraper):
 
         author = "Unknown Author"
         author_url = ""
+        # Modern AFF (members subdomain profile page) takes precedence;
+        # older stories still carry the legacy ``authorlinks.php?no=N``
+        # href, and the rewrite catches both so we don't miss either.
         author_link = soup.find(
-            "a", href=re.compile(r"authorlinks?\.php\?no=\d+", re.I),
+            "a", href=re.compile(r"profile\.php\?id=\d+", re.I),
         )
-        if author_link:
+        if author_link is None:
+            author_link = soup.find(
+                "a", href=re.compile(r"authorlinks?\.php\?no=\d+", re.I),
+            )
+        if author_link is None:
+            # Fall back to any link inside ``<div class="story-header-author">``.
+            header = soup.find("div", class_="story-header-author")
+            if header is not None:
+                author_link = header.find("a")
+        if author_link is not None:
             author = author_link.get_text(strip=True) or author
             href = author_link.get("href", "")
             if href:

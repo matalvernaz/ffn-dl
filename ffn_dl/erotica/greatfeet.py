@@ -65,9 +65,15 @@ class GreatFeetScraper(BaseScraper):
         title_tag = soup.find("title")
         if title_tag:
             raw = title_tag.get_text(" ", strip=True)
-            # "Our Feet Need To Be Worshiped at greatfeet.com - A Great
-            # Feet Foot Fetish Story Publication" — strip the archive
-            # boilerplate so only the story name remains.
+            # GreatFeet's ``<title>`` element carries embedded newlines
+            # + repeated whitespace from the site's 1997-era HTML
+            # formatting. Collapse all whitespace runs to a single
+            # space before pattern-matching so the boilerplate strip
+            # hits regardless of where the line break lands.
+            raw = re.sub(r"\s+", " ", raw).strip()
+            # "Our Feet Need To Be Worshiped at greatfeet.com - A
+            # Great Feet Foot Fetish Story Publication" — strip the
+            # archive boilerplate so only the story name remains.
             title = re.sub(
                 r"\s*at\s*greatfeet\.com\s*-?\s*.*$", "", raw, flags=re.I,
             ).strip()

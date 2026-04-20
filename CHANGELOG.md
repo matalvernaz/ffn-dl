@@ -1,5 +1,70 @@
 # Changelog
 
+## 1.23.1 — 2026-04-20
+
+### Fix
+
+- **AFF author parsing.** The story-header link pattern changed to
+  ``profile.php?id=<N>`` on the members subdomain; the scraper
+  still only matched the legacy ``authorlinks.php?no=<N>`` form, so
+  every AFF download came back as "Unknown Author". Now matches
+  both shapes and falls back to ``<div class="story-header-author">``
+  for a third line of defence.
+
+- **GreatFeet title strip.** Raw ``<title>`` carries embedded
+  newlines + whitespace that broke the "strip the ``at
+  greatfeet.com`` suffix" regex, leaving the full boilerplate in
+  the story title. Collapse whitespace first, then strip — titles
+  now come through as "Our Feet Need To Be Worshiped" instead of
+  the two-line raw form.
+
+- **SexStories search actually searches now.** Was scraping the
+  homepage and filtering client-side by title substring; empty for
+  anything but the most common queries. Uses
+  ``/search/?search_story=<q>&page=<n>`` with tags appended to the
+  query, the real full-text endpoint.
+
+- **Chyoa search dedup.** Story and chapter URLs share the numeric
+  id namespace, so keying on the number alone incorrectly dropped
+  the second hit of a ``(story 14, chapter 14)`` pair. Key is now
+  ``(kind, numeric)``.
+
+### Change
+
+- **Search fan-out routes through BaseScraper._fetch.** The
+  simplified per-request curl_cffi session is gone; search now uses
+  the same retry + 429/503 back-off + Cloudflare-block detection
+  that downloads already benefit from. One module-scope scraper
+  instance holds the AIMD delay state across the session so
+  rate-limit bumps from one search leak through to the next rather
+  than resetting every window open.
+
+- **Dropped ``min_words`` from the Erotic Story Search form.** Most
+  sites don't surface word counts in their listings, so rows came
+  back as ``?`` and the filter silently passed them through. Kept
+  the parser/filter internals for scripted callers who want to
+  apply a threshold from the CLI.
+
+- **GreatFeet title parser no longer relies on magic-string
+  regex.** Inline marker ``<img>`` tags ("new!" / "hot!") are
+  decomposed before reading link text, so alt-attribute strings
+  like "Foot Fetish Offering" stop leaking into titles.
+
+### Test
+
+- **15 new end-to-end download tests.** Every erotica scraper now
+  runs ``download()`` against a captured real HTML fixture, not
+  just URL parsing. This is how the AFF and GreatFeet parse bugs
+  above were discovered before shipping — previous tests only
+  covered URL → id extraction and would have happily passed while
+  every AFF download lost its author.
+
+  Story + chapter fixtures live at ``tests/fixtures/erotica/``.
+  Individual tests assert real titles/authors/tags and verify the
+  chapter body comes through non-empty, plus a shared parametrised
+  test for the ``skip_chapters = num_chapters`` case that
+  ``--update`` passes.
+
 ## 1.23.0 — 2026-04-20
 
 ### Add

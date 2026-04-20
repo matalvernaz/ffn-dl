@@ -37,16 +37,16 @@ import re
 from typing import Callable, Optional
 
 from bs4 import BeautifulSoup
-from curl_cffi import requests as curl_requests
 
+from ..scraper import BaseScraper
 from ..search import search_literotica
 
 logger = logging.getLogger(__name__)
 
 PER_SITE_LIMIT = 8
 """Cap the per-site result batch that fan-out pulls per page. Eight
-rows × eight sites gives a first page of ~64 results, which is plenty
-for a single view and keeps each site's scrape cheap."""
+rows × twelve sites gives a first page of ~96 results, which is
+plenty for one view and keeps each site's scrape cheap."""
 
 REQUEST_TIMEOUT_S = 25
 
@@ -138,23 +138,41 @@ dash-joined so they drop straight into URL paths like
 
 
 # ── HTTP helper ──────────────────────────────────────────────────
+#
+# Search fetches use :class:`BaseScraper`'s fetch machinery so they
+# pick up the same retry + rate-limit + Cloudflare-block detection
+# that downloads already benefit from. The singleton sits at module
+# scope so successive search calls reuse one HTTP session and one
+# AIMD delay state — rate-limit bumps from one fan-out leak through
+# to the next rather than resetting on every window open.
+#
+# Downside: one scraper instance for *all* search traffic means its
+# cache_dir isn't useful (we never save anything from search), hence
+# ``use_cache=False``. Rate-limit delays are capped lower than a
+# download scraper's because search is one request per site per
+# page — more requests per wall-second is fine as long as the cap
+# catches us if a site starts 429-ing.
 
-def _fetch(url: str, *, timeout: int = REQUEST_TIMEOUT_S) -> Optional[str]:
-    """Plain fetch with curl_cffi browser impersonation.
+_SEARCH_FETCHER = BaseScraper(
+    use_cache=False,
+    delay_floor=0.0,
+    delay_start=0.0,
+    delay_ceiling=10.0,
+    max_retries=3,
+    timeout=REQUEST_TIMEOUT_S,
+)
 
-    Used by the index/category scrapers below — the heavy retrying
-    BaseScraper fetch isn't needed for a one-shot search, and the
-    fan-out caller wraps every call in a per-site timeout already.
-    Returns None on non-200 so fan-out degrades gracefully when one
-    site is offline instead of aborting the whole search.
-    """
+
+def _fetch(url: str) -> Optional[str]:
+    """Return the response body for ``url`` or ``None`` on failure.
+
+    Wraps :meth:`BaseScraper._fetch` so search requests get the same
+    retry + 429/503 back-off + Cloudflare-block detection that
+    downloads do. Swallows exceptions because the fan-out's contract
+    is "one site failing shouldn't break the search" — the caller
+    records the failure in ``site_stats`` and keeps the rest."""
     try:
-        sess = curl_requests.Session(impersonate="chrome")
-        resp = sess.get(url, timeout=timeout)
-        if resp.status_code != 200:
-            logger.debug("search fetch %s → HTTP %d", url, resp.status_code)
-            return None
-        return resp.text
+        return _SEARCH_FETCHER._fetch(url)
     except Exception as exc:
         logger.debug("search fetch %s failed: %s", url, exc)
         return None
@@ -374,27 +392,51 @@ def search_lushstories(query: str, *, page: int = 1,
 
 def search_sexstories(query: str, *, page: int = 1,
                       tags: Optional[list] = None, **_: object) -> list[dict]:
-    """SexStories has a search endpoint at ``/pornstars/<query>`` for
-    authors and ``/tag/<tag>`` for kinks, but both shift a lot. Easier
-    to scrape the home page's newest-stories grid and filter."""
-    url = "https://www.sexstories.com/"
-    if page > 1:
-        url += f"?pd_page={page}"
+    """SexStories (XNXX Stories) has a real full-text search endpoint
+    at ``/search/?search_story=<q>&page=<n>``. An empty query falls
+    back to the homepage grid (which is already filtered + sorted by
+    most-recent). Tags supplied through the unified vocabulary land in
+    the query string as well — SexStories' tag-vocabulary is fuzzy
+    enough that including them as search terms gives reasonable
+    relevance without us maintaining a per-tag URL table."""
+    query_terms = [query] if query else []
+    if tags:
+        query_terms.extend(tags[:3])  # top 3 tags — beyond that hits
+        # SexStories' relevance noise floor.
+    combined = " ".join(t for t in query_terms if t).strip()
+    if combined:
+        from urllib.parse import quote_plus
+        url = (
+            "https://www.sexstories.com/search/"
+            f"?search_story={quote_plus(combined)}&page={page}"
+        )
+    else:
+        url = "https://www.sexstories.com/"
+        if page > 1:
+            url += f"?pd_page={page}"
     html = _fetch(url)
     if not html:
         return []
     out: list[dict] = []
     seen = set()
     for m in re.finditer(
-        r'href="(/story/(\d+)/([a-z0-9_-]+))"', html,
+        r'href="(/story/(\d+)/([a-z0-9_-]+))"[^>]*>([^<]*)<', html,
     ):
-        href, story_id, slug = m.group(1), m.group(2), m.group(3)
+        href, story_id, slug, link_text = (
+            m.group(1), m.group(2), m.group(3), m.group(4).strip(),
+        )
         if story_id in seen:
             continue
-        if not _matches_query(query, slug):
-            continue
         seen.add(story_id)
-        title = slug.replace("_", " ").replace("-", " ").title()
+        # The link text is the real title when it's present; some rows
+        # are just thumbnails (no text) so we fall back to the slug.
+        title = link_text or slug.replace("_", " ").replace("-", " ").title()
+        # With a combined query we already filtered server-side, so
+        # accept every result. Without one (tag-less browse) keep the
+        # old client-side title filter to avoid mixing in every row
+        # the homepage happens to carry.
+        if not combined and not _matches_query(query, slug, title):
+            continue
         out.append({
             "title": title, "author": "",
             "url": f"https://www.sexstories.com{href}",
@@ -533,7 +575,12 @@ def search_chyoa(query: str, *, page: int = 1,
                  tags: Optional[list] = None, **_: object) -> list[dict]:
     """Chyoa's ``/search/<q>`` endpoint returns chapter-level hits for
     a query; without a query we default to the browse-popular page
-    filtered client-side."""
+    filtered client-side.
+
+    Story and chapter URLs share the numeric-id namespace (story .14
+    and chapter .14 can be different works), so the dedup key is the
+    ``(kind, numeric)`` pair — keying on the number alone would drop
+    the second hit incorrectly."""
     if query:
         url = f"https://chyoa.com/search/{re.sub(r'[^A-Za-z0-9]+', '+', query)}"
     else:
@@ -544,17 +591,20 @@ def search_chyoa(query: str, *, page: int = 1,
     if not html:
         return []
     out: list[dict] = []
-    seen = set()
+    seen: set[tuple[str, str]] = set()
     for m in re.finditer(
-        r'href="(/(?:story|chapter)/[^"]+?\.(\d+))"[^>]*>([^<]+)<',
+        r'href="(/(story|chapter)/[^"]+?\.(\d+))"[^>]*>([^<]+)<',
         html,
     ):
-        href, numeric, title = m.group(1), m.group(2), m.group(3).strip()
-        if numeric in seen or not title:
+        href, kind, numeric, title = (
+            m.group(1), m.group(2), m.group(3), m.group(4).strip(),
+        )
+        key = (kind, numeric)
+        if key in seen or not title:
             continue
         if not _matches_query(query, title):
             continue
-        seen.add(numeric)
+        seen.add(key)
         out.append({
             "title": title, "author": "",
             "url": f"https://chyoa.com{href}",
@@ -607,19 +657,20 @@ def search_darkwanderer(query: str, *, page: int = 1,
     return out
 
 
-_GREATFEET_TITLE_BOILERPLATE_RE = re.compile(
-    r"^\s*(?:new|updated|hot|click here|preview|picture of)\b",
-    re.I,
-)
-
-
 def search_greatfeet(query: str, *, page: int = 1,
                      **_: object) -> list[dict]:
     """GreatFeet: ``/tickles.htm`` lists recent stories by ``ts<N>.htm``
     href; older issues at ``/archiveN.htm`` (weekly issues 1..484+).
     The page is 1997-era HTML (unclosed ``<a>`` tags, inline font
     styling) so we lean on BeautifulSoup to let it tolerate the
-    malformed markup, then read the link text as the story title."""
+    malformed markup, then read the link text as the story title.
+
+    We decompose inline ``<img>`` tags inside the link before reading
+    the text — the "new!" / "hot!" marker images carry alt attributes
+    like ``"Foot Fetish Offering"`` that would otherwise pollute the
+    title. Decomposing the img is less brittle than maintaining a
+    regex of alt strings that changes whenever GreatFeet ships a new
+    marker graphic."""
     del page  # tickles.htm is a single page — archive pages handle
     # older stories via a separate ``/archive<N>.htm`` route.
     url = "https://www.greatfeet.com/tickles.htm"
@@ -638,18 +689,16 @@ def search_greatfeet(query: str, *, page: int = 1,
         sid = m.group(1)
         if sid in seen:
             continue
-        # The real title sits as the link text; BS4 ignores the broken
-        # ``<a>`` close tag and pulls the text that precedes the next
-        # ``</font>``. We strip any trailing "Foot Fetish Offering"
-        # alt-text that rides along on the "new!" marker image.
+        # Strip marker images (``<img src="new.gif">``, ``<img
+        # src="hot.gif">``) before reading link text — their alt
+        # attributes are not part of the story title.
+        for img in list(a.find_all("img")):
+            img.decompose()
         title = a.get_text(" ", strip=True)
-        title = re.sub(
-            r"\s*(?:foot fetish offering|new!?)\s*", "", title, flags=re.I,
-        ).strip()
-        # Links that only carry a teaser image (no text) come back as
-        # empty; fall back to the id-derived placeholder so the row
-        # still has a title the reader can scan.
-        if not title or _GREATFEET_TITLE_BOILERPLATE_RE.match(title):
+        # Links that only carry a teaser image (no text after img
+        # decompose) fall back to the id-derived placeholder so the
+        # row still has a title the reader can scan.
+        if not title:
             title = f"GreatFeet story {sid}"
         if not _matches_query(query, title):
             continue
