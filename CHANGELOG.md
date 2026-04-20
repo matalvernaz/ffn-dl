@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.20.10 — 2026-04-19
+
+### Add
+
+- **Unified Preferences dialog (Edit → Preferences, Ctrl+,).** Settings
+  were scattered across the main form (format, filename template,
+  output dir, HR-as-stars, strip notes, speech rate, attribution
+  backend/size), the View menu (log level, save log to file), and
+  the File menu (warn-before-closing). Several keys
+  (`check_updates`, Pushover/Discord/email notification credentials)
+  had no GUI at all and required editing `settings.ini` by hand.
+  All of those are now in one tabbed dialog with five sections:
+  General, Downloads, Audiobook, Notifications, Logging. Changes
+  apply immediately — the main form's controls get re-synced on OK
+  rather than waiting for a restart, and logging reconfigures in
+  place. The Notifications tab unlocks the watchlist alerting
+  credentials that were previously CLI-only.
+
 ## 1.20.9 — 2026-04-19
 
 ### Add

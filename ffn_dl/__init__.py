@@ -2,7 +2,7 @@
 
 import logging as _logging
 
-__version__ = "1.20.9"
+__version__ = "1.20.10"
 
 _logger = _logging.getLogger(__name__)
 

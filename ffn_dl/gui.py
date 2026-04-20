@@ -1698,6 +1698,13 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda e: self.Close(), exit_item)
         bar.Append(file_menu, "&File")
 
+        edit_menu = wx.Menu()
+        prefs_item = edit_menu.Append(
+            wx.ID_PREFERENCES, "&Preferences...\tCtrl+,",
+        )
+        self.Bind(wx.EVT_MENU, self._on_preferences_menu, prefs_item)
+        bar.Append(edit_menu, "&Edit")
+
         search_menu = wx.Menu()
         for accel, site_key, spec_fn, label in self._SEARCH_MENU_ITEMS:
             item = search_menu.Append(wx.ID_ANY, f"{label}\t{accel}")
@@ -1769,6 +1776,71 @@ class MainFrame(wx.Frame):
             _p.KEY_CONFIRM_CANCEL_ON_CLOSE,
             self._confirm_close_item.IsChecked(),
         )
+
+    def _on_preferences_menu(self, event):
+        from .preferences import PreferencesDialog
+
+        dlg = PreferencesDialog(self, self.prefs, main_frame=self)
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+
+    def apply_preferences(self):
+        """Called from PreferencesDialog after OK. Re-reads every pref
+        the main form mirrors and pushes it into the live controls so
+        the change takes effect immediately, without waiting for an
+        app restart. Also re-syncs the View/File menu check items and
+        re-applies logging config.
+        """
+        from . import prefs as _p
+
+        # Download-form fields that mirror prefs
+        self.output_ctrl.SetValue(self.prefs.get(_p.KEY_OUTPUT_DIR) or "")
+        self.name_ctrl.SetValue(self.prefs.get(_p.KEY_NAME_TEMPLATE) or "")
+
+        fmt = (self.prefs.get(_p.KEY_FORMAT) or "epub").lower()
+        fmt_choices = ["epub", "html", "txt", "audio"]
+        if fmt in fmt_choices:
+            self.format_ctrl.SetSelection(fmt_choices.index(fmt))
+            self._update_audio_panel_visibility()
+
+        self.hr_stars_ctrl.SetValue(self.prefs.get_bool(_p.KEY_HR_AS_STARS))
+        self.strip_notes_ctrl.SetValue(self.prefs.get_bool(_p.KEY_STRIP_NOTES))
+
+        try:
+            rate = int(self.prefs.get(_p.KEY_SPEECH_RATE) or "0")
+        except (TypeError, ValueError):
+            rate = 0
+        self.speech_rate_ctrl.SetValue(max(-50, min(100, rate)))
+
+        backend = self.prefs.get(_p.KEY_ATTRIBUTION_BACKEND) or "builtin"
+        if backend in self._attribution_choices:
+            self.attribution_ctrl.SetSelection(
+                self._attribution_choices.index(backend)
+            )
+            self._refresh_attribution_status()
+            self._refresh_size_choices(
+                preferred=self.prefs.get(_p.KEY_ATTRIBUTION_MODEL_SIZE) or None,
+            )
+
+        # Logging: level and file-output may have changed — route through
+        # the existing setters so menu check items re-sync and the live
+        # handlers get rebuilt.
+        level = (self.prefs.get(_p.KEY_LOG_LEVEL) or "INFO").upper()
+        if level in _LOG_LEVELS:
+            self._set_log_level_idx(_LOG_LEVELS.index(level))
+            for lvl_name, item in getattr(self, "_log_level_items", {}).items():
+                item.Check(lvl_name == level)
+        self._set_log_to_file(self.prefs.get_bool(_p.KEY_LOG_TO_FILE))
+        if getattr(self, "_log_to_file_item", None) is not None:
+            self._log_to_file_item.Check(self._log_to_file_enabled)
+
+        # File-menu "warn before closing" toggle
+        if getattr(self, "_confirm_close_item", None) is not None:
+            self._confirm_close_item.Check(
+                self.prefs.get_bool(_p.KEY_CONFIRM_CANCEL_ON_CLOSE)
+            )
 
     def _on_library_menu(self, event):
         """Open the library-management dialog.
