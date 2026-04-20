@@ -248,7 +248,8 @@ class LibraryDialog(wx.Dialog):
         self.scan_btn.Enable(not busy)
         self.reorg_btn.Enable(not busy)
         self.update_btn.Enable(not busy)
-        self.force_update_btn.Enable(not busy)
+        self.force_recheck_chk.Enable(not busy)
+        self.refetch_all_chk.Enable(not busy)
         self.review_btn.Enable(not busy)
 
     def _post_status(self, line: str) -> None:
