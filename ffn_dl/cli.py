@@ -3,6 +3,7 @@
 import argparse
 import logging
 import sys
+import threading
 from pathlib import Path
 
 from .ao3 import AO3LockedError
@@ -911,7 +912,8 @@ def _run_update_queue(
     # stay at 1 worker even when ``--probe-workers`` is higher. The
     # global ``workers`` value is now an upper cap, not a fan-out count.
     if probe_queue:
-        progress(f"\nProbing {len(probe_queue)} stories for new chapters...")
+        total = len(probe_queue)
+        progress(f"\nProbing {total} stories for new chapters...")
 
         _PROBE_EXPECTED_ERRORS = (
             RateLimitError, CloudflareBlockError, StoryNotFoundError,
@@ -923,18 +925,42 @@ def _run_update_queue(
             site_cls = _detect_site(entry["url"])
             by_site.setdefault(site_cls, []).append(entry)
 
+        # Progress output during Phase 2. Without this, a library with
+        # 700+ FFN stories goes silent for an hour+ while the serial
+        # 6-second-floor probes grind through — the user can't tell
+        # whether the app has hung or is just waiting on FFN's rate
+        # limit. One line per probe shows liveness and lets them
+        # estimate remaining time. Lock-guarded because probe_entry
+        # runs inside ThreadPoolExecutor workers.
+        probe_progress_lock = threading.Lock()
+        completed_count = [0]
+
         def probe_entry(scraper, entry):
             try:
                 entry["remote"] = scraper.get_chapter_count(entry["url"])
+                outcome = f"{entry['remote']} chapter(s) upstream"
             except _PROBE_EXPECTED_ERRORS as exc:
                 entry["error"] = exc
+                outcome = f"probe failed: {exc}"
             except (OSError, RuntimeError) as exc:
                 logger.debug("Chapter-count probe failed", exc_info=True)
                 entry["error"] = exc
+                outcome = f"probe failed: {exc}"
+            with probe_progress_lock:
+                completed_count[0] += 1
+                progress(
+                    f"  [probe {completed_count[0]}/{total}] "
+                    f"{entry['rel']}: {outcome}"
+                )
 
         def run_site_group(site_cls, entries):
             scraper = _build_scraper(entries[0]["url"], args)
             site_workers = max(1, min(workers, scraper.concurrency))
+            progress(
+                f"  Probing {len(entries)} {site_cls.site_name} "
+                f"stor{'y' if len(entries) == 1 else 'ies'} "
+                f"(concurrency={site_workers})..."
+            )
             with ThreadPoolExecutor(
                 max_workers=site_workers,
                 thread_name_prefix=f"probe-{site_cls.site_name}",

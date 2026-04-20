@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.20.18 — 2026-04-19
+
+### Add
+
+- **Per-probe progress during library update scans.** Phase 2 of
+  ``_run_update_queue`` ran silently — after "Probing N stories for
+  new chapters..." the user saw nothing until every probe finished
+  and Phase 3 began. For a library with hundreds of FFN stories
+  (FFN probes are serial at a 6 s floor, so 700 stories ≈ 70
+  minutes) that silence was indistinguishable from a hang. Probes
+  now emit one status line per completed probe —
+  ``  [probe 42/804] <filename>: 23 chapter(s) upstream`` on
+  success, ``probe failed: <reason>`` on error — and each site
+  group announces itself with a header that calls out the
+  per-site concurrency so the FFN serial cost is explicit.
+  Behaviour and timing of the probes themselves is unchanged; the
+  new output is visibility-only.
+
 ## 1.20.17 — 2026-04-19
 
 ### Change
