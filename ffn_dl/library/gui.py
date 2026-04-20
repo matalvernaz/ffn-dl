@@ -151,30 +151,35 @@ class LibraryDialog(wx.Dialog):
         self.update_btn.Bind(wx.EVT_BUTTON, self._on_check_updates)
         btn_row.Add(self.update_btn, 0, wx.RIGHT, 6)
 
-        self.force_update_btn = wx.Button(
-            panel, label="&Force Full Recheck",
+        # Update-mode modifiers live next to the button so keyboard
+        # users can tab from Update → Force recheck → Fresh copies and
+        # pick any combination (force + fresh, force alone, fresh alone,
+        # or neither). Resets on dialog close — "fresh copies" is a
+        # slow operation and a sticky toggle is a silent footgun.
+        self.force_recheck_chk = wx.CheckBox(
+            panel, label="&Force recheck (bypass TTL)",
         )
-        self.force_update_btn.SetToolTip(
-            "Ignore the recent-check TTL and probe every indexed story."
+        self.force_recheck_chk.SetToolTip(
+            "Ignore the recent-check TTL and probe every indexed story "
+            "against upstream even if it was just checked."
         )
-        self.force_update_btn.Bind(
-            wx.EVT_BUTTON, lambda e: self._on_check_updates(e, force=True),
+        btn_row.Add(
+            self.force_recheck_chk, 0,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6,
         )
-        btn_row.Add(self.force_update_btn, 0, wx.RIGHT, 6)
 
-        self.refetch_all_btn = wx.Button(
-            panel, label="Update (Fres&h Copies)",
+        self.refetch_all_chk = wx.CheckBox(
+            panel, label="Fres&h copies (re-download all chapters)",
         )
-        self.refetch_all_btn.SetToolTip(
+        self.refetch_all_chk.SetToolTip(
             "Re-download every chapter from upstream instead of merging "
             "new chapters with the ones already on disk. Slower, but "
             "catches silent author edits to old chapters."
         )
-        self.refetch_all_btn.Bind(
-            wx.EVT_BUTTON,
-            lambda e: self._on_check_updates(e, refetch_all=True),
+        btn_row.Add(
+            self.refetch_all_chk, 0,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6,
         )
-        btn_row.Add(self.refetch_all_btn, 0, wx.RIGHT, 6)
 
         self.review_btn = wx.Button(panel, label="Review &Ambiguous...")
         self.review_btn.Bind(wx.EVT_BUTTON, self._on_review)
@@ -303,21 +308,37 @@ class LibraryDialog(wx.Dialog):
         self,
         event: wx.Event,
         *,
-        force: bool = False,
-        refetch_all: bool = False,
+        force: bool | None = None,
+        refetch_all: bool | None = None,
     ) -> None:
+        """Start a library-update run.
+
+        ``force`` and ``refetch_all`` default to reading the adjacent
+        checkboxes so users tick the combination they want before
+        pressing Update. The explicit kwargs are still honoured so
+        programmatic callers (tests, future toolbar entries) can
+        override the checkbox state without flipping UI widgets.
+        """
         root = self._current_path()
         if root is None:
             return
         self._save_prefs()
+        if force is None:
+            force = bool(self.force_recheck_chk.GetValue())
+        if refetch_all is None:
+            refetch_all = bool(self.refetch_all_chk.GetValue())
+
+        # Describe exactly what combination is about to run so the
+        # status log reflects the toggle state (easier to diagnose
+        # "why is it slow" / "why did it re-probe").
+        mode_bits: list[str] = []
+        if force:
+            mode_bits.append("ignoring recent-probe TTL")
         if refetch_all:
+            mode_bits.append("re-downloading every chapter")
+        if mode_bits:
             self._append_status(
-                f"Updating {root} with fresh copies "
-                "(re-downloading every chapter)..."
-            )
-        elif force:
-            self._append_status(
-                f"Forcing full recheck of {root} (ignoring recent-probe TTL)..."
+                f"Updating {root} ({', '.join(mode_bits)})..."
             )
         else:
             self._append_status(f"Checking {root} for updates...")

@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.23.13 — 2026-04-20
+
+### Change
+
+- **Replace the "Force Full Recheck" and "Update (Fresh Copies)"
+  buttons with two checkboxes next to the "Check for Updates"
+  button.** The two options are orthogonal — force-recheck controls
+  whether the probe TTL is honoured, fresh-copies controls whether
+  chapters 1..existing are re-downloaded — and three separate
+  buttons couldn't combine them. Now the user ticks any combination
+  before pressing Update. Checkboxes reset on dialog close so a slow
+  fresh-copies run never sticks around as a hidden default. The
+  status log names the active modifiers so it's obvious from the
+  output which combination ran.
+
 ## 1.23.12 — 2026-04-20
 
 ### Feature
