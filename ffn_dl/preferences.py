@@ -16,10 +16,11 @@ notes, speech rate, attribution) are written back to both the
 persistent pref *and* the live form control so a change takes effect
 immediately without requiring a restart.
 
-The watchlist autopoll keys (``KEY_WATCH_AUTOPOLL`` /
-``KEY_WATCH_POLL_INTERVAL_S``) are intentionally *not* surfaced here —
-the GUI doesn't yet run a background watchlist thread, so toggling
-them would be a no-op until that lands.
+The Watchlist tab drives ``KEY_WATCH_AUTOPOLL`` and
+``KEY_WATCH_POLL_INTERVAL_S``; flipping either triggers
+:meth:`MainFrame.apply_preferences`, which calls
+``WatchlistPoller.reconfigure()`` so the poll thread starts, stops, or
+picks up the new interval without requiring an app restart.
 """
 
 from __future__ import annotations
@@ -38,13 +39,27 @@ logger = logging.getLogger(__name__)
 _FORMAT_CHOICES = ["epub", "html", "txt", "audio"]
 _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
 
-# Presets shown in the watchlist poll-interval dropdown — even though
-# the autopoll toggle itself isn't surfaced yet, keeping the constants
-# here (dead code aside) would risk drifting from prefs.py. They stay
-# in prefs.py and get referenced lazily only if/when the tab is added.
+# (seconds, display label) pairs for the watchlist poll-interval
+# dropdown. All presets are >= watchlist.MIN_POLL_INTERVAL_S so the
+# runtime clamp in WatchlistPoller never modifies what the dialog
+# wrote — the 15-minute floor here is a UX choice (faster than
+# 15 min is site-abusive for even modest watchlists), not the
+# safety floor.
+_WATCH_INTERVAL_PRESETS: list[tuple[int, str]] = [
+    (15 * 60, "15 minutes"),
+    (30 * 60, "30 minutes"),
+    (60 * 60, "1 hour"),
+    (2 * 60 * 60, "2 hours"),
+    (4 * 60 * 60, "4 hours"),
+    (8 * 60 * 60, "8 hours"),
+    (12 * 60 * 60, "12 hours"),
+    (24 * 60 * 60, "24 hours"),
+]
+_DEFAULT_WATCH_PRESET_INDEX = next(
+    i for i, (secs, _label) in enumerate(_WATCH_INTERVAL_PRESETS)
+    if secs == 60 * 60
+)
 
-# (seconds, label) pairs. Dialog widgets are rebuilt each open so
-# adding an interval here is enough — no persisted indices to migrate.
 _PUSHOVER_HELP = (
     "Pushover delivers watchlist alerts to your phone. Create an "
     "application at https://pushover.net/apps/build to get an API "
@@ -92,6 +107,7 @@ class PreferencesDialog(wx.Dialog):
         self.notebook.AddPage(self._build_downloads_tab(), "&Downloads")
         self.notebook.AddPage(self._build_audiobook_tab(), "&Audiobook")
         self.notebook.AddPage(self._build_notifications_tab(), "&Notifications")
+        self.notebook.AddPage(self._build_watchlist_tab(), "&Watchlist")
         self.notebook.AddPage(self._build_logging_tab(), "&Logging")
         sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 8)
 
@@ -340,6 +356,47 @@ class PreferencesDialog(wx.Dialog):
         panel.SetSizer(sizer)
         return panel
 
+    def _build_watchlist_tab(self):
+        panel = wx.Panel(self.notebook)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._add_help_text(
+            sizer, panel,
+            "When enabled, ffn-dl polls every watch on a schedule while "
+            "the app is open and sends notifications for new chapters, "
+            "new author works, and new search matches. Credentials come "
+            "from the Notifications tab. Manage the list of watches "
+            "from Watchlist → Manage watchlist (Ctrl+W).",
+        )
+
+        self.watch_autopoll_ctrl = wx.CheckBox(
+            panel,
+            label="&Automatically poll the watchlist while ffn-dl is open",
+        )
+        self.watch_autopoll_ctrl.SetName(
+            "Automatically poll the watchlist in the background"
+        )
+        sizer.Add(self.watch_autopoll_ctrl, 0, wx.ALL, 6)
+
+        interval_labels = [label for _secs, label in _WATCH_INTERVAL_PRESETS]
+        self.watch_interval_ctrl = wx.Choice(panel, choices=interval_labels)
+        self.watch_interval_ctrl.SetName("Poll interval")
+        sizer.Add(
+            self._make_labeled_row(
+                panel, "Poll &interval:", self.watch_interval_ctrl,
+            ),
+            0, wx.EXPAND | wx.ALL, 6,
+        )
+        self._add_help_text(
+            sizer, panel,
+            "The interval is also capped internally at 5 minutes — "
+            "faster polling risks tripping FFN's captcha on moderately "
+            "sized watchlists.",
+        )
+
+        panel.SetSizer(sizer)
+        return panel
+
     def _build_logging_tab(self):
         panel = wx.Panel(self.notebook)
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -422,6 +479,26 @@ class PreferencesDialog(wx.Dialog):
             self.prefs.get(_p.KEY_NOTIFY_EMAIL) or ""
         )
 
+        # Watchlist
+        self.watch_autopoll_ctrl.SetValue(
+            self.prefs.get_bool(_p.KEY_WATCH_AUTOPOLL)
+        )
+        try:
+            current_interval = int(
+                self.prefs.get(_p.KEY_WATCH_POLL_INTERVAL_S)
+                or _p.DEFAULT_WATCH_POLL_INTERVAL_S
+            )
+        except (TypeError, ValueError):
+            current_interval = _p.DEFAULT_WATCH_POLL_INTERVAL_S
+        preset_idx = next(
+            (
+                i for i, (secs, _label) in enumerate(_WATCH_INTERVAL_PRESETS)
+                if secs == current_interval
+            ),
+            _DEFAULT_WATCH_PRESET_INDEX,
+        )
+        self.watch_interval_ctrl.SetSelection(preset_idx)
+
         # Logging
         level = (self.prefs.get(_p.KEY_LOG_LEVEL) or "INFO").upper()
         if level in _LOG_LEVELS:
@@ -498,6 +575,17 @@ class PreferencesDialog(wx.Dialog):
         self.prefs.set(
             _p.KEY_NOTIFY_EMAIL, self.notify_email_ctrl.GetValue().strip(),
         )
+
+        # Watchlist
+        self.prefs.set_bool(
+            _p.KEY_WATCH_AUTOPOLL, self.watch_autopoll_ctrl.GetValue(),
+        )
+        w_idx = self.watch_interval_ctrl.GetSelection()
+        if 0 <= w_idx < len(_WATCH_INTERVAL_PRESETS):
+            self.prefs.set(
+                _p.KEY_WATCH_POLL_INTERVAL_S,
+                str(_WATCH_INTERVAL_PRESETS[w_idx][0]),
+            )
 
         # Logging
         lvl_idx = self.log_level_ctrl.GetSelection()

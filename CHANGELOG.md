@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.20.14 — 2026-04-19
+
+### Add
+
+- **Watchlist tab in Preferences.** The autopoll toggle and poll
+  interval — which 1.20.12 wired up for background polling — now
+  have a proper home in the Preferences dialog (Edit → Preferences →
+  Watchlist). The interval dropdown offers eight presets from 15
+  minutes to 24 hours; apply_preferences reconfigures the running
+  poll thread in place, so changing the interval or flipping
+  autopoll takes effect immediately without an app restart. The
+  runtime 5-minute safety floor enforced by `WatchlistPoller`
+  stays untouched — every preset here is already above it, but
+  the floor remains for anyone who hand-edits `settings.ini`.
+
 ## 1.20.13 — 2026-04-19
 
 ### Add
