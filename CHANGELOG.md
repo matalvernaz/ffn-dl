@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.20.11 — 2026-04-19
+
+### Change
+
+- **Split gui.py into three modules.** gui.py had grown to 3189 lines
+  covering the main window, the per-site search windows, four
+  stand-alone dialogs, and their helpers. The search surface
+  (`SearchFrame` plus the five site search-spec factories and the
+  shared `_SEARCH_COLUMNS` constant) moved to
+  `ffn_dl/gui_search.py`, and the four leaf dialogs
+  (`VoicePreviewDialog`, `StoryPickerDialog`, `MultiPickerDialog`,
+  `SeriesPartsDialog`) moved to `ffn_dl/gui_dialogs.py`. gui.py is
+  now 1818 lines, holding just `MainFrame`, the log-bridge handler,
+  and the `main()` entry point. Pure mechanical move — no behaviour
+  changes, test suite unchanged.
+
 ## 1.20.10 — 2026-04-19
 
 ### Add
