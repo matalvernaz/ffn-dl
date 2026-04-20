@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.20.8 — 2026-04-19
+
+### Fix
+
+- **Debug logs are readable again.** Before today, picking DEBUG in the
+  log-level menu produced a file that was 90%+ third-party noise —
+  HuggingFace `filelock` poll-spam while BookNLP waited on a model
+  cache lock (one line every 50 ms, thousands per run), `httpcore`
+  request traces from the same fetch, `asyncio` proactor chatter, and
+  `h5py._conv` init lines. Our own `ffn_dl.*` debug output was
+  drowning. `gui._apply_logging_config` now caps the known-noisy
+  third-party loggers at INFO even when the root is at DEBUG, so a
+  DEBUG log contains just ffn-dl's own diagnostics plus genuine
+  third-party warnings/errors.
+- **ffmpeg concat failures log the real error, not `b'...'`.** On
+  some frozen Windows builds `subprocess.run(..., text=True)` hands
+  back `bytes` instead of `str`, and `"%s" % bytes` renders as
+  `b'...'` — which in one observed audiobook run truncated the
+  stderr tail to 264 chars of the ffmpeg banner and hid the actual
+  "please specify the format manually" message behind it. Both the
+  per-chapter concat warning and `_run_ffmpeg`'s RuntimeError now
+  route stderr through `_decode_stderr` so the real message survives.
+  When a chapter concat fails and the logger is at DEBUG, the concat
+  list is dumped too — a silent 29-chapter concat failure in the
+  user's last audiobook run was untraceable because there was no way
+  to see which input file the demuxer choked on.
+- **TTS "No audio was received" no longer burns all three retries
+  with identical parameters.** Edge-tts reproducibly rejects some
+  text+voice+emotion combos, so plain retries of the same payload
+  just waste budget. `_generate_with_semaphore` now uses progressive
+  fallback: attempt 1 is full kwargs (assigned voice + emotion
+  prosody), attempt 2 strips emotion prosody (rate/pitch/volume are
+  the usual culprits), attempt 3 swaps to the narrator voice. A
+  listener hears the line in the wrong voice rather than a silent
+  gap — which is the tradeoff users prefer when edge-tts goes
+  sideways.
+
 ## 1.20.7 — 2026-04-19
 
 ### Performance

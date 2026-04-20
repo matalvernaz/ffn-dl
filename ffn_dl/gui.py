@@ -457,6 +457,19 @@ class MainFrame(wx.Frame):
         level = getattr(logging, level_name, logging.INFO)
         root.setLevel(level)
 
+        # Cap third-party loggers at INFO even when the user picks DEBUG.
+        # Without this, 90%+ of a DEBUG log is HF filelock polling,
+        # httpcore/httpx request tracing from BookNLP's model fetch, and
+        # asyncio proactor churn — none of it ffn-dl's own output, and
+        # it makes real diagnosis painful because the signal drowns.
+        noisy_level = max(level, logging.INFO)
+        for noisy in (
+            "filelock", "asyncio",
+            "urllib3", "httpcore", "httpcore.http11", "httpcore.connection",
+            "httpx", "h5py._conv",
+        ):
+            logging.getLogger(noisy).setLevel(noisy_level)
+
         fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 
         if self._wx_log_handler is None:

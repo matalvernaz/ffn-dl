@@ -1769,30 +1769,68 @@ def _load_pronunciation_map(path):
     return {}
 
 
-async def _generate_with_semaphore(sem, seg, voice, path, idx, ch_num, speech_rate=0):
-    """Generate one segment with a concurrency limiter (retries up to 3 times)."""
+async def _generate_with_semaphore(
+    sem, seg, voice, path, idx, ch_num, speech_rate=0, narrator_voice=None,
+):
+    """Generate one segment with a concurrency limiter.
+
+    Three attempts with progressive fallback — edge-tts can reproducibly
+    reject a specific text+voice+emotion combo ("No audio was received"),
+    so plain retries with identical parameters just burn the budget.
+    Each attempt strips one more suspected culprit so a segment that
+    fails at full config still has a chance of going through:
+
+      1. Full kwargs — assigned character voice + emotion prosody.
+      2. Emotion prosody stripped — same voice, user speech_rate only.
+         Covers the common case where a rate/pitch/volume combo pushes
+         edge-tts past what that specific voice supports.
+      3. Narrator voice — last-ditch different voice + plain kwargs.
+         The listener hears the line in the wrong voice rather than a
+         silent gap, which is the tradeoff users consistently prefer.
+    """
+    fallback_voice = narrator_voice or NARRATOR_VOICE
+    seg_no_emotion = (
+        Segment(seg.text, speaker=seg.speaker, emotion=None,
+                scene_break=seg.scene_break)
+        if seg.emotion else seg
+    )
+    attempts = (
+        ("full", voice, seg),
+        ("no-emotion", voice, seg_no_emotion),
+        ("narrator-fallback", fallback_voice, seg_no_emotion),
+    )
     async with sem:
-        for attempt in range(1, 4):
+        for attempt, (label, try_voice, try_seg) in enumerate(attempts, 1):
             try:
-                ok = await _generate_segment_audio(seg, voice, path, speech_rate=speech_rate)
+                ok = await _generate_segment_audio(
+                    try_seg, try_voice, path, speech_rate=speech_rate,
+                )
                 if ok and path.exists() and path.stat().st_size > 0:
+                    if attempt > 1:
+                        logger.info(
+                            "TTS segment %d (ch %d) recovered on attempt %d "
+                            "(%s, voice=%s)",
+                            idx, ch_num, attempt, label, try_voice,
+                        )
                     return path
             except Exception as exc:
-                kwargs = _tts_kwargs_for_segment(seg, voice, speech_rate=speech_rate)
+                kwargs = _tts_kwargs_for_segment(
+                    try_seg, try_voice, speech_rate=speech_rate,
+                )
                 text_preview = seg.text[:200]
-                if attempt < 3:
+                if attempt < len(attempts):
                     logger.debug(
-                        "TTS attempt %d/3 failed for segment %d (ch %d): %s | "
+                        "TTS attempt %d/%d (%s) failed for segment %d (ch %d): %s | "
                         "speaker=%s emotion=%s kwargs=%s text=%r",
-                        attempt, idx, ch_num, exc,
+                        attempt, len(attempts), label, idx, ch_num, exc,
                         seg.speaker, seg.emotion, kwargs, text_preview,
                     )
                     await asyncio.sleep(2)
                 else:
                     logger.warning(
-                        "TTS failed after 3 attempts for segment %d (ch %d): %s | "
-                        "speaker=%s emotion=%s kwargs=%s text_len=%d text=%r",
-                        idx, ch_num, exc,
+                        "TTS failed after %d attempts for segment %d (ch %d): %s | "
+                        "speaker=%s emotion=%s last_kwargs=%s text_len=%d text=%r",
+                        len(attempts), idx, ch_num, exc,
                         seg.speaker, seg.emotion, kwargs, len(seg.text), text_preview,
                     )
     return None
@@ -1840,7 +1878,8 @@ async def generate_chapter_audio(
         seg_path = tmp_dir / f"seg_{i:06d}.mp3"
         task_idx = len(tasks)
         tasks.append((i, seg_path, seg.speaker, _generate_with_semaphore(
-            sem, seg, voice, seg_path, i, chapter_num, speech_rate=speech_rate,
+            sem, seg, voice, seg_path, i, chapter_num,
+            speech_rate=speech_rate, narrator_voice=narrator,
         )))
         plan.append(("speech", seg.speaker, task_idx))
 
@@ -1910,8 +1949,21 @@ async def generate_chapter_audio(
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if result.returncode != 0:
-        tail = (result.stderr or "").strip()[-400:]
+        tail = _decode_stderr(result.stderr).strip()[-400:]
         logger.warning("ffmpeg concat failed for ch %d: %s", chapter_num, tail)
+        # Dump the concat list so the user can see what ffmpeg was asked
+        # to stitch. Real failures here ("please specify the format
+        # manually") often turn out to be a zero-byte segment or a bad
+        # silence clip; without the list it's impossible to tell which
+        # file tripped the concat demuxer.
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                logger.debug(
+                    "ffmpeg concat list for ch %d:\n%s",
+                    chapter_num, list_file.read_text(encoding="utf-8"),
+                )
+            except OSError:
+                pass
         return False
 
     return True
@@ -2018,6 +2070,23 @@ async def _synthesize_heading(text, voice, output_path, speech_rate=0):
     )
 
 
+def _decode_stderr(value) -> str:
+    """Return ``value`` as a str, robust to subprocess returning bytes.
+
+    ``subprocess.run(..., text=True)`` is *supposed* to decode stderr for
+    us, but on some frozen Windows builds it hands back a ``bytes`` object
+    instead — when that slips through, ``%s`` formats as ``b'...'`` and
+    the real error message is masked behind a stringified bytes repr that
+    truncates the actual tail. Decoding defensively here keeps the
+    warning-path output readable no matter what subprocess returned.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def _concat_entry(path) -> str:
     """Format a path for an ffmpeg concat-demuxer list file. Resolves to
     an absolute POSIX-style path: the concat demuxer parses single-quoted
@@ -2038,7 +2107,7 @@ def _run_ffmpeg(cmd, *, step):
     """
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        tail = (result.stderr or "").strip().splitlines()[-20:]
+        tail = _decode_stderr(result.stderr).strip().splitlines()[-20:]
         message = "\n".join(tail) or "(no ffmpeg stderr)"
         raise RuntimeError(
             f"ffmpeg failed during {step} (exit {result.returncode}):\n{message}"
