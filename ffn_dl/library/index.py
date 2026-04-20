@@ -22,6 +22,8 @@ Schema is versioned. v1:
               "format": "epub|html|txt",
               "confidence": "high|medium|low",
               "chapter_count": N,
+              "file_mtime": <float>,   # stat().st_mtime, for cache-invalidate
+              "file_size": <int>,      # stat().st_size,  for cache-invalidate
               "last_checked": "<ISO-8601 UTC>",
               "last_probed": "<ISO-8601 UTC>"  # optional
             }
@@ -190,6 +192,17 @@ class LibraryIndex:
                 "chapter_count": md.chapter_count,
                 "last_checked": _now_iso(),
             }
+            # Stamp mtime/size so build_refresh_queue can skip the
+            # ebooklib re-parse on unchanged files. Stat can race
+            # (file removed between walk and record) — fall back to
+            # leaving the fields absent, which forces a fresh read on
+            # the next probe. Better a slow probe than a wrong cache.
+            try:
+                st = candidate.path.stat()
+                entry_record["file_mtime"] = st.st_mtime
+                entry_record["file_size"] = st.st_size
+            except OSError:
+                pass
             entry_record.update(existing_preserved)
             lib["stories"][key] = entry_record
             return True

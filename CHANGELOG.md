@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.20.16 — 2026-04-19
+
+### Change
+
+- **Skip the ebooklib re-parse for unchanged library files.** Phase 1
+  of an update-library run used to call `count_chapters()` on every
+  indexed file, which for EPUBs meant a full `ebooklib.read_epub()`
+  zip parse per file — tens of seconds over a few-thousand-book
+  library even when nothing had changed on disk. The library index
+  now records each file's `file_mtime` and `file_size` at scan time,
+  and `build_refresh_queue` trusts the cached `chapter_count` when
+  both match the live file. Any edit bumps mtime or size and forces
+  a fresh read, so staleness is impossible. Older indexes written
+  before this change naturally fall through to the slow path until
+  their next scan populates the cache fields.
+
 ## 1.20.15 — 2026-04-19
 
 ### Add

@@ -366,6 +366,107 @@ def test_build_refresh_queue_ttl_missing_last_probed_is_probed(tmp_path: Path):
     assert skipped == []
 
 
+def test_build_refresh_queue_uses_mtime_size_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """When file mtime+size match the index, build_refresh_queue must
+    skip the ebooklib parse and trust the cached chapter_count. This
+    is the Phase 1 hot path for big libraries of untouched files."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(lib, title="Cached", url="https://www.fanfiction.net/s/20/1/")
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    # Patch count_chapters to fail loudly — if the cache path doesn't
+    # kick in, the test falls through to here and we know immediately.
+    import ffn_dl.library.refresh as refresh_mod
+
+    def _exploder(*args, **kwargs):
+        raise AssertionError(
+            "count_chapters was called on an unchanged file — "
+            "mtime/size cache did not kick in"
+        )
+
+    monkeypatch.setattr(refresh_mod, "count_chapters", _exploder)
+
+    queue, skipped = build_refresh_queue(lib, index_path=idx_path)
+    assert len(queue) == 1
+    assert skipped == []
+    assert queue[0]["local"] > 0
+
+
+def test_build_refresh_queue_cache_invalidates_on_file_change(
+    tmp_path: Path,
+):
+    """Mutating the file (mtime+size drift) forces a re-read. Proves
+    the cache hasn't locked in a stale count after an external edit."""
+    import os
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    path = ffndl_epub(
+        lib, title="Changes", url="https://www.fanfiction.net/s/21/1/",
+    )
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    # Bump mtime by 10 seconds and append bytes to shift size — either
+    # one alone should bust the cache; doing both keeps the test from
+    # being coupled to a single invalidation axis.
+    st = path.stat()
+    os.utime(path, (st.st_atime, st.st_mtime + 10))
+    with path.open("ab") as f:
+        f.write(b"\x00" * 16)
+
+    calls: list[Path] = []
+    import ffn_dl.library.refresh as refresh_mod
+    real = refresh_mod.count_chapters
+
+    def _recording(p):
+        calls.append(Path(p))
+        return real(p)
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    try:
+        mp.setattr(refresh_mod, "count_chapters", _recording)
+        build_refresh_queue(lib, index_path=idx_path)
+    finally:
+        mp.undo()
+
+    assert calls, "count_chapters should have been called after the file changed"
+
+
+def test_build_refresh_queue_old_index_without_mtime_falls_through(
+    tmp_path: Path,
+):
+    """Entries saved by an older build have no file_mtime/file_size.
+    The cache path must fall through to count_chapters for those
+    without crashing — users upgrading shouldn't have to re-scan."""
+    import json
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    path = ffndl_epub(
+        lib, title="Legacy", url="https://www.fanfiction.net/s/22/1/",
+    )
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    # Simulate an old-build index by stripping the cache fields.
+    raw = json.loads(idx_path.read_text(encoding="utf-8"))
+    for lib_state in raw["libraries"].values():
+        for entry in lib_state["stories"].values():
+            entry.pop("file_mtime", None)
+            entry.pop("file_size", None)
+    idx_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    queue, skipped = build_refresh_queue(lib, index_path=idx_path)
+    assert len(queue) == 1
+    assert skipped == []
+
+
 def test_mark_probed_survives_rescan(tmp_path: Path):
     """LibraryIndex.record() preserves last_probed when a rescan rewrites
     the entry. Without this, the post-update rescan after

@@ -52,6 +52,46 @@ def _human_duration(seconds: float) -> str:
     return f"{s // 86400}d"
 
 
+def _cached_chapter_count(path: Path, entry: dict) -> int | None:
+    """Return the index entry's cached chapter_count when we can trust it.
+
+    The index records ``file_mtime`` and ``file_size`` alongside
+    ``chapter_count``. If both match the file currently on disk, the
+    zip parse inside :func:`ffn_dl.updater.count_chapters` can be
+    skipped — that's the hot Phase 1 cost for any update-scan of a
+    library with thousands of untouched EPUBs.
+
+    Returns the cached int when the cache is valid; ``None`` when the
+    caller has to re-read. Older indexes written before this field
+    existed naturally fall through to ``None`` until the next scan
+    re-records the entry with mtime/size populated.
+    """
+    cached_mtime = entry.get("file_mtime")
+    cached_size = entry.get("file_size")
+    cached_count = entry.get("chapter_count")
+    if (
+        not isinstance(cached_count, int)
+        or cached_count <= 0
+        or cached_mtime is None
+        or cached_size is None
+    ):
+        return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    # Float compare with a small tolerance: filesystems round mtime to
+    # microseconds, and JSON round-trip through floats can perturb the
+    # last bit. 1 ms slack is smaller than the granularity any real
+    # story-save operation produces and well under any realistic edit
+    # window — a legitimate re-save bumps mtime by ≥1s.
+    if abs(st.st_mtime - float(cached_mtime)) > 1e-3:
+        return None
+    if st.st_size != int(cached_size):
+        return None
+    return cached_count
+
+
 def build_refresh_queue(
     root: Path,
     *,
@@ -111,12 +151,16 @@ def build_refresh_queue(
                     skipped.append(display_rel)
                     continue
 
-        try:
-            local = count_chapters(path)
-        except Exception as exc:
-            progress(f"  [skip] {display_rel}: couldn't read ({exc})")
-            skipped.append(display_rel)
-            continue
+        cached = _cached_chapter_count(path, entry)
+        if cached is not None:
+            local = cached
+        else:
+            try:
+                local = count_chapters(path)
+            except Exception as exc:
+                progress(f"  [skip] {display_rel}: couldn't read ({exc})")
+                skipped.append(display_rel)
+                continue
 
         if local == 0:
             # count_chapters looks for ffn-dl's own chapter markers
