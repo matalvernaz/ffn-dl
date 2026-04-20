@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.20.17 — 2026-04-19
+
+### Change
+
+- **HTML chapter counting is ~40× faster.** After 1.20.16 shipped,
+  profiling Matt's real 806-file library revealed that the cache
+  helped on warm runs but the cold first run still paid ~350 ms per
+  file for BeautifulSoup to parse each HTML export. Since ffn-dl
+  generates that markup itself, BS4 is overkill — a straightforward
+  regex over the file's text with a class-list tokenisation check
+  (so ``chapter-title`` doesn't match) returns the identical count
+  in 8 ms on a 1.5 MB fic. For a 800-story FFN library that's the
+  difference between a ~5-minute Phase 1 walk and ~8 seconds. The
+  EPUB branch still goes through ``ebooklib`` (zip traversal is what
+  that library is for); only the HTML path changed.
+
 ## 1.20.16 — 2026-04-19
 
 ### Change

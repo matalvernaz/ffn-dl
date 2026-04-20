@@ -35,6 +35,28 @@ class TestRoundTripHtml:
         assert extract_source_url(path) == "https://archiveofourown.org/works/4242"
         assert extract_status(path) == "Complete"
 
+    def test_count_chapters_html_tolerates_attribute_variants(self, tmp_path):
+        """The regex that replaced BS4 has to match real-world markup
+        variants: attribute order (class before id vs after), whitespace
+        around ``=``, and class lists containing ``chapter`` plus other
+        tokens. These forms all appear in past ffn-dl outputs and
+        hand-edited exports users send us."""
+        path = tmp_path / "variants.html"
+        path.write_text(
+            "<html><body>\n"
+            '<div class="chapter">one</div>\n'
+            '<div id="x" class="chapter">two</div>\n'
+            '<div class="fancy chapter">three</div>\n'
+            '<div class = "chapter">four</div>\n'
+            '<DIV CLASS="chapter">five</DIV>\n'
+            # Non-chapter div should not match
+            '<div class="chapterish">nope</div>\n'
+            '<div class="chapter-title">nope</div>\n'
+            "</body></html>\n",
+            encoding="utf-8",
+        )
+        assert count_chapters(path) == 5
+
 
 class TestRoundTripEpub:
     def test_epub_roundtrips_url_and_count(self, tmp_path):

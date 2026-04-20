@@ -5,8 +5,6 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from bs4 import BeautifulSoup
-
 logger = logging.getLogger(__name__)
 
 
@@ -29,6 +27,33 @@ class FileMetadata:
     format: str = ""
 
 
+_HTML_DIV_WITH_CLASS_RE = re.compile(
+    r'<div\b[^>]*\sclass\s*=\s*"([^"]*)"', re.IGNORECASE,
+)
+"""Find ``<div ... class="...">`` and capture the class-attribute value.
+
+Used in place of BeautifulSoup because BS4 was the single biggest cost
+in Phase 1 of ``--update-library`` for HTML libraries — measured
+~350 ms per 1.5 MB fic via BS4 versus ~10 ms via this regex + a
+whitespace split per match, which works out to minutes of savings on
+a library of a few hundred ffn-dl HTML exports. Class-name match is
+done in Python after the regex grab so ``chapter-title`` and
+``chapterish`` don't false-match the way a naive ``\\bchapter\\b``
+regex would."""
+
+
+def _count_html_chapters(text: str) -> int:
+    """Return the number of ``<div class="chapter">`` blocks in ``text``.
+
+    ``chapter`` must appear as a whole whitespace-separated class-list
+    token — ``chapter-title`` and ``chapterish`` don't count.
+    """
+    return sum(
+        1 for m in _HTML_DIV_WITH_CLASS_RE.finditer(text)
+        if "chapter" in m.group(1).split()
+    )
+
+
 def count_chapters(filepath: Path | str) -> int:
     """Count chapters in an existing export file."""
     path = Path(filepath)
@@ -36,8 +61,7 @@ def count_chapters(filepath: Path | str) -> int:
 
     if suffix == ".html":
         text = path.read_text(encoding="utf-8", errors="replace")
-        soup = BeautifulSoup(text, "html.parser")
-        return len(soup.find_all("div", class_="chapter"))
+        return _count_html_chapters(text)
 
     if suffix == ".txt":
         text = path.read_text(encoding="utf-8", errors="replace")
