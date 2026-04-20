@@ -197,6 +197,7 @@ class MainFrame(wx.Frame):
         from .prefs import Prefs
         self.prefs = Prefs()
         self._downloading = False
+        self._busy_kind = None
         self._watching = False
         self._watch_seen = set()
         self._last_clip = ""
@@ -568,9 +569,17 @@ class MainFrame(wx.Frame):
             if cut_pos > 0:
                 self.log_ctrl.Remove(0, cut_pos)
 
-    def _set_busy(self, busy):
+    def _set_busy(self, busy, kind=None):
+        """Toggle the global busy flag and optionally tag what's running.
+
+        ``kind`` is one of ``"download"``, ``"preview"``, ``"search"``
+        (or ``None`` when clearing). It drives the close-confirmation
+        prompt's message so users see *what* they're cancelling, not a
+        generic "work in progress" banner.
+        """
         def _update():
             self._downloading = busy
+            self._busy_kind = kind if busy else None
             self.dl_btn.Enable(not busy)
             self.update_btn.Enable(not busy)
             self.voices_btn.Enable(not busy)
@@ -805,6 +814,10 @@ class MainFrame(wx.Frame):
             item.Check(lvl_name == _LOG_LEVELS[self._log_level_idx])
         if getattr(self, "_log_to_file_item", None) is not None:
             self._log_to_file_item.Check(self._log_to_file_enabled)
+        if getattr(self, "_confirm_close_item", None) is not None:
+            self._confirm_close_item.Check(
+                self.prefs.get_bool(_p.KEY_CONFIRM_CANCEL_ON_CLOSE)
+            )
 
         # Search-state prefs are loaded lazily by each SearchFrame on
         # the first Ctrl+N / menu open — not here.
@@ -834,6 +847,17 @@ class MainFrame(wx.Frame):
                 logger.debug("save_state on search frame failed", exc_info=True)
 
     def _on_close(self, event):
+        # If a background job is still running, closing the window
+        # silently cancels it — which has bitten users mid-audiobook
+        # more than once. Prompt first, with a "Don't ask again"
+        # checkbox that flips the pref off for users who'd rather not
+        # see it. Veto the close on No; event.Veto() stops Wx from
+        # tearing down the frame.
+        if self._downloading and self._should_confirm_close():
+            if not self._confirm_close_during_busy():
+                event.Veto()
+                return
+
         # Snapshot each open search frame's state to prefs, then destroy
         # the frames. Destroy() doesn't fire EVT_CLOSE, so the explicit
         # save_state call is the only thing persisting their filters.
@@ -855,6 +879,79 @@ class MainFrame(wx.Frame):
             self._log_timer.Stop()
         self._detach_log_handlers()
         event.Skip()
+
+    def _should_confirm_close(self):
+        from . import prefs as _p
+        return self.prefs.get_bool(_p.KEY_CONFIRM_CANCEL_ON_CLOSE)
+
+    def _confirm_close_during_busy(self):
+        """Show the close-cancel confirmation. Returns True if the user
+        wants to proceed with closing (cancelling the job), False to
+        keep the window open.
+        """
+        from . import prefs as _p
+
+        kind = self._busy_kind
+        if kind == "preview":
+            title = "Voice preview in progress"
+            body = (
+                "A voice preview is still fetching chapter data.\n\n"
+                "Close ffn-dl and cancel the preview? "
+                "Cached chapters are kept either way."
+            )
+        elif kind == "search":
+            title = "Search in progress"
+            body = (
+                "A search is still running.\n\n"
+                "Close ffn-dl and cancel the search?"
+            )
+        else:
+            # Default covers "download" and any unexpected value.
+            # Mention audiobooks explicitly because losing a half-built
+            # M4B after 30+ minutes of TTS synthesis is the worst-case
+            # scenario this prompt exists to prevent.
+            is_audio = False
+            try:
+                is_audio = (
+                    self.format_ctrl.GetString(
+                        self.format_ctrl.GetSelection()
+                    ) == "audio"
+                )
+            except (RuntimeError, AttributeError):
+                pass
+            if is_audio:
+                title = "Audiobook generation in progress"
+                body = (
+                    "An audiobook is still being built.\n\n"
+                    "Close ffn-dl and cancel it? "
+                    "Downloaded chapters stay cached, but any audio "
+                    "synthesised so far will be discarded."
+                )
+            else:
+                title = "Download in progress"
+                body = (
+                    "A download is still running.\n\n"
+                    "Close ffn-dl and cancel it? "
+                    "Chapters already fetched stay cached and will "
+                    "not need to be re-downloaded next time."
+                )
+
+        dlg = wx.RichMessageDialog(
+            self, body, title,
+            style=wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+        )
+        dlg.SetYesNoLabels("&Close anyway", "&Keep running")
+        dlg.ShowCheckBox("&Don't ask again")
+        result = dlg.ShowModal()
+        dont_ask = dlg.IsCheckBoxChecked()
+        dlg.Destroy()
+
+        if dont_ask:
+            self.prefs.set_bool(_p.KEY_CONFIRM_CANCEL_ON_CLOSE, False)
+            if hasattr(self, "_confirm_close_item"):
+                self._confirm_close_item.Check(False)
+
+        return result == wx.ID_YES
 
     # ── Update check ─────────────────────────────────────────
 
@@ -1071,7 +1168,7 @@ class MainFrame(wx.Frame):
             return
         if self._downloading:
             return
-        self._set_busy(True)
+        self._set_busy(True, kind="download")
         self._log(f"Starting download: {url}")
         threading.Thread(
             target=self._run_download, args=(url,), daemon=True
@@ -1084,7 +1181,7 @@ class MainFrame(wx.Frame):
             return
         if self._downloading:
             return
-        self._set_busy(True)
+        self._set_busy(True, kind="preview")
         self._log(f"Preview: fetching metadata for {url}")
         threading.Thread(
             target=self._run_preview_voices, args=(url,), daemon=True,
@@ -1167,7 +1264,7 @@ class MainFrame(wx.Frame):
         self.format_ctrl.SetSelection(fmt_map.get(suffix, 0))
         self.output_ctrl.SetValue(str(Path(path).parent))
 
-        self._set_busy(True)
+        self._set_busy(True, kind="download")
         self._log(f"Updating: {url} (existing file has {existing} chapters)")
         threading.Thread(
             target=self._run_download, args=(url,),
@@ -1326,7 +1423,7 @@ class MainFrame(wx.Frame):
 
         self._log(f"Clipboard detected: {url}")
         self.url_ctrl.SetValue(url)
-        self._set_busy(True)
+        self._set_busy(True, kind="download")
         threading.Thread(
             target=self._run_download, args=(url,), daemon=True
         ).start()
@@ -1497,7 +1594,7 @@ class MainFrame(wx.Frame):
                 self._log("(No selections — nothing downloaded.)")
                 return
             self._log(f"Downloading {len(selected_urls)} selected...")
-            self._set_busy(True)
+            self._set_busy(True, kind="download")
             threading.Thread(
                 target=self._run_picked_batch,
                 args=(selected_urls, kind),
@@ -1589,6 +1686,14 @@ class MainFrame(wx.Frame):
         bar = wx.MenuBar()
 
         file_menu = wx.Menu()
+        self._confirm_close_item = file_menu.AppendCheckItem(
+            wx.ID_ANY, "&Warn before closing during downloads",
+        )
+        self.Bind(
+            wx.EVT_MENU, self._on_confirm_close_menu,
+            self._confirm_close_item,
+        )
+        file_menu.AppendSeparator()
         exit_item = file_menu.Append(wx.ID_EXIT, "E&xit")
         self.Bind(wx.EVT_MENU, lambda e: self.Close(), exit_item)
         bar.Append(file_menu, "&File")
@@ -1657,6 +1762,13 @@ class MainFrame(wx.Frame):
 
     def _on_log_to_file_menu(self, event):
         self._set_log_to_file(self._log_to_file_item.IsChecked())
+
+    def _on_confirm_close_menu(self, event):
+        from . import prefs as _p
+        self.prefs.set_bool(
+            _p.KEY_CONFIRM_CANCEL_ON_CLOSE,
+            self._confirm_close_item.IsChecked(),
+        )
 
     def _on_library_menu(self, event):
         """Open the library-management dialog.
@@ -2056,7 +2168,7 @@ class SearchFrame(wx.Frame):
         if not query and not (list_browse or rr_filter_only or lit_cat_browse):
             self._log("Error: Please enter a search query.")
             return
-        self.main_frame._set_busy(True)
+        self.main_frame._set_busy(True, kind="search")
         self.results_ctrl.DeleteAllItems()
         self.summary_ctrl.SetValue("")
         self.results = []
@@ -2079,7 +2191,7 @@ class SearchFrame(wx.Frame):
     def _on_load_more(self):
         if self.main_frame._downloading or self.last_query is None:
             return
-        self.main_frame._set_busy(True)
+        self.main_frame._set_busy(True, kind="search")
         self._log(f"Loading page {self.next_page}...")
         threading.Thread(
             target=self._run_search,
@@ -2216,7 +2328,7 @@ class SearchFrame(wx.Frame):
             return
         if self.main_frame._downloading:
             return
-        self.main_frame._set_busy(True)
+        self.main_frame._set_busy(True, kind="download")
         if picked.get("is_series"):
             self._log(f"Starting series download: {url}")
             if picked.get("parts_only"):
@@ -2277,7 +2389,7 @@ class SearchFrame(wx.Frame):
         if dlg.ShowModal() == wx.ID_OK:
             picked = dlg.picked_url()
             if picked and not self.main_frame._downloading:
-                self.main_frame._set_busy(True)
+                self.main_frame._set_busy(True, kind="download")
                 self._log(f"Starting part download: {picked}")
                 threading.Thread(
                     target=self.main_frame._run_download,

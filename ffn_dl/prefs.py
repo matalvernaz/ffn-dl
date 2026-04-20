@@ -20,6 +20,10 @@ KEY_ATTRIBUTION_BACKEND = "attribution_backend"
 KEY_ATTRIBUTION_MODEL_SIZE = "attribution_model_size"
 KEY_LOG_LEVEL = "log_level"
 KEY_LOG_TO_FILE = "log_to_file"
+# Prompt before closing the main window while a long-running job
+# (download, audiobook build, search, etc.) is still active. The
+# prompt's "Don't ask again" checkbox flips this pref off.
+KEY_CONFIRM_CANCEL_ON_CLOSE = "confirm_cancel_on_close"
 KEY_STORY_PICKER_SORT = "story_picker_sort"
 # Library manager — auto-sort downloads into category subdirs and
 # re-check existing files (including foreign ones from FanFicFare /
@@ -68,6 +72,7 @@ DEFAULTS = {
     KEY_ATTRIBUTION_MODEL_SIZE: "",
     KEY_LOG_LEVEL: "INFO",
     KEY_LOG_TO_FILE: False,
+    KEY_CONFIRM_CANCEL_ON_CLOSE: True,
     KEY_LIBRARY_PATH_TEMPLATE: "{fandom}/{title} - {author}.{ext}",
     KEY_LIBRARY_MISC_FOLDER: "Misc",
     KEY_LIBRARY_AMBIGUOUS_PROMPT: True,

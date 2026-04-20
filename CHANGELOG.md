@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.20.9 — 2026-04-19
+
+### Add
+
+- **Close-during-download confirmation.** Closing the main window
+  while a job was still running silently cancelled it — more than
+  one user lost a half-built audiobook that way after walking away
+  from the machine. ffn-dl now prompts before closing while a
+  download, audiobook build, voice preview, or search is active,
+  with wording tailored to which one is running (audiobooks call out
+  that synthesised audio so far will be discarded; downloads note
+  that cached chapters are kept). The prompt defaults to "Keep
+  running" so muscle-memory Enter/Escape favours the safe path, and
+  a "Don't ask again" checkbox turns the confirmation off for users
+  who don't want it. The preference is also toggleable from File →
+  "Warn before closing during downloads" so it can be re-enabled
+  without hunting through settings.
+
 ## 1.20.8 — 2026-04-19
 
 ### Fix
