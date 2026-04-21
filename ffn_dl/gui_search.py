@@ -868,10 +868,14 @@ class SearchFrame(wx.Frame):
         event.Skip()
 
     def _on_search_download(self):
-        if self.main_frame._downloading:
-            return
         ticked = self._checked_rows()
         if len(ticked) > 1:
+            # Multi-pick batches stay on the legacy global-busy path
+            # because they may span multiple sites (erotica fan-out)
+            # and the per-site queue can't steer one job across
+            # several workers yet.
+            if self.main_frame._global_busy:
+                return
             self._download_batch([self.results[i] for i in ticked])
             return
         # Zero or one ticks: act on the tick if present, otherwise on
@@ -888,8 +892,12 @@ class SearchFrame(wx.Frame):
         if not url:
             self._log("Error: selected result has no URL.")
             return
-        self.main_frame._set_busy(True, kind="download")
         if picked.get("is_series"):
+            # Series runs fan out to many works and still go through
+            # the raw-thread global-busy path.
+            if self.main_frame._global_busy:
+                return
+            self.main_frame._set_busy(True, kind="download")
             self._log(f"Starting series download: {url}")
             if picked.get("parts_only"):
                 part_urls = [
@@ -912,12 +920,14 @@ class SearchFrame(wx.Frame):
                     target=self.main_frame._run_series_merge_download,
                     args=(url,), daemon=True,
                 ).start()
-        else:
-            self._log(f"Starting download: {url}")
-            threading.Thread(
-                target=self.main_frame._run_download,
-                args=(url,), daemon=True,
-            ).start()
+            return
+        # Single-story pick: route through the per-site queue so a
+        # download kicked off from an AO3 search frame doesn't lock
+        # the app while an FFN library sweep is running.
+        self._log(f"Starting download: {url}")
+        self.main_frame._enqueue_site_job(
+            url, lambda: self.main_frame._run_download(url),
+        )
 
     def _download_batch(self, rows: list[dict]) -> None:
         """Download every ticked row as a batch.
@@ -1024,13 +1034,12 @@ class SearchFrame(wx.Frame):
         dlg = SeriesPartsDialog(self, row["title"], parts)
         if dlg.ShowModal() == wx.ID_OK:
             picked = dlg.picked_url()
-            if picked and not self.main_frame._downloading:
-                self.main_frame._set_busy(True, kind="download")
+            if picked:
                 self._log(f"Starting part download: {picked}")
-                threading.Thread(
-                    target=self.main_frame._run_download,
-                    args=(picked,), daemon=True,
-                ).start()
+                self.main_frame._enqueue_site_job(
+                    picked,
+                    lambda p=picked: self.main_frame._run_download(p),
+                )
         dlg.Destroy()
 
     # ── Close ─────────────────────────────────────────────────

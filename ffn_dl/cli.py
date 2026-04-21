@@ -1,6 +1,7 @@
 """Command-line interface for ffn-dl."""
 
 import argparse
+import copy
 import logging
 import sys
 import threading
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from .ao3 import AO3LockedError
+from .download_queue import DownloadQueues
 from .exporters import DEFAULT_TEMPLATE, EXPORTERS, check_format_deps
 from .erotica import LiteroticaScraper
 from .models import Story, parse_chapter_spec
@@ -1144,26 +1146,33 @@ def _run_update_queue(
                     fut.result()
         progress("")
 
-    # Phase 3 (serial): apply the decisions. Any actual downloads run
-    # one-at-a-time so we don't stack parallel chapter fetches on a
-    # single site — that's what the scrapers' per-request pacing guards.
+    # Phase 3 (per-site fan-out): partition the downloadable entries
+    # by site and hand each one to the shared ``DownloadQueues``
+    # worker for that site. Same-site jobs still run serially behind
+    # the scraper's rate-limit floor; different sites run in parallel
+    # so a 700-story FFN sweep doesn't gate the AO3 entries behind
+    # it. The queue is a process-wide singleton shared with the
+    # manual GUI downloads — a user clicking Download on an AO3 URL
+    # mid-sweep queues behind this run's AO3 jobs rather than
+    # running in parallel and tripping AO3's rate limit.
+    from concurrent.futures import FIRST_COMPLETED, wait
+
     total = len(probe_queue)
     cancelled = False
-    for i, entry in enumerate(probe_queue, 1):
-        # Cooperative cancel: don't start another story once the caller
-        # has asked us to stop. Announced once per run so the status
-        # pane reflects why the loop terminated early.
-        if cancel_event is not None and cancel_event.is_set():
-            progress(f"\n{label} cancelled by user.")
-            cancelled = True
-            break
-        rel = entry["rel"]
-        progress(f"[{i}/{total}] {rel}")
+    result_lock = threading.Lock()
 
+    # Classify up front: entries that don't need a download (errors,
+    # already up to date, dry-run) emit their progress lines
+    # immediately and drop out of the queue fan-out.
+    downloadable: list[dict] = []
+    for i, entry in enumerate(probe_queue, 1):
+        rel = entry["rel"]
         if entry.get("cancelled"):
+            progress(f"[{i}/{total}] {rel}")
             progress(f"  Cancelled before probe.")
             continue
         if "error" in entry:
+            progress(f"[{i}/{total}] {rel}")
             progress(f"  Probe failed: {entry['error']}")
             failed.append(rel)
             continue
@@ -1174,42 +1183,121 @@ def _run_update_queue(
             msg = (
                 "up to date"
                 if remote == local
-                else f"remote has fewer chapters ({remote} < {local}) — leaving alone"
+                else (
+                    f"remote has fewer chapters ({remote} < {local}) "
+                    "— leaving alone"
+                )
             )
+            progress(f"[{i}/{total}] {rel}")
             progress(f"  {local} local / {remote} remote — {msg}")
             up_to_date.append(rel)
             continue
 
         new_count = remote - local
-        progress(
-            f"  {local} local / {remote} remote — {new_count} new chapter(s)"
-        )
-
         if args.dry_run:
+            progress(f"[{i}/{total}] {rel}")
+            progress(
+                f"  {local} local / {remote} remote — "
+                f"{new_count} new chapter(s)"
+            )
             would_update.append((rel, local, remote))
             continue
 
+        downloadable.append(entry)
+
+    download_total = len(downloadable)
+    started_count = [0]
+
+    def run_entry(entry):
+        """Download one story. Runs on a ``dlq-<site>`` worker thread
+        so the GUI's ``_log`` helpers auto-prefix output with
+        ``[<site>] ``. Exits promptly on cancel-event so a closed
+        library window doesn't keep hammering upstream."""
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        rel = entry["rel"]
+        local = entry["local"]
+        remote = entry["remote"]
+        new_count = remote - local
+        with result_lock:
+            started_count[0] += 1
+            position = started_count[0]
+        progress(f"[{position}/{download_total}] {rel}")
+        progress(
+            f"  {local} local / {remote} remote — "
+            f"{new_count} new chapter(s)"
+        )
         path = entry["path"]
-        args.format = _FMT_MAP.get(path.suffix.lower(), "epub")
-        args.output = str(path.parent)
-        output_dir = Path(args.output)
+        # Clone args so concurrent sites don't race on the shared
+        # namespace's ``format``/``output`` fields. Shallow copy is
+        # enough: only these two attributes get mutated per entry.
+        per_args = copy.copy(args)
+        per_args.format = _FMT_MAP.get(path.suffix.lower(), "epub")
+        per_args.output = str(path.parent)
+        ok = False
         try:
             ok = _download_one(
-                entry["url"], args, output_dir,
+                entry["url"], per_args, Path(per_args.output),
                 update_path=path, existing_chapters=local,
                 status_callback=progress,
             )
         except KeyboardInterrupt:
-            progress("\nCancelled.")
-            cancelled = True
-            break
-        if ok:
-            updated.append(rel)
-        else:
-            failed.append(rel)
+            # Re-raise so the outer wait loop sees the cancel.
+            raise
+        except Exception as exc:
+            logger.debug("Phase 3 download raised", exc_info=True)
+            progress(f"  Download failed: {exc}")
+        with result_lock:
+            if ok:
+                updated.append(rel)
+            else:
+                failed.append(rel)
 
-    if cancelled:
-        pass  # summary still emitted below
+    futures = []
+    for entry in downloadable:
+        site_cls = _detect_site(entry["url"])
+        site_name = getattr(site_cls, "site_name", "unknown")
+        fut = DownloadQueues.enqueue(
+            site_name, lambda e=entry: run_entry(e),
+        )
+        futures.append(fut)
+
+    # Drain the futures with periodic cancel-event checks. ``wait``
+    # with a timeout lets us surface a cancel even when the longest
+    # in-flight download (FFN's 6s-per-chapter pacing on a 100-
+    # chapter story) is still grinding — pending jobs get cancelled
+    # immediately; the running one will notice the event at its next
+    # ``run_entry`` entrypoint check if it hasn't already started.
+    pending = set(futures)
+    try:
+        while pending:
+            if cancel_event is not None and cancel_event.is_set():
+                for fut in pending:
+                    fut.cancel()
+                progress(f"\n{label} cancelled by user.")
+                cancelled = True
+                break
+            done, pending = wait(
+                pending, timeout=0.5, return_when=FIRST_COMPLETED,
+            )
+            for fut in done:
+                try:
+                    fut.result()
+                except KeyboardInterrupt:
+                    progress("\nCancelled.")
+                    cancelled = True
+                    for f in pending:
+                        f.cancel()
+                    pending = set()
+                    break
+                except Exception:
+                    logger.exception("queued update-all job raised")
+    finally:
+        # If we exit the wait loop with futures still outstanding
+        # (unexpected), don't leave them orphaned on the queue —
+        # cancel pending, let running ones finish naturally.
+        for fut in pending:
+            fut.cancel()
 
     progress(f"\n{'='*60}")
     if args.dry_run:

@@ -293,9 +293,19 @@ class LibraryFrame(wx.Frame):
 
     def _post_status(self, line: str) -> None:
         """Thread-safe status-pane append. Used as the progress callback
-        for long-running worker-thread operations."""
+        for long-running worker-thread operations.
+
+        Lines emitted on a per-site download-queue worker pick up a
+        ``[<site>] `` prefix so two sites running concurrently during
+        a library update-all Phase 3 don't interleave into an
+        unreadable mash.
+        """
         if not self._alive:
             return
+        from ..download_queue import site_from_thread_name
+        site = site_from_thread_name(threading.current_thread().name)
+        if site and line and line.strip():
+            line = f"[{site}] {line}"
         wx.CallAfter(self._append_status_if_alive, line)
 
     def _append_status_if_alive(self, line: str) -> None:

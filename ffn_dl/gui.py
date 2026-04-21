@@ -66,6 +66,11 @@ class _WxLogHandler(logging.Handler):
             pass
 
 
+from .download_queue import (
+    DownloadQueues,
+    WORKER_THREAD_PREFIX,
+    site_from_thread_name,
+)
 from .gui_dialogs import (
     MultiPickerDialog,
     SeriesPartsDialog,
@@ -94,8 +99,19 @@ class MainFrame(wx.Frame):
         )
         from .prefs import Prefs
         self.prefs = Prefs()
-        self._downloading = False
+        # ``_global_busy`` covers operations that don't route through
+        # the per-site download queue: searches, voice previews, and
+        # batch/picker flows. Per-site downloads (single URLs, library
+        # update-all Phase 3) track their state in ``_active_sites``
+        # instead, populated by the DownloadQueues listener so a
+        # manual AO3 download can run while an FFN sweep is in flight.
+        self._global_busy = False
         self._busy_kind = None
+        # site_name → (active, pending) for sites with jobs running
+        # or queued. Updated from ``_on_site_queue_change`` on the
+        # main thread; drives the close-confirmation dialog's summary.
+        self._active_sites: dict[str, tuple[int, int]] = {}
+        DownloadQueues.add_listener(self._on_site_queue_change)
         self._watching = False
         self._watch_seen = set()
         self._last_clip = ""
@@ -335,6 +351,14 @@ class MainFrame(wx.Frame):
     # ── Helpers ───────────────────────────────────────────────
 
     def _log(self, msg):
+        # Auto-prefix log lines emitted on a per-site queue worker so
+        # the shared status pane stays readable when two sites are
+        # downloading concurrently. Messages from the main thread and
+        # from ad-hoc background threads (probe pools, TTS) fall
+        # through unprefixed.
+        site = site_from_thread_name(threading.current_thread().name)
+        if site:
+            msg = f"[{site}] {msg}"
         with self._log_lock:
             self._log_queue.append(msg + "\n")
 
@@ -478,8 +502,32 @@ class MainFrame(wx.Frame):
             if cut_pos > 0:
                 self.log_ctrl.Remove(0, cut_pos)
 
+    @property
+    def _downloading(self) -> bool:
+        """Legacy compatibility shim: True when *anything* is running.
+
+        Callers scattered across the search frames and clipboard
+        watcher still ask "is the app busy?" with this check. Per-site
+        downloads (single URLs, library update-all) no longer disable
+        buttons, but they do count toward busy for the close-confirm
+        dialog and the "don't start another batch/search" guards.
+        """
+        return self._global_busy or bool(self._active_sites)
+
+    @_downloading.setter
+    def _downloading(self, _value):  # pragma: no cover — legacy shim
+        # The old code assigned ``self._downloading = True/False``
+        # directly. State now derives from ``_global_busy`` plus the
+        # queue snapshot, so those writes silently no-op.
+        pass
+
     def _set_busy(self, busy, kind=None):
-        """Toggle the global busy flag and optionally tag what's running.
+        """Toggle the *global* busy flag — used by operations that
+        don't route through the per-site download queue (searches,
+        voice previews, batch picker flows, series-merge runs).
+        Per-site downloads update busy state through the
+        ``DownloadQueues`` listener instead, so a queued AO3 download
+        does not block an FFN search or a cross-site batch.
 
         ``kind`` is one of ``"download"``, ``"preview"``, ``"search"``
         (or ``None`` when clearing). It drives the close-confirmation
@@ -487,19 +535,105 @@ class MainFrame(wx.Frame):
         generic "work in progress" banner.
         """
         def _update():
-            self._downloading = busy
+            self._global_busy = bool(busy)
             self._busy_kind = kind if busy else None
+            self._refresh_busy_ui()
+        wx.CallAfter(_update)
+
+    def _refresh_busy_ui(self):
+        """Re-apply button enable state from the current busy flags.
+
+        Global operations (searches, voice previews, batch downloads)
+        still disable the main buttons so the user can't triple-book
+        the single thread those paths share. Per-site queue activity
+        leaves the buttons enabled — a same-site click just queues
+        behind the running job.
+        """
+        busy = self._global_busy
+        try:
             self.dl_btn.Enable(not busy)
             self.update_btn.Enable(not busy)
             self.voices_btn.Enable(not busy)
-            # Broadcast to every open search window so their buttons
-            # reflect the main frame's download state.
-            for frame in list(self._search_frames.values()):
-                try:
-                    frame.apply_busy(busy)
-                except Exception:
-                    pass
-        wx.CallAfter(_update)
+        except RuntimeError:
+            return
+        for frame in list(self._search_frames.values()):
+            try:
+                frame.apply_busy(busy)
+            except Exception:
+                pass
+
+    def _on_site_queue_change(self, site_name, active, pending):
+        """``DownloadQueues`` listener — fires on the worker thread
+        whenever a site's job counts change. Marshals to the main
+        thread before mutating shared state or touching wx controls.
+        """
+        def _apply():
+            if active == 0 and pending == 0:
+                self._active_sites.pop(site_name, None)
+            else:
+                self._active_sites[site_name] = (active, pending)
+        try:
+            wx.CallAfter(_apply)
+        except RuntimeError:
+            # wx teardown race — the listener will be removed on
+            # close, but an in-flight notification can still land
+            # here. Nothing sensible to do besides drop it.
+            pass
+
+    def _enqueue_site_job(self, url, job_fn, *, kind="download"):
+        """Queue ``job_fn`` on the per-site worker for ``url``'s host.
+
+        The body runs on a ``dlq-<site>`` thread, so any ``self._log``
+        lines the job emits get an automatic ``[<site>] `` prefix from
+        the thread-name check in ``_log``. Returns the ``Future`` so
+        callers that need to wait on completion (library update-all)
+        can await it.
+        """
+        from .sites import detect_scraper
+
+        scraper_cls = detect_scraper(url)
+        site_name = getattr(scraper_cls, "site_name", "unknown")
+        # Make queueing visible: a click on Download for a site that's
+        # already busy does nothing obvious today, which made this
+        # feel like a broken button. Log the queue position so users
+        # see their click took effect.
+        snapshot = DownloadQueues.snapshot().get(site_name)
+        if snapshot is not None:
+            active, pending = snapshot
+            if active + pending > 0:
+                self._log(
+                    f"Queued on {site_name}: {url} "
+                    f"(behind {active + pending} job"
+                    f"{'s' if (active + pending) != 1 else ''})"
+                )
+        return DownloadQueues.enqueue(site_name, job_fn)
+
+    def _is_batch_url(self, url) -> bool:
+        """True if ``url`` fans out to a picker or multi-work flow.
+
+        Batch URLs (AO3 bookmarks, author pages, series pages) open a
+        picker dialog on the main thread and then kick off N separate
+        downloads. That flow doesn't map onto the one-job-per-enqueue
+        model cleanly yet, so batches stay on the legacy global-busy
+        path — they block other batches/searches but still run
+        concurrently with per-site single-URL downloads.
+        """
+        from .ao3 import AO3Scraper
+        from .erotica import LiteroticaScraper
+        from .sites import detect_scraper
+
+        if AO3Scraper.is_bookmarks_url(url):
+            return True
+        scraper_cls = detect_scraper(url)
+        scraper = scraper_cls()
+        if scraper.is_author_url(url):
+            return True
+        if (
+            AO3Scraper.is_series_url(url)
+            or LiteroticaScraper.is_series_url(url)
+        ):
+            return True
+        return False
 
     def _on_browse(self, event):
         dlg = wx.DirDialog(
@@ -809,6 +943,42 @@ class MainFrame(wx.Frame):
         """
         from . import prefs as _p
 
+        # Per-site downloads list their active sites explicitly —
+        # users want to know "what am I interrupting", not a generic
+        # "a download is running" banner that hides the fact that two
+        # different sites are both mid-flight.
+        if self._active_sites and not self._global_busy:
+            parts = []
+            for name, (active, pending) in sorted(self._active_sites.items()):
+                total = active + pending
+                parts.append(
+                    f"  \u2022 {name}: {total} job"
+                    f"{'s' if total != 1 else ''}"
+                )
+            title = "Downloads in progress"
+            body = (
+                "Per-site downloads are still running:\n\n"
+                + "\n".join(parts)
+                + "\n\n"
+                "Close ffn-dl and cancel them? Chapters already "
+                "fetched stay cached and will not need to be "
+                "re-downloaded next time."
+            )
+            dlg = wx.RichMessageDialog(
+                self, body, title,
+                style=wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+            )
+            dlg.SetYesNoLabels("&Close anyway", "&Keep running")
+            dlg.ShowCheckBox("&Don't ask again")
+            result = dlg.ShowModal()
+            dont_ask = dlg.IsCheckBoxChecked()
+            dlg.Destroy()
+            if dont_ask:
+                self.prefs.set_bool(_p.KEY_CONFIRM_CANCEL_ON_CLOSE, False)
+                if hasattr(self, "_confirm_close_item"):
+                    self._confirm_close_item.Check(False)
+            return result == wx.ID_YES
+
         kind = self._busy_kind
         if kind == "preview":
             title = "Voice preview in progress"
@@ -1099,26 +1269,33 @@ class MainFrame(wx.Frame):
         if not url:
             self._log("Error: Please enter a story URL or ID.")
             return
-        if self._downloading:
+        if self._is_batch_url(url):
+            # Batch flows still serialize globally — they pop a picker
+            # dialog and then fan out to many downloads, which the
+            # single-job queue model doesn't cover yet.
+            if self._global_busy:
+                return
+            self._set_busy(True, kind="download")
+            self._log(f"Starting download: {url}")
+            threading.Thread(
+                target=self._run_download, args=(url,), daemon=True,
+            ).start()
             return
-        self._set_busy(True, kind="download")
         self._log(f"Starting download: {url}")
-        threading.Thread(
-            target=self._run_download, args=(url,), daemon=True
-        ).start()
+        self._enqueue_site_job(
+            url, lambda: self._run_download(url),
+        )
 
     def _on_preview_voices(self, event):
         url = self.url_ctrl.GetValue().strip()
         if not url:
             self._log("Error: Enter a story URL or ID first.")
             return
-        if self._downloading:
-            return
-        self._set_busy(True, kind="preview")
         self._log(f"Preview: fetching metadata for {url}")
-        threading.Thread(
-            target=self._run_preview_voices, args=(url,), daemon=True,
-        ).start()
+        self._enqueue_site_job(
+            url, lambda: self._run_preview_voices(url),
+            kind="preview",
+        )
 
     def _run_preview_voices(self, url):
         try:
@@ -1148,11 +1325,9 @@ class MainFrame(wx.Frame):
             )
         except Exception as exc:
             self._log(f"Preview failed: {exc}")
-            self._set_busy(False)
             return
 
         wx.CallAfter(self._open_voice_dialog, voices, mapper, tts.NARRATOR_VOICE)
-        self._set_busy(False)
 
     def _open_voice_dialog(self, voices, mapper, narrator_voice):
         if not voices:
@@ -1170,7 +1345,11 @@ class MainFrame(wx.Frame):
         dlg.Destroy()
 
     def _on_update(self, event, *, refetch_all: bool = False):
-        if self._downloading:
+        if self._global_busy:
+            # A search or batch flow is running; Update would race
+            # against the shared progress pane controls. Per-site
+            # queue activity doesn't block Update — same-site updates
+            # just queue behind the running job on that site.
             return
         dlg = wx.FileDialog(
             self, "Select file to update",
@@ -1197,21 +1376,21 @@ class MainFrame(wx.Frame):
         self.format_ctrl.SetSelection(fmt_map.get(suffix, 0))
         self.output_ctrl.SetValue(str(Path(path).parent))
 
-        self._set_busy(True, kind="download")
         mode = " (fresh re-download)" if refetch_all else ""
         self._log(
             f"Updating{mode}: {url} (existing file has {existing} chapters)"
         )
-        threading.Thread(
-            target=self._run_download, args=(url,),
-            kwargs={
-                "skip_chapters": existing,
-                "is_update": True,
-                "update_path": Path(path),
-                "refetch_all": refetch_all,
-            },
-            daemon=True,
-        ).start()
+        update_path = Path(path)
+        self._enqueue_site_job(
+            url,
+            lambda: self._run_download(
+                url,
+                skip_chapters=existing,
+                is_update=True,
+                update_path=update_path,
+                refetch_all=refetch_all,
+            ),
+        )
 
     def _on_update_refetch_all(self, event):
         """Update handler that forces a full upstream re-fetch.
@@ -1369,16 +1548,27 @@ class MainFrame(wx.Frame):
             return
         self._watch_seen.add(url)
 
-        if self._downloading:
-            self._log(f"Queued (busy): {url}")
+        if self._is_batch_url(url):
+            # Batch URLs still pop a picker on the main thread; the
+            # clipboard watcher firing one mid-poll would be jarring.
+            # Queue semantically, visibly, and wait until the next
+            # clipboard hit (or the user clicks Download) to start.
+            if self._global_busy:
+                self._log(f"Queued (busy): {url}")
+                return
+            self._log(f"Clipboard detected: {url}")
+            self.url_ctrl.SetValue(url)
+            self._set_busy(True, kind="download")
+            threading.Thread(
+                target=self._run_download, args=(url,), daemon=True,
+            ).start()
             return
 
         self._log(f"Clipboard detected: {url}")
         self.url_ctrl.SetValue(url)
-        self._set_busy(True, kind="download")
-        threading.Thread(
-            target=self._run_download, args=(url,), daemon=True
-        ).start()
+        self._enqueue_site_job(
+            url, lambda: self._run_download(url),
+        )
 
     # ── Download worker ──────────────────────────────────────
 
@@ -1640,7 +1830,6 @@ class MainFrame(wx.Frame):
 
             if is_update and not refetch_all and len(story.chapters) == 0:
                 self._log("Up to date. No new chapters.")
-                self._set_busy(False)
                 return
 
             if is_update and not refetch_all:
@@ -1686,7 +1875,16 @@ class MainFrame(wx.Frame):
         except Exception as e:
             self._log(f"\nError: {e}")
         finally:
-            self._set_busy(False)
+            # Legacy raw-thread callers (batch/series/author dispatch)
+            # set ``_global_busy`` before spawning the thread and rely
+            # on this clear-on-exit. Per-site queue workers run on
+            # ``dlq-*`` threads and manage busy state via the queue
+            # listener, so clearing ``_global_busy`` here would
+            # clobber an unrelated in-flight search or batch.
+            if not threading.current_thread().name.startswith(
+                WORKER_THREAD_PREFIX
+            ):
+                self._set_busy(False)
 
     def _run_series_download(self, url, scraper):
         self._log(f"Fetching series: {url}")
