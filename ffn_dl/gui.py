@@ -1624,27 +1624,34 @@ class MainFrame(wx.Frame):
                 tag = " (cached)" if cached else ""
                 self._log(f"  [{current}/{total}] {title}{tag}")
 
+            # Fresh-copies updates always re-fetch the whole story, so
+            # skipping the existing chapters on the initial download is
+            # a wasted round-trip — we'd pull just the new chapters,
+            # then immediately fetch every chapter from 1 again. Fetch
+            # the full story directly and skip the merge helper below.
+            if is_update and refetch_all:
+                self._log("Fresh-copies mode — re-downloading every chapter.")
+                initial_skip = 0
+            else:
+                initial_skip = skip_chapters
             story = scraper.download(
-                url, progress_callback=progress, skip_chapters=skip_chapters
+                url, progress_callback=progress, skip_chapters=initial_skip,
             )
 
-            if is_update and len(story.chapters) == 0:
+            if is_update and not refetch_all and len(story.chapters) == 0:
                 self._log("Up to date. No new chapters.")
                 self._set_busy(False)
                 return
 
-            if is_update:
+            if is_update and not refetch_all:
                 new_count = len(story.chapters)
                 # Merge-in-place: read existing chapters from disk and
                 # concatenate with the just-downloaded new ones. Avoids
                 # re-downloading every chapter from upstream just to
                 # re-export, which used to silently take minutes per
                 # story on libraries without a populated local cache.
-                # ``refetch_all`` bypasses the shortcut so users who
-                # suspect an author revised old chapters can still pull
-                # a fresh copy on demand.
                 merged = None
-                if not refetch_all and update_path is not None:
+                if update_path is not None:
                     try:
                         merged = read_chapters(update_path)
                     except ChaptersNotReadableError as exc:
@@ -1662,12 +1669,9 @@ class MainFrame(wx.Frame):
                         merged + list(story.chapters), key=lambda c: c.number,
                     )
                 else:
-                    label = (
-                        "Re-downloading full story (fresh copy requested)..."
-                        if refetch_all
-                        else f"Found {new_count} new chapters. Re-exporting..."
+                    self._log(
+                        f"Found {new_count} new chapters. Re-exporting..."
                     )
-                    self._log(label)
                     story = scraper.download(
                         url, progress_callback=progress, skip_chapters=0,
                     )

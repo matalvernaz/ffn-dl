@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.23.16 — 2026-04-20
+
+### Fix
+
+- **Fresh-copies updates no longer fetch every story twice.** The
+  old code path first downloaded only the new chapters (skip =
+  existing count), then threw them away and re-fetched every
+  chapter from 1 when ``refetch_all`` was set. On FFN that wasted
+  10–15 seconds per story to rate-limit for nothing — multiply by
+  a 700-story library and a Fresh-Copies run was burning ~2h of
+  extra upstream traffic. ``_download_one`` (CLI) and
+  ``_run_download`` (GUI) now pass ``skip_chapters=0`` directly on
+  the initial fetch when refetch_all is set and skip the merge
+  helper entirely.
+
 ## 1.23.15 — 2026-04-20
 
 ### Feature

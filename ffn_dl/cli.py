@@ -493,10 +493,23 @@ def _download_one(
             status(f"Downloading story {story_id} from {scraper.site_name}...")
 
         chapter_spec = parse_chapter_spec(getattr(args, "chapters", None))
+        # Fresh-copies updates re-fetch every chapter, so skipping the
+        # existing ones on the first download is pure waste — we'd
+        # fetch the new chapters, throw them away, then re-fetch
+        # everything from 1. Short-circuit to a single full fetch and
+        # bypass the merge helper entirely below.
+        refetch_all_update = bool(
+            update_path and getattr(args, "refetch_all", False)
+        )
+        initial_skip = 0 if refetch_all_update else existing_chapters
+        if refetch_all_update:
+            status(
+                "  Fresh-copies mode — re-downloading every chapter."
+            )
         story = scraper.download(
             url,
             progress_callback=progress,
-            skip_chapters=existing_chapters,
+            skip_chapters=initial_skip,
             chapters=chapter_spec,
         )
 
@@ -515,19 +528,23 @@ def _download_one(
         status("")
         status(f"  Title:    {story.title}")
         status(f"  Author:   {story.author}")
-        if update_path:
+        if update_path and not refetch_all_update:
             total = existing_chapters + new_count
             status(f"  Chapters: {total} ({new_count} new)")
         else:
+            # Fresh-copies re-download and plain downloads both already
+            # have the full chapter count in ``new_count`` — no math.
             status(f"  Chapters: {new_count}")
         status(f"  Words:    {words}")
         status(f"  Status:   {story_status}")
 
-        if update_path:
+        if update_path and not refetch_all_update:
+            # refetch_all already pulled the full story in the initial
+            # download — ``story`` is complete, nothing to merge.
             story = _merge_with_existing(
                 story, scraper, url, chapter_spec,
                 update_path=update_path,
-                refetch_all=getattr(args, "refetch_all", False),
+                refetch_all=False,
                 status=status,
                 progress_callback=progress,
             )
