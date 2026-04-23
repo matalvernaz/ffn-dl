@@ -58,6 +58,12 @@ _WP_USER_RE = re.compile(
 _PAID_MARKER = "Paid Stories program"
 _PAID_MARKER_ES = "Historias Pagadas"
 
+# Upper bound on storytext pagination. No genuine Wattpad part has
+# even a fraction of this many pages; if we hit it, something is wrong
+# (server loop, mis-tokenised part id, site change) and we bail rather
+# than hammer the endpoint forever.
+_MAX_PART_PAGES = 200
+
 
 def _normalise_url(text: str) -> str:
     """Strip the m. subdomain prefix and any trailing fragment/query so
@@ -326,18 +332,32 @@ class WattpadScraper(BaseScraper):
     # ── Chapter fetching ──────────────────────────────────────
 
     def _fetch_part_text(self, part_id):
-        """Fetch all pages of a part and return the concatenated HTML
-        body, plus a ``paid`` flag when the paid-stories stub is the
-        only thing we got back.
+        """Fetch every page of a part and return
+        ``(html, paid_flag, truncated_flag)``.
 
         The pagination is walked until an empty page is returned — the
         story_parts API exposes a ``pages`` count, but fetching that
-        first would double the request count on every chapter. An
+        first would double the request count on every chapter, and an
         extra empty-probe per chapter is cheaper.
+
+        Two defensive stops are applied so a misbehaving endpoint
+        can't spin forever:
+
+        * **Paid-stories stub** (``paid_flag``) — a paywalled part
+          returns a bilingual "Paid Stories program" notice instead
+          of prose, on page 1 only. We record that single page and
+          stop; downstream prepends a placeholder notice to the
+          chapter HTML so the EPUB reflects the paywall.
+        * **Safety cap** (``truncated_flag``) — if pagination reaches
+          ``_MAX_PART_PAGES`` without running out of content, we stop
+          and set the flag. The returned HTML is still the real prose
+          we collected; the caller prepends a truncation notice so
+          the reader knows the chapter is incomplete.
         """
         pieces = []
         page = 1
         paid_detected = False
+        truncated = False
         while True:
             if page > 1:
                 self._delay()
@@ -362,11 +382,13 @@ class WattpadScraper(BaseScraper):
             if len(stripped) < 64:
                 break
             page += 1
-            if page > 200:  # defensive: no real chapter has 200 pages
+            if page > _MAX_PART_PAGES:
                 logger.warning(
-                    "Wattpad part %s: stopping after 200 pages (safety cap).",
-                    part_id,
+                    "Wattpad part %s: stopping after %d pages (safety cap). "
+                    "Chapter will be marked as truncated.",
+                    part_id, _MAX_PART_PAGES,
                 )
+                truncated = True
                 break
         html = "\n".join(pieces)
         if paid_detected:
@@ -376,7 +398,18 @@ class WattpadScraper(BaseScraper):
                 'and cannot be downloaded.'
                 '</em></p>' + html
             )
-        return html, paid_detected
+        if truncated:
+            # Prepend so readers see the notice before the truncated
+            # body, matching how the paid-notice is positioned.
+            html = (
+                '<p class="wattpad-truncation-notice"><em>'
+                'Note: this chapter was truncated after '
+                f'{_MAX_PART_PAGES} pages. The upstream response did '
+                'not end where expected; the text below may be '
+                'incomplete.'
+                '</em></p>' + html
+            )
+        return html, paid_detected, truncated
 
     # ── Main download ─────────────────────────────────────────
 
@@ -438,7 +471,7 @@ class WattpadScraper(BaseScraper):
             # opened preview) shows the real content.
             self._delay()
             try:
-                html, is_paid = self._fetch_part_text(part_id)
+                html, is_paid, is_truncated = self._fetch_part_text(part_id)
             except StoryNotFoundError:
                 logger.warning(
                     "Wattpad part %d (%s) disappeared; skipping.",
@@ -449,10 +482,11 @@ class WattpadScraper(BaseScraper):
                 paid_count += 1
 
             ch = Chapter(number=idx, title=ch_title, html=html)
-            # Don't cache paywall stubs — if the user buys the story or
-            # the site lifts the preview window later, we want a real
-            # fetch next time.
-            if not is_paid:
+            # Don't cache paywall stubs or truncated chapters — if the
+            # user buys the story, the site lifts the preview window,
+            # or upstream starts serving the full body again, we want
+            # a real fetch next time rather than an old partial.
+            if not is_paid and not is_truncated:
                 self._save_chapter_cache(story_id, ch)
             story.chapters.append(ch)
             if progress_callback:

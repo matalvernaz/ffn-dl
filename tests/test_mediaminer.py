@@ -4,7 +4,7 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup
 
-from ffn_dl.mediaminer import MediaMinerScraper
+from ffn_dl.mediaminer import MediaMinerScraper, _split_mm_breadcrumb_title
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -173,3 +173,78 @@ class TestEdgeCases:
         )
         chapters = MediaMinerScraper._parse_chapter_list(soup)
         assert [c["id"] for c in chapters] == [1, 2]
+
+
+class TestBreadcrumbTitleSplit:
+    """The fandom/title breadcrumb splitter must survive MediaMiner
+    swapping the ❯ glyph for a similar chevron and must never leave
+    the category leaked into the title or vice versa."""
+
+    def test_current_glyph_splits_cleanly(self):
+        title, cat = _split_mm_breadcrumb_title("Anime/Manga ❯ Pretty Story")
+        assert title == "Pretty Story"
+        assert cat == "Anime/Manga"
+
+    def test_no_separator_returns_full_title(self):
+        title, cat = _split_mm_breadcrumb_title("Standalone Story")
+        assert title == "Standalone Story"
+        assert cat == ""
+
+    def test_ascii_chevron_also_works(self):
+        title, cat = _split_mm_breadcrumb_title("Books > Harry Potter > Story")
+        assert title == "Story"
+        assert cat == "Books / Harry Potter"
+
+    def test_alternative_glyphs_also_split(self):
+        for sep in ("›", "→", "»"):
+            raw = f"Fandom {sep} Story"
+            t, c = _split_mm_breadcrumb_title(raw)
+            assert t == "Story", f"failed for sep U+{ord(sep):04X}"
+            assert c == "Fandom", f"failed for sep U+{ord(sep):04X}"
+
+    def test_trailing_separator_is_dropped(self):
+        # "Fandom ❯" with nothing after — falling back to raw_title
+        # would leak the separator; the helper drops empty segments.
+        title, cat = _split_mm_breadcrumb_title("Fandom ❯")
+        assert title == "Fandom"
+        assert cat == ""
+
+    def test_leading_separator_is_dropped(self):
+        title, cat = _split_mm_breadcrumb_title("❯ Story")
+        assert title == "Story"
+        assert cat == ""
+
+    def test_multi_level_breadcrumb_flattens_to_slash_separated(self):
+        title, cat = _split_mm_breadcrumb_title(
+            "Anime/Manga ❯ Naruto ❯ Big Fic"
+        )
+        assert title == "Big Fic"
+        assert cat == "Anime/Manga / Naruto"
+
+
+class TestChapterLabelParsing:
+    def test_ch_prefix_variant_recognised(self):
+        """MediaMiner occasionally renders ``Ch. 3`` instead of
+        ``Chapter 3``. The label regex should pick up both."""
+        soup = BeautifulSoup(
+            '<article>'
+            '<a href="/fanfic/c/c/s/1/10">Story Title Ch. 3 ( Ch. 3 )</a>'
+            '</article>',
+            "lxml",
+        )
+        chapters = MediaMinerScraper._parse_chapter_list(soup)
+        assert len(chapters) == 1
+        assert "Ch. 3" in chapters[0]["title"] or chapters[0]["title"] == "Ch. 3"
+
+    def test_named_chapter_preserves_full_label(self):
+        """When the label has no ``Chapter N`` slug, fall back to the
+        cleaned label so named chapters (``"The Beginning"``) survive."""
+        soup = BeautifulSoup(
+            '<article>'
+            '<a href="/fanfic/c/c/s/1/10">Story Title: The Beginning</a>'
+            '</article>',
+            "lxml",
+        )
+        chapters = MediaMinerScraper._parse_chapter_list(soup)
+        assert len(chapters) == 1
+        assert "Beginning" in chapters[0]["title"]

@@ -11,7 +11,7 @@ import re
 
 from bs4 import BeautifulSoup
 
-from .models import Chapter, Story
+from .models import Story
 from .scraper import BaseScraper, StoryNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -261,8 +261,6 @@ class RoyalRoadScraper(BaseScraper):
         return author_name, works
 
     def download(self, url_or_id, progress_callback=None, skip_chapters=0, chapters=None):
-        from .models import chapter_in_spec
-
         fiction_id = self.parse_story_id(url_or_id)
         fiction_url = f"{RR_BASE}/fiction/{fiction_id}"
 
@@ -306,42 +304,12 @@ class RoyalRoadScraper(BaseScraper):
             metadata=meta.get("extra", {}),
         )
 
-        total = len(chapter_list)
-
-        # Walk the chapter list once to decide which ones to fetch.
-        # Cached chapters get pinned into the story in order; remaining
-        # URLs go to _fetch_parallel. Results come back in input order
-        # so we just iterate a counter as we replay the plan.
-        plan = []
-        fetch_urls = []
-        for i, ch_info in enumerate(chapter_list, 1):
-            if i <= skip_chapters:
-                continue
-            if not chapter_in_spec(i, chapters):
-                continue
-            cached = self._load_chapter_cache(fiction_id, i)
-            if cached is not None:
-                plan.append(("cache", i, ch_info["title"], cached))
-            else:
-                plan.append(("fetch", i, ch_info["title"], None))
-                fetch_urls.append(ch_info["url"])
-
-        fetched_htmls = self._fetch_parallel(fetch_urls) if fetch_urls else []
-        fetch_cursor = 0
-        for kind, i, title, cached in plan:
-            if kind == "cache":
-                story.chapters.append(cached)
-                if progress_callback:
-                    progress_callback(i, total, cached.title, True)
-                continue
-            page = fetched_htmls[fetch_cursor]
-            fetch_cursor += 1
-            ch_soup = BeautifulSoup(page, "lxml")
-            html_content = self._parse_chapter_html(ch_soup)
-            ch = Chapter(number=i, title=title, html=html_content)
-            self._save_chapter_cache(fiction_id, ch)
-            story.chapters.append(ch)
-            if progress_callback:
-                progress_callback(i, total, title, False)
-
+        story.chapters.extend(self._materialise_chapters(
+            story_id=fiction_id,
+            chapter_list=chapter_list,
+            skip_chapters=skip_chapters,
+            chapter_spec=chapters,
+            parse_chapter=self._parse_chapter_html,
+            progress_callback=progress_callback,
+        ))
         return story

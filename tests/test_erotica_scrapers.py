@@ -165,6 +165,82 @@ class TestAFFParsing:
             AFFScraper.parse_story_id("https://example.com/foo")
 
 
+class TestAFFAuthorLinkFallbacks:
+    """AFF rotates its author-link pattern every few years. The
+    resolver walks a chain of href shapes down to a structural
+    fallback — pin each rung so a future redesign fails loudly
+    through one of these tests instead of silently losing the author
+    field on every story."""
+
+    def _soup(self, html):
+        from bs4 import BeautifulSoup
+        return BeautifulSoup(html, "lxml")
+
+    def test_modern_profile_link(self):
+        soup = self._soup(
+            '<a href="https://members.adult-fanfiction.org/'
+            'profile.php?id=123">WriterX</a>'
+        )
+        link = AFFScraper._find_author_link(soup)
+        assert link is not None
+        assert link.get_text(strip=True) == "WriterX"
+
+    def test_legacy_authorlinks_php(self):
+        soup = self._soup(
+            '<a href="https://hp.adult-fanfiction.org/'
+            'authorlinks.php?no=42">OldSchool</a>'
+        )
+        link = AFFScraper._find_author_link(soup)
+        assert link is not None
+        assert "OldSchool" in link.get_text()
+
+    def test_structural_fallback_via_story_header_author(self):
+        """If AFF drops the old href shapes entirely, a link inside
+        ``div.story-header-author`` still has to resolve."""
+        soup = self._soup(
+            '<div class="story-header-author">'
+            '<a href="/some/new/author/url?q=1">FreshWriter</a>'
+            '</div>'
+        )
+        link = AFFScraper._find_author_link(soup)
+        assert link is not None
+        assert link.get_text(strip=True) == "FreshWriter"
+
+    def test_structural_fallback_via_generic_author_class(self):
+        """Second-tier structural fallback: any container whose class
+        mentions ``author``. Catches a redesign that renamed the
+        specific header class."""
+        soup = self._soup(
+            '<div class="byline-author">'
+            '<a href="/author/new">NamedWriter</a>'
+            '</div>'
+        )
+        link = AFFScraper._find_author_link(soup)
+        assert link is not None
+        assert link.get_text(strip=True) == "NamedWriter"
+
+    def test_returns_none_when_nothing_matches(self):
+        soup = self._soup(
+            '<p>Just prose, no author markers anywhere.</p>'
+        )
+        assert AFFScraper._find_author_link(soup) is None
+
+    def test_modern_pattern_preferred_over_legacy(self):
+        """When both shapes appear on the same page (crossover period
+        between AFF layouts), the modern ``profile.php?id=`` wins so
+        the resulting author URL is the one AFF actually serves now."""
+        soup = self._soup(
+            '<div>'
+            '<a href="/authorlinks.php?no=1">LegacyName</a>'
+            '<a href="https://members.adult-fanfiction.org/'
+            'profile.php?id=999">ModernName</a>'
+            '</div>'
+        )
+        link = AFFScraper._find_author_link(soup)
+        assert link is not None
+        assert link.get_text(strip=True) == "ModernName"
+
+
 class TestSOLParsing:
     def test_story_id(self):
         assert (

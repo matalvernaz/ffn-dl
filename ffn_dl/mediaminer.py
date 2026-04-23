@@ -16,12 +16,60 @@ import re
 
 from bs4 import BeautifulSoup
 
-from .models import Chapter, Story, chapter_in_spec
+from .models import Story
 from .scraper import BaseScraper, StoryNotFoundError
 
 logger = logging.getLogger(__name__)
 
 MM_BASE = "https://www.mediaminer.org"
+
+# Glyphs MediaMiner has used (and likely would use) as a breadcrumb
+# separator between fandom and story title. ❯ is the current one
+# (HEAVY RIGHT-POINTING ANGLE-BRACKET ORNAMENT); the others are
+# defensive — a font/CSS refresh could swap them in without warning.
+_MM_BREADCRUMB_SEPARATORS = "❯›→»>"
+"""Characters treated as fandom/title separators in the page H1.
+
+* ``\\u276F`` — HEAVY RIGHT-POINTING ANGLE BRACKET ORNAMENT (current).
+* ``\\u203A`` — SINGLE RIGHT-POINTING ANGLE QUOTATION MARK.
+* ``\\u2192`` — RIGHTWARDS ARROW.
+* ``\\u00BB`` — RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK.
+* ``>``      — the ASCII-safe ``>`` chevron, just in case.
+"""
+
+_MM_CHAPTER_LABEL_RE = re.compile(
+    r"(?:Chapter|Ch\.?)\s+\d+\S*", re.IGNORECASE,
+)
+"""Extract the ``Chapter N``/``Ch. N`` slug from a chapter anchor's
+text. Fall back to the full cleaned label when the regex misses so
+named chapters (``"The Beginning"``) still make it through."""
+
+
+def _split_mm_breadcrumb_title(raw_title: str) -> tuple[str, str]:
+    """Split an ``h1#post-title`` breadcrumb into ``(title, category)``.
+
+    MediaMiner's current H1 looks like ``"Anime/Manga ❯ Story Name"``,
+    where ❯ is U+276F. We split on any glyph in
+    :data:`_MM_BREADCRUMB_SEPARATORS` so a font/CSS refresh that swaps
+    it for a similar-looking chevron doesn't silently leave the fandom
+    stuck to the title. Empty segments (``"❯ Story"`` or ``"Fandom ❯"``)
+    are discarded.
+
+    Returns the full ``raw_title`` as the title and an empty category
+    when no separator is found.
+    """
+    pattern = f"[{re.escape(_MM_BREADCRUMB_SEPARATORS)}]"
+    parts = [p.strip() for p in re.split(pattern, raw_title) if p.strip()]
+    if not parts:
+        return raw_title.strip(), ""
+    if len(parts) == 1:
+        # Either no separator, or a stray leading/trailing separator
+        # (``"Fandom ❯"`` / ``"❯ Story"``). Either way the sole segment
+        # is what we want as the title — not the raw glyph-bearing
+        # string, which would leak the separator into the EPUB title.
+        return parts[0], ""
+    # Last segment is the story title; everything prior is fandom hierarchy.
+    return parts[-1], " / ".join(parts[:-1])
 
 
 class MediaMinerScraper(BaseScraper):
@@ -71,17 +119,9 @@ class MediaMinerScraper(BaseScraper):
                 f"MediaMiner story {story_id} not found (no <article>)."
             )
 
-        # Title line looks like "Fandom ❯ Story Name". Strip the fandom
-        # prefix (the U+276F glyph) so the story title is clean.
         h1 = article.find("h1", id="post-title")
         raw_title = h1.get_text(" ", strip=True) if h1 else f"Story {story_id}"
-        if "\u276F" in raw_title:
-            parts = [p.strip() for p in raw_title.split("\u276F")]
-            title = parts[-1] if parts else raw_title
-            category = " / ".join(parts[:-1]) if len(parts) > 1 else ""
-        else:
-            title = raw_title
-            category = ""
+        title, category = _split_mm_breadcrumb_title(raw_title)
 
         meta_div = article.find("div", class_="post-meta")
         author = "Unknown Author"
@@ -191,11 +231,18 @@ class MediaMinerScraper(BaseScraper):
                 continue
             seen.add(cid)
             label = a.get_text(" ", strip=True)
-            # Clean "Story Title Chapter N ( Chapter N )" → "Chapter N"
+            # Label shapes we've seen: "Story Title Chapter N ( Chapter N )",
+            # "Chapter 1 - Awakening", bare "Chapter 12", or the occasional
+            # "Ch. 3". Strip the parenthesised self-reference, pull the
+            # Chapter-N slug if present, and fall back to the whole label
+            # for named-chapter sites so titles like "The Beginning"
+            # still land in the metadata.
             clean = re.sub(r"\s*\([^)]*\)\s*$", "", label).strip()
-            # If the label starts with the story title, strip it
-            chapter_m = re.search(r"Chapter\s+\d+\S*", clean, re.IGNORECASE)
-            title = chapter_m.group(0) if chapter_m else (clean or f"Chapter {len(chapters)+1}")
+            chapter_m = _MM_CHAPTER_LABEL_RE.search(clean)
+            title = (
+                chapter_m.group(0) if chapter_m
+                else (clean or f"Chapter {len(chapters) + 1}")
+            )
             full_url = MM_BASE + href if href.startswith("/") else href
             chapters.append({"id": int(cid), "url": full_url, "title": title})
         return chapters
@@ -332,37 +379,12 @@ class MediaMinerScraper(BaseScraper):
             metadata=meta.get("extra", {}),
         )
 
-        total = len(chapter_list)
-        plan = []
-        fetch_urls = []
-        for i, ch_info in enumerate(chapter_list, 1):
-            if i <= skip_chapters:
-                continue
-            if not chapter_in_spec(i, chapters):
-                continue
-            cached = self._load_chapter_cache(story_id, i)
-            if cached is not None:
-                plan.append(("cache", i, ch_info["title"], cached))
-            else:
-                plan.append(("fetch", i, ch_info["title"], None))
-                fetch_urls.append(ch_info["url"])
-
-        fetched_htmls = self._fetch_parallel(fetch_urls) if fetch_urls else []
-        fetch_cursor = 0
-        for kind, i, title, cached in plan:
-            if kind == "cache":
-                story.chapters.append(cached)
-                if progress_callback:
-                    progress_callback(i, total, cached.title, True)
-                continue
-            page = fetched_htmls[fetch_cursor]
-            fetch_cursor += 1
-            ch_soup = BeautifulSoup(page, "lxml")
-            html_content = self._parse_chapter_html(ch_soup)
-            ch = Chapter(number=i, title=title, html=html_content)
-            self._save_chapter_cache(story_id, ch)
-            story.chapters.append(ch)
-            if progress_callback:
-                progress_callback(i, total, title, False)
-
+        story.chapters.extend(self._materialise_chapters(
+            story_id=story_id,
+            chapter_list=chapter_list,
+            skip_chapters=skip_chapters,
+            chapter_spec=chapters,
+            parse_chapter=self._parse_chapter_html,
+            progress_callback=progress_callback,
+        ))
         return story

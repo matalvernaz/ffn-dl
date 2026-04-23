@@ -5,7 +5,7 @@ import re
 
 from bs4 import BeautifulSoup
 
-from .models import Chapter, Story
+from .models import Story
 from .scraper import BaseScraper, StoryNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -293,8 +293,6 @@ class FicWadScraper(BaseScraper):
         return 1 if soup.find(id="storytext") else 0
 
     def download(self, url_or_id, progress_callback=None, skip_chapters=0, chapters=None):
-        from .models import chapter_in_spec
-
         story_id = self.parse_story_id(url_or_id)
         story_url = f"{FICWAD_BASE}/story/{story_id}"
 
@@ -355,38 +353,20 @@ class FicWadScraper(BaseScraper):
         if skip_chapters >= num_chapters:
             return story  # nothing new
 
-        plan = []
-        fetch_urls = []
-        for i, ch_info in enumerate(chapter_list, 1):
-            if i <= skip_chapters:
-                continue
-            if not chapter_in_spec(i, chapters):
-                continue
-            ch_id = ch_info["id"]
-            ch_title = ch_info["title"]
-            cached = self._load_chapter_cache(story_id, i)
-            if cached is not None:
-                plan.append(("cache", i, ch_title, cached))
-            else:
-                plan.append(("fetch", i, ch_title, None))
-                fetch_urls.append(f"{FICWAD_BASE}/story/{ch_id}")
-
-        fetched_htmls = self._fetch_parallel(fetch_urls) if fetch_urls else []
-        fetch_cursor = 0
-        for kind, i, ch_title, cached in plan:
-            if kind == "cache":
-                story.chapters.append(cached)
-                if progress_callback:
-                    progress_callback(i, num_chapters, cached.title, True)
-                continue
-            ch_page = fetched_htmls[fetch_cursor]
-            fetch_cursor += 1
-            ch_soup = BeautifulSoup(ch_page, "lxml")
-            html = self._parse_chapter_html(ch_soup)
-            ch = Chapter(number=i, title=ch_title, html=html)
-            self._save_chapter_cache(story_id, ch)
-            story.chapters.append(ch)
-            if progress_callback:
-                progress_callback(i, num_chapters, ch_title, False)
-
+        # FicWad chapter ids are also chapter URLs — every chapter is a
+        # separate /story/<id> page. The base helper takes ``url`` +
+        # ``title`` per entry.
+        descriptors = [
+            {"url": f"{FICWAD_BASE}/story/{c['id']}", "title": c["title"]}
+            for c in chapter_list
+        ]
+        story.chapters.extend(self._materialise_chapters(
+            story_id=story_id,
+            chapter_list=descriptors,
+            skip_chapters=skip_chapters,
+            chapter_spec=chapters,
+            parse_chapter=self._parse_chapter_html,
+            progress_callback=progress_callback,
+            total=num_chapters,
+        ))
         return story

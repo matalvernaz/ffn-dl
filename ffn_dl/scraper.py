@@ -514,6 +514,102 @@ class BaseScraper:
 
         return results
 
+    # ── Chapter orchestration ─────────────────────────────────────
+
+    def _materialise_chapters(
+        self,
+        *,
+        story_id,
+        chapter_list,
+        skip_chapters,
+        chapter_spec,
+        parse_chapter,
+        progress_callback,
+        total=None,
+    ):
+        """Walk ``chapter_list``, returning ``Chapter`` objects in order.
+
+        Site scrapers whose chapter pages are each a separate fetch
+        (FicWad, Royal Road, MediaMiner) used to open-code this loop —
+        it's the same shape every time: honour ``skip_chapters`` /
+        ``chapter_spec``, load what's cached, batch the rest through
+        ``_fetch_parallel``, parse through the site-specific body
+        extractor, and cache on the way out. Consolidating it here
+        means per-site changes (retry-on-parse-error, richer progress
+        reporting, a different cache layout) land in one place.
+
+        The helper is intentionally narrow: it doesn't do metadata,
+        URL normalisation, or author-page handling. Scrapers whose
+        chapter 1 body lives on the metadata page (FFN, TGStorytime,
+        AO3) don't fit this shape — they handle ch1 directly from the
+        already-fetched soup and would have to be re-architected to
+        use the helper, which isn't worth the change.
+
+        Args:
+            story_id: Cache key passed to
+                ``_load_chapter_cache`` / ``_save_chapter_cache``.
+            chapter_list: Ordered list of ``{"url": str, "title": str}``
+                dicts. List position (1-indexed) is the chapter number.
+                Any other keys are ignored.
+            skip_chapters: Chapters 1..``skip_chapters`` are dropped
+                before fetching — the update-mode optimisation.
+            chapter_spec: The ``--chapters`` range list, or ``None``
+                to download everything. Forwarded to
+                :func:`~ffn_dl.models.chapter_in_spec`.
+            parse_chapter: Callable ``(BeautifulSoup) -> str`` that
+                pulls the chapter HTML out of a fetched page. Usually
+                the scraper's ``_parse_chapter_html`` bound method.
+            progress_callback: Optional
+                ``(chap_num, total, title, from_cache)`` reporter.
+            total: Chapter count used for progress display — a
+                progress bar wants the real upstream count even when
+                only a subset is being downloaded. Defaults to
+                ``len(chapter_list)``.
+
+        Returns:
+            List of :class:`~ffn_dl.models.Chapter` objects, ready to
+            append to ``story.chapters`` in order.
+        """
+        from .models import chapter_in_spec
+
+        if total is None:
+            total = len(chapter_list)
+
+        # Build a plan so fetched and cached chapters can be stitched
+        # back in one pass. Each entry is (number, title, cached_or_None).
+        plan = []
+        fetch_urls = []
+        for number, info in enumerate(chapter_list, 1):
+            if number <= skip_chapters:
+                continue
+            if not chapter_in_spec(number, chapter_spec):
+                continue
+            cached = self._load_chapter_cache(story_id, number)
+            if cached is not None:
+                plan.append((number, info["title"], cached))
+            else:
+                plan.append((number, info["title"], None))
+                fetch_urls.append(info["url"])
+
+        fetched = self._fetch_parallel(fetch_urls) if fetch_urls else []
+        cursor = 0
+        result = []
+        for number, title, cached in plan:
+            if cached is not None:
+                result.append(cached)
+                if progress_callback:
+                    progress_callback(number, total, cached.title, True)
+                continue
+            body = fetched[cursor]
+            cursor += 1
+            html = parse_chapter(BeautifulSoup(body, "lxml"))
+            chapter = Chapter(number=number, title=title, html=html)
+            self._save_chapter_cache(story_id, chapter)
+            result.append(chapter)
+            if progress_callback:
+                progress_callback(number, total, title, False)
+        return result
+
     # ── Cache ─────────────────────────────────────────────────────
 
     def _story_cache_dir(self, story_id) -> Optional[Path]:
@@ -575,9 +671,32 @@ class BaseScraper:
             logger.debug("Cleaned cache for story %s", story_id)
 
     # ── Abstract interface ────────────────────────────────────────
+    #
+    # Every site scraper must implement the three core methods
+    # (``parse_story_id``, ``download``, ``get_chapter_count``). The
+    # URL-classifier staticmethods default to False so callers can ask
+    # "can this scraper handle a series URL?" uniformly without
+    # isinstance checks — returning False means "no, hand this URL to
+    # a different scraper".
+    #
+    # The optional bulk-scrape methods (``scrape_author_stories``,
+    # ``scrape_author_works``, ``scrape_series_works``,
+    # ``scrape_bookmark_works``) default to NotImplementedError so the
+    # CLI and GUI catch the intent of an unsupported site call at the
+    # call site rather than through an AttributeError that would mask
+    # the real failure mode ("this site has no series concept").
+    # Callers should gate on the matching ``is_*_url`` staticmethod
+    # and only invoke the scrape method when the check returned True.
 
     @staticmethod
     def parse_story_id(url_or_id):
+        """Return the site-specific story identifier for ``url_or_id``.
+
+        Accepts either a full URL or a bare id (int or numeric string)
+        and returns whatever shape this site uses as its canonical id —
+        typically an int, but Literotica uses a slug string. Raises
+        ``ValueError`` when the input can't be resolved.
+        """
         raise NotImplementedError
 
     @staticmethod
@@ -586,17 +705,46 @@ class BaseScraper:
 
         Default implementation returns False — scrapers that want the
         CLI and GUI to offer "download all stories by this author"
-        should override with a site-specific check."""
+        should override with a site-specific check and implement
+        ``scrape_author_stories`` / ``scrape_author_works``.
+        """
         return False
 
     @staticmethod
     def is_series_url(url):
         """True if ``url`` is a series / universe page grouping multiple
         stories. Default False — AO3, Literotica, and StoriesOnline
-        override; the rest have no series concept."""
+        override; the rest have no series concept. Override together
+        with ``scrape_series_works``.
+        """
         return False
 
-    def download(self, url_or_id, progress_callback=None, skip_chapters=0, chapters=None):
+    @staticmethod
+    def is_bookmarks_url(url):
+        """True if ``url`` is a user-bookmarks page. AO3 is currently
+        the only site that exposes one. Override together with
+        ``scrape_bookmark_works``.
+        """
+        return False
+
+    def download(
+        self,
+        url_or_id,
+        progress_callback=None,
+        skip_chapters=0,
+        chapters=None,
+    ):
+        """Fetch and return a :class:`~ffn_dl.models.Story` object.
+
+        Args:
+            url_or_id: Canonical story URL or bare id.
+            progress_callback: Optional
+                ``(chap_num, total, title, from_cache)`` reporter.
+            skip_chapters: Update-mode optimisation — skip this many
+                leading chapters.
+            chapters: Chapter-range spec (a list of ``(lo, hi)``
+                tuples) or None for "all".
+        """
         raise NotImplementedError
 
     def get_chapter_count(self, url_or_id):
@@ -607,6 +755,54 @@ class BaseScraper:
         does not pull full chapter bodies.
         """
         raise NotImplementedError
+
+    def scrape_author_stories(self, url):
+        """Return ``(author_name, [story_url, ...])`` for an author page.
+
+        Lightweight — yields just URLs so the CLI can feed them into
+        :meth:`download` one-by-one. Scrapers that can't list an
+        author's works raise ``NotImplementedError`` (the default).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support author-page scraping. "
+            "Check is_author_url(url) before calling."
+        )
+
+    def scrape_author_works(self, url):
+        """Return ``(author_name, [work_dict, ...])`` for an author page.
+
+        Richer than ``scrape_author_stories`` — each dict carries
+        title, word count, chapter count, rating, status, fandom,
+        updated-date where the site exposes them. The GUI picker uses
+        this to show a browsable list without a per-work fetch.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support author-work listings. "
+            "Check is_author_url(url) before calling."
+        )
+
+    def scrape_series_works(self, url):
+        """Return ``(series_name, [work_url, ...])`` for a series page.
+
+        Raises ``NotImplementedError`` for sites without a series
+        concept. Callers must gate on ``is_series_url(url)`` first.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support series scraping. "
+            "Check is_series_url(url) before calling."
+        )
+
+    def scrape_bookmark_works(self, url):
+        """Return ``(owner_name, [work_dict, ...])`` for a bookmarks page.
+
+        AO3-specific at the moment. Other sites raise
+        ``NotImplementedError`` — callers must gate on
+        ``is_bookmarks_url(url)`` first.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support bookmark scraping. "
+            "Check is_bookmarks_url(url) before calling."
+        )
 
 
 # ── FFN ───────────────────────────────────────────────────────────

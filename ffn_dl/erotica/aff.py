@@ -139,21 +139,14 @@ class AFFScraper(BaseScraper):
 
         author = "Unknown Author"
         author_url = ""
-        # Modern AFF (members subdomain profile page) takes precedence;
-        # older stories still carry the legacy ``authorlinks.php?no=N``
-        # href, and the rewrite catches both so we don't miss either.
-        author_link = soup.find(
-            "a", href=re.compile(r"profile\.php\?id=\d+", re.I),
-        )
-        if author_link is None:
-            author_link = soup.find(
-                "a", href=re.compile(r"authorlinks?\.php\?no=\d+", re.I),
-            )
-        if author_link is None:
-            # Fall back to any link inside ``<div class="story-header-author">``.
-            header = soup.find("div", class_="story-header-author")
-            if header is not None:
-                author_link = header.find("a")
+        # Resolve the author link by walking fallbacks from the most
+        # specific AFF URL shape down to the most structural cue. AFF
+        # historically rotates its author-link pattern every few years
+        # (``authorlinks.php?no=`` → ``profile.php?id=`` most recently),
+        # and the downloader community keeps a running catalogue of
+        # breakages around it — this chain survives any single layer
+        # being renamed.
+        author_link = AFFScraper._find_author_link(soup)
         if author_link is not None:
             author = author_link.get_text(strip=True) or author
             href = author_link.get("href", "")
@@ -188,6 +181,45 @@ class AFFScraper(BaseScraper):
             "chapter_titles": chapter_titles,
             "extra": extra,
         }
+
+    # Historic and current author-link patterns, ordered most-specific
+    # to most-generic. Any one of them matching is enough. The final
+    # entry is a structural fallback (anchor inside the story-header
+    # author container) that catches AFF redesigns where the href
+    # template changed but the surrounding DOM shape didn't.
+    _AUTHOR_HREF_PATTERNS = (
+        re.compile(r"members\.adult-fanfiction\.org/profile\.php\?id=\d+", re.I),
+        re.compile(r"profile\.php\?id=\d+", re.I),
+        re.compile(r"authorlinks?\.php\?no=\d+", re.I),
+        re.compile(r"members\.adult-fanfiction\.org/[^?#]*\?[^=]*=\d+", re.I),
+    )
+
+    @staticmethod
+    def _find_author_link(soup):
+        """Return the ``<a>`` tag pointing to the story author, or
+        ``None``. Tries each href pattern in
+        :data:`_AUTHOR_HREF_PATTERNS` in order; if none match, falls
+        back to the first anchor inside ``div.story-header-author`` or
+        any container whose class contains ``author``."""
+        for pattern in AFFScraper._AUTHOR_HREF_PATTERNS:
+            link = soup.find("a", href=pattern)
+            if link is not None:
+                return link
+        # Structural fallback: any anchor inside a div that looks like
+        # the author header. The specific class has been
+        # ``story-header-author`` for years, but also accept any class
+        # containing ``author`` so a renamed-but-structurally-similar
+        # header still resolves.
+        header = soup.find(
+            "div", class_=re.compile(r"(?:^|\s)story-header-author(?:\s|$)", re.I),
+        )
+        if header is None:
+            header = soup.find(
+                "div", class_=re.compile(r"author", re.I),
+            )
+        if header is not None:
+            return header.find("a")
+        return None
 
     @staticmethod
     def _parse_chapter_html(soup) -> str:

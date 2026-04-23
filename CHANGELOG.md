@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.23.20 — 2026-04-23
+
+### Change
+
+- **Shared chapter-orchestration helper.** FicWad, Royal Road, and
+  MediaMiner's download loops were the same ~30-line plan/fetch/cache
+  block with per-site cosmetic differences. Extracted
+  ``BaseScraper._materialise_chapters`` so future changes (retry-on-
+  parse-error, progress reporting, cache layout) land in one place
+  instead of three.
+- **AFF author-link resolution hardened.** AFF rotates its author-
+  link pattern every few years; the resolver now walks a chain of
+  href shapes (modern ``profile.php?id=``, legacy
+  ``authorlinks.php?no=``, members-subdomain variants) then falls
+  back to any anchor inside a container whose class contains
+  ``author``. A full redesign of the href template degrades to the
+  structural fallback instead of losing the author field on every
+  story.
+- **MediaMiner breadcrumb title parser accepts multiple separator
+  glyphs.** The current ❯ (U+276F) plus ›, →, », and ASCII ``>`` are
+  all recognised, so a font / CSS refresh won't silently leave the
+  fandom glued to the story title. Empty segments from stray
+  leading/trailing separators are discarded rather than leaked into
+  the EPUB title.
+- **MediaMiner chapter label regex picks up ``Ch. 3`` variants**
+  alongside ``Chapter 3``.
+- **BaseScraper abstract contract is explicit.** The optional bulk-
+  scrape methods (``scrape_author_stories``, ``scrape_author_works``,
+  ``scrape_series_works``, ``scrape_bookmark_works``) now default to
+  ``NotImplementedError`` with a message naming the ``is_*_url``
+  check the caller should have gated on. Pasting a Wattpad series
+  URL (Wattpad has no series concept) produces a clear error
+  instead of a misleading ``AttributeError``.
+
+### Fix
+
+- **Wattpad 200-page safety-cap firings are now surfaced.** When the
+  storytext endpoint paginates past the cap, the chapter HTML is
+  prepended with a reader-visible ``wattpad-truncation-notice`` and
+  the truncated body is not cached — if upstream starts serving the
+  full body again, the next run picks it up instead of being locked
+  into the stale partial.
+
+### Tests
+
+- 38 new tests. Highlights: 8 direct tests for
+  ``BaseScraper._materialise_chapters`` (planning, cache-first,
+  progress callback, total override), 4 for Wattpad truncation
+  handling (flag set, notice text, no-cache, healthy chapter
+  unaffected), 6 for AFF author-link fallback layers, 7 for the
+  MediaMiner breadcrumb splitter across separator glyphs, and 8
+  contract tests pinning the ``is_*_url → scrape_*`` invariant.
+
 ## 1.23.19 — 2026-04-23
 
 ### Fix

@@ -320,6 +320,25 @@ class TestCollapseLiteroticaSeries:
         assert results[0]["status"] == "Stubbed"
         assert results[0]["_stubbed_unknown"] is True
 
+    def test_rr_item_without_title_link_skipped_silently(self):
+        """A malformed card (no recognisable title link) should drop the
+        row rather than crash the whole search. Users reporting ``zero
+        results`` is a visible, diagnosable failure; a crashed search
+        silently loses the UI."""
+        from ffn_dl.search import _parse_rr_results
+        html = '''
+        <div class="fiction-list-item">
+          <h2 class="fiction-title"><span>Broken — no anchor</span></h2>
+        </div>
+        <div class="fiction-list-item">
+          <h2 class="fiction-title"><a href="/fiction/2/y">Y</a></h2>
+        </div>
+        '''
+        results = _parse_rr_results(html)
+        # One valid row survives, one broken row dropped — never crash.
+        assert len(results) == 1
+        assert results[0]["url"].endswith("/fiction/2/y")
+
     def test_annual_year_slugs_not_treated_as_series(self):
         # /s/foo-2023 and /s/foo-2024 are common for annual one-shots.
         # Without a chapter marker in the title, they should NOT be

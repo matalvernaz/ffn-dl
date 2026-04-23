@@ -7,6 +7,7 @@ import pytest
 from ffn_dl.wattpad import (
     WattpadPaidStoryError,
     WattpadScraper,
+    _MAX_PART_PAGES,
     _enclosing_json_object,
     _normalise_url,
 )
@@ -222,3 +223,89 @@ class TestPaidStoryErrorMessage:
             "All 5 requested chapters are behind Wattpad's Paid Stories paywall."
         )
         assert "Paid Stories" in str(err)
+
+
+class TestTruncationCap:
+    """When storytext pagination blows past the safety cap, the chapter
+    has to come back marked as truncated. The output HTML carries a
+    reader-visible notice and the cache path skips persisting the
+    partial body so a future run tries again."""
+
+    def _fake_endless_pages(self, page_size=2000):
+        """Return a _fetch that serves a non-trivial body forever.
+        The 64-byte "end of part" heuristic won't fire, so only the
+        safety cap stops the loop."""
+        body = "<p>" + ("x" * page_size) + "</p>"
+        return lambda url, session=None: body
+
+    def test_truncation_flag_set_on_cap_hit(self):
+        scraper = WattpadScraper(use_cache=False, delay_floor=0.0)
+        scraper._fetch = self._fake_endless_pages()
+        scraper._delay = lambda: None
+        html, is_paid, truncated = scraper._fetch_part_text(999)
+        assert truncated is True
+        assert is_paid is False
+        # Truncation notice is surfaced to the reader.
+        assert "truncation" in html.lower() or "truncated" in html.lower()
+
+    def test_truncated_notice_mentions_max_pages(self):
+        scraper = WattpadScraper(use_cache=False, delay_floor=0.0)
+        scraper._fetch = self._fake_endless_pages()
+        scraper._delay = lambda: None
+        html, _, truncated = scraper._fetch_part_text(999)
+        assert truncated is True
+        assert str(_MAX_PART_PAGES) in html
+
+    def test_normal_chapter_not_marked_truncated(self):
+        """A chapter that terminates naturally (empty page) must not be
+        flagged, or every download would show the truncation notice."""
+        scraper = WattpadScraper(use_cache=False, delay_floor=0.0)
+        pages = [
+            "<p>Real content one.</p>",
+            "<p>Real content two.</p>",
+            "",  # empty terminates the loop
+        ]
+        call_count = {"n": 0}
+
+        def fake_fetch(url, session=None):
+            body = pages[call_count["n"]] if call_count["n"] < len(pages) else ""
+            call_count["n"] += 1
+            return body
+
+        scraper._fetch = fake_fetch
+        scraper._delay = lambda: None
+        html, is_paid, truncated = scraper._fetch_part_text(1)
+        assert truncated is False
+        assert "truncat" not in html.lower()
+        assert "Real content" in html
+
+    def test_truncated_chapter_not_cached(self, tmp_path):
+        """Persisting a truncated body would lock the library into the
+        bad copy — future runs should refetch in case upstream fixed
+        itself. Exercised via the full ``download()`` path to cover
+        the caching branch."""
+        scraper = WattpadScraper(
+            use_cache=True, cache_dir=tmp_path, delay_floor=0.0,
+        )
+        scraper._delay = lambda: None
+
+        # Fake the SSR meta so download() skips the public story fetch.
+        fake_obj = {
+            "id": "1", "title": "T", "user": {"name": "A"},
+            "description": "d", "numParts": 1,
+            "parts": [{"id": 99, "title": "Only Part"}],
+        }
+        scraper._resolve_story_id = lambda url: 1
+        scraper._fetch_story_page_meta = lambda sid: fake_obj
+
+        # Endless-page fake to drive truncation.
+        body = "<p>" + ("x" * 5000) + "</p>"
+        scraper._fetch = lambda url, session=None: body
+
+        story = scraper.download("https://www.wattpad.com/story/1")
+        # Chapter was built and returned with the truncation notice.
+        assert len(story.chapters) == 1
+        assert "truncat" in story.chapters[0].html.lower()
+        # Cache was NOT written for the truncated chapter.
+        cache_hit = scraper._load_chapter_cache(1, 1)
+        assert cache_hit is None
