@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.23.24 — 2026-04-23
+
+### Feature
+
+- **Integrated ``--doctor`` command.** Runs every hygiene check in
+  one pass: library integrity across every indexed root, watchlist
+  integrity, and scraper cache (size + orphan entries). Read-only by
+  default; add ``--heal`` to apply the full set of safe fixes. The
+  library index is auto-backed-up before the heal so a misdiagnosed
+  run can be rolled back with ``--restore-index``.
+
+### Tests
+
+- 12 new tests for the integrated doctor: empty-everything-clean,
+  per-surface drift detection, cross-surface heal, auto-backup
+  behaviour, and summary rendering. Full suite: 867 green.
+
 ## 1.23.23 — 2026-04-23
 
 ### Feature

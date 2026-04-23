@@ -1644,6 +1644,22 @@ def _handle_cache_doctor(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
+def _handle_full_doctor(args: argparse.Namespace) -> None:
+    """Run every health check in one pass: library / watchlist / cache."""
+    from .doctor import check_all, heal_all
+
+    report = check_all()
+    print(report.summary())
+    if report.is_clean():
+        sys.exit(0)
+    if not args.heal:
+        print("\nRun again with --heal to apply all safe fixes.")
+        sys.exit(2)
+    result = heal_all(report)
+    print("\n" + result.summary())
+    sys.exit(0)
+
+
 def _handle_watchlist_doctor(args: argparse.Namespace) -> None:
     """Diagnose (and optionally heal) the watchlist file."""
     from .watchlist import WatchlistStore
@@ -2118,6 +2134,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "type, empty target URL, unsupported site, URL that no "
             "scraper recognises, and duplicates. Read-only by default "
             "— add --heal to drop unrepairable entries."
+        ),
+    )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help=(
+            "Run every health check in one pass: library (all indexed "
+            "roots), watchlist, and scraper cache. Read-only by "
+            "default; add --heal to apply all safe fixes."
         ),
     )
     parser.add_argument(
@@ -3236,6 +3261,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.watchlist_doctor:
         _handle_watchlist_doctor(args)
+        return
+    if args.doctor:
+        _handle_full_doctor(args)
         return
     if args.backup_index:
         _handle_backup_index()
