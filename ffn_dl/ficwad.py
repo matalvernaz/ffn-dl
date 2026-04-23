@@ -13,6 +13,27 @@ logger = logging.getLogger(__name__)
 FICWAD_BASE = "https://ficwad.com"
 
 
+def _previous_label_text(tag) -> str:
+    """Return the non-empty text immediately preceding ``tag``.
+
+    FicWad renders dated fields as ``<label>:&nbsp;<span data-ts="…">…
+    </span>``; the ``<span>``'s preceding sibling is a NavigableString
+    holding the label plus separators. We only look at the nearest
+    non-whitespace sibling so a stray ``<br>`` between the label and
+    the span doesn't silently hide the label.
+    """
+    prev = tag.previous_sibling
+    while prev is not None:
+        if hasattr(prev, "get_text"):
+            text = prev.get_text(" ", strip=True)
+        else:
+            text = str(prev).strip()
+        if text:
+            return text
+        prev = prev.previous_sibling
+    return ""
+
+
 class FicWadScraper(BaseScraper):
     """Scraper for ficwad.com."""
 
@@ -93,12 +114,35 @@ class FicWadScraper(BaseScraper):
             if "Complete" in meta_text:
                 extra["status"] = "Complete"
 
-            time_spans = meta_div.find_all("span", attrs={"data-ts": True})
-            if len(time_spans) >= 2:
-                extra["date_published"] = int(time_spans[0]["data-ts"])
-                extra["date_updated"] = int(time_spans[1]["data-ts"])
-            elif len(time_spans) == 1:
-                extra["date_published"] = int(time_spans[0]["data-ts"])
+            # Pair each data-ts span with its label instead of trusting
+            # positional order. FicWad currently renders "Published: …
+            # - Updated: …" but any layout tweak that flipped the
+            # order would silently swap the two timestamps in our
+            # metadata — and library-update's "did this change?" check
+            # is date-driven, so a swap cascades into nuisance refetches.
+            for span in meta_div.find_all("span", attrs={"data-ts": True}):
+                raw = span.get("data-ts")
+                if not raw:
+                    continue
+                try:
+                    ts = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                label_text = _previous_label_text(span).lower()
+                if "publish" in label_text:
+                    extra.setdefault("date_published", ts)
+                elif "updat" in label_text:
+                    extra.setdefault("date_updated", ts)
+            # Only one unlabeled timestamp on screen → FicWad renders
+            # brand-new stories without an "Updated" segment. Default
+            # that lone span to publish date.
+            if "date_published" not in extra:
+                stray = meta_div.find("span", attrs={"data-ts": True})
+                if stray is not None:
+                    try:
+                        extra["date_published"] = int(stray["data-ts"])
+                    except (TypeError, ValueError, KeyError):
+                        pass
 
         return {
             "title": title,

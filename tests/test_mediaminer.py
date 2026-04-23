@@ -120,3 +120,56 @@ class TestAuthorScraping:
             if sid:
                 seen.add(sid)
         assert seen == {"102126", "55555"}
+
+
+class TestEdgeCases:
+    def test_missing_article_raises_story_not_found(self):
+        """A deleted story page no longer contains an ``<article>``.
+        The parser should raise ``StoryNotFoundError`` rather than
+        silently returning an empty meta dict — library-update needs
+        the clean "definitively gone" signal to stamp the entry."""
+        from ffn_dl.scraper import StoryNotFoundError
+        soup = BeautifulSoup(
+            "<html><body><p>That story does not exist.</p></body></html>",
+            "lxml",
+        )
+        import pytest
+        with pytest.raises(StoryNotFoundError):
+            MediaMinerScraper._parse_metadata(soup, 999)
+
+    def test_missing_chapter_body_raises_value_error(self):
+        """Chapter bodies live in ``#fanfic-text``. If MediaMiner ever
+        renames the container, the ValueError surfaces as a scrape
+        failure so library-update retries instead of caching garbage."""
+        soup = BeautifulSoup(
+            "<html><body><p>no text here</p></body></html>",
+            "lxml",
+        )
+        import pytest
+        with pytest.raises(ValueError):
+            MediaMinerScraper._parse_chapter_html(soup)
+
+    def test_empty_chapter_list_for_oneshot_without_read_link(self):
+        """A story page with no chapter links and no "Read" link should
+        return an empty list so ``download()`` can raise cleanly."""
+        soup = BeautifulSoup(
+            "<html><body><article><p>no chapter links</p>"
+            "</article></body></html>",
+            "lxml",
+        )
+        assert MediaMinerScraper._parse_chapter_list(soup) == []
+
+    def test_chapter_list_dedupes_same_chapter_id(self):
+        """Author menus and "next chapter" footers sometimes link to the
+        same chapter twice. Parser must dedupe on chapter id so the
+        downloader doesn't fetch the page twice."""
+        soup = BeautifulSoup(
+            '<html><body><article>'
+            '<a href="/fanfic/c/cat/slug/100/1">Chapter 1</a>'
+            '<a href="/fanfic/c/cat/slug/100/1">Chapter 1 (footer)</a>'
+            '<a href="/fanfic/c/cat/slug/100/2">Chapter 2</a>'
+            '</article></body></html>',
+            "lxml",
+        )
+        chapters = MediaMinerScraper._parse_chapter_list(soup)
+        assert [c["id"] for c in chapters] == [1, 2]

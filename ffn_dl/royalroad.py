@@ -277,14 +277,22 @@ class RoyalRoadScraper(BaseScraper):
                 f"No chapters found on Royal Road fiction {fiction_id}."
             )
 
-        # First chapter's timestamp is publish date, last is last-updated.
-        # RR doesn't expose these on the fiction header, only per-chapter.
+        # Derive story publish/update dates from the per-chapter
+        # timestamps RR exposes in <time unixtime="…">. The fiction
+        # header doesn't expose them directly.
+        #
+        # Row order ≠ timestamp order: authors who insert an omake or
+        # bonus chapter out-of-sequence (e.g. a 2024 "Chapter Ω1"
+        # slotted next to 2019's Chapter 4) leave the last table row
+        # at an older timestamp than a middle row. Taking min/max
+        # rather than first/last keeps date_updated correct when that
+        # happens, and it's cheap.
         chapter_times = [
             c["unixtime"] for c in chapter_list if c.get("unixtime")
         ]
         if chapter_times:
-            meta.setdefault("extra", {})["date_published"] = chapter_times[0]
-            meta["extra"]["date_updated"] = chapter_times[-1]
+            meta.setdefault("extra", {})["date_published"] = min(chapter_times)
+            meta["extra"]["date_updated"] = max(chapter_times)
 
         self._save_meta_cache(fiction_id, {**meta, "num_chapters": len(chapter_list)})
 

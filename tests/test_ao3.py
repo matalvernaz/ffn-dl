@@ -2,9 +2,10 @@
 
 import re
 
+import pytest
 from bs4 import BeautifulSoup
 
-from ffn_dl.ao3 import AO3Scraper
+from ffn_dl.ao3 import AO3LockedError, AO3Scraper
 
 
 class TestURLParsing:
@@ -118,3 +119,120 @@ class TestSeriesParsing:
                 work_urls.append(wid_m.group(1))
         assert len(work_urls) >= 3  # the fixture lists 4 works
         assert all(w.isdigit() for w in work_urls)
+
+
+class TestSeriesPagination:
+    """AO3 series paginate at 20 works/page. Walking ``rel=next`` is the
+    only way to collect the tail — a series of 30 works had its last
+    10 silently dropped before this was fixed."""
+
+    @staticmethod
+    def _page(heading, ids, next_page=None):
+        works = "\n".join(
+            f'<li class="work"><h4 class="heading">'
+            f'<a href="/works/{wid}">Work {wid}</a></h4></li>'
+            for wid in ids
+        )
+        nav = (
+            f'<ol class="pagination"><li><a rel="next" '
+            f'href="?page={next_page}">Next</a></li></ol>'
+            if next_page else ""
+        )
+        return (
+            f'<html><body><h2 class="heading">{heading}</h2>'
+            f'<ul class="series work index group">{works}</ul>'
+            f'{nav}</body></html>'
+        )
+
+    def test_two_page_series_collects_all_works(self):
+        scraper = AO3Scraper(use_cache=False)
+        calls = []
+
+        def fake_fetch(url):
+            calls.append(url)
+            if "page=1" in url:
+                return self._page(
+                    "My Series", list(range(1, 21)), next_page=2,
+                )
+            return self._page(
+                "My Series", list(range(21, 31)), next_page=None,
+            )
+
+        scraper._fetch = fake_fetch
+        scraper._delay = lambda: None
+
+        name, urls = scraper.scrape_series_works(
+            "https://archiveofourown.org/series/999"
+        )
+        assert name == "My Series"
+        # 20 + 10 = 30 works across the two pages
+        assert len(urls) == 30
+        assert urls[0].endswith("/works/1")
+        assert urls[-1].endswith("/works/30")
+        # Both pages fetched
+        assert any("page=1" in u for u in calls)
+        assert any("page=2" in u for u in calls)
+
+    def test_stops_when_no_next_link(self):
+        scraper = AO3Scraper(use_cache=False)
+
+        def fake_fetch(url):
+            return self._page("S", [1, 2, 3], next_page=None)
+
+        scraper._fetch = fake_fetch
+        scraper._delay = lambda: None
+        name, urls = scraper.scrape_series_works(
+            "https://archiveofourown.org/series/1"
+        )
+        assert len(urls) == 3
+
+    def test_stops_when_page_adds_nothing_new(self):
+        """Defence in depth: if AO3 ever loops ``rel=next`` back to an
+        earlier page, we bail instead of paginating forever."""
+        scraper = AO3Scraper(use_cache=False)
+
+        def fake_fetch(url):
+            # Always returns the same 3 works, always with rel=next.
+            return self._page("S", [1, 2, 3], next_page=99)
+
+        scraper._fetch = fake_fetch
+        scraper._delay = lambda: None
+        name, urls = scraper.scrape_series_works(
+            "https://archiveofourown.org/series/1"
+        )
+        assert len(urls) == 3
+
+
+class TestAdultGate:
+    """The AO3 adult-content gate is bypassed by ``view_adult=true`` in
+    the query string. If it isn't (misconfigured fetch, AO3 policy
+    change), ``_check_for_blocks`` must raise a clear error rather
+    than letting the gate page be parsed as an empty story."""
+
+    def test_gate_page_raises_ao3_locked(self):
+        scraper = AO3Scraper(use_cache=False)
+        gate_html = (
+            "<html><body>"
+            "<p>This work could have adult content. If you proceed, "
+            "you have agreed that you are willing to see such content.</p>"
+            "<a href='?view_adult=true'>Proceed</a>"
+            "</body></html>"
+        )
+        with pytest.raises(AO3LockedError):
+            scraper._check_for_blocks(gate_html)
+
+    def test_login_required_page_raises_ao3_locked(self):
+        scraper = AO3Scraper(use_cache=False)
+        html = (
+            "<html><body>"
+            "<p>Sorry, you don't have permission to view this work.</p>"
+            "</body></html>"
+        )
+        with pytest.raises(AO3LockedError):
+            scraper._check_for_blocks(html)
+
+    def test_real_work_page_does_not_raise(self, ao3_work_full_html):
+        scraper = AO3Scraper(use_cache=False)
+        # A genuine work page must pass the gate check — regression
+        # guard against overeager pattern matching on body text.
+        scraper._check_for_blocks(ao3_work_full_html)

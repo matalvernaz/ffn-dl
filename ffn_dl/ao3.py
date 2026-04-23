@@ -270,42 +270,56 @@ class AO3Scraper(BaseScraper):
     def scrape_series_works(self, url):
         """Fetch an AO3 series page and return (series_name, [work_urls]).
 
-        Works are returned in the order the author set for the series
-        — AO3 renders them in that order in the works list, and we
-        preserve page order when collecting the links.
+        Works are returned in the order the author set for the series.
+        AO3 paginates series at 20 works per page via ``?page=N``;
+        walking `rel="next"` picks up the full list — without pagination,
+        a series of 30 works would silently drop the last 10.
         """
         match = re.search(r"archiveofourown\.org/series/(\d+)", url)
         if not match:
             raise ValueError(f"Not an AO3 series URL: {url}")
         series_id = match.group(1)
-        html = self._fetch(f"{AO3_BASE}/series/{series_id}")
-        soup = BeautifulSoup(html, "lxml")
 
         series_name = "Unknown Series"
-        h2 = soup.find("h2", class_="heading")
-        if h2:
-            name = h2.get_text(strip=True)
-            if name:
-                series_name = name
-
         seen = set()
         work_urls = []
-        # The series page lists works as h4.heading blocks whose first
-        # link points at /works/<id>. Pulling links from inside h4
-        # headings skips the "Bookmarks" / "Comments" links elsewhere
-        # on the page that also point at /works/.
-        for heading in soup.find_all("h4", class_="heading"):
-            link = heading.find("a", href=re.compile(r"^/works/\d+"))
-            if not link:
-                continue
-            wid_m = re.search(r"/works/(\d+)", link["href"])
-            if not wid_m:
-                continue
-            wid = wid_m.group(1)
-            if wid in seen:
-                continue
-            seen.add(wid)
-            work_urls.append(f"{AO3_BASE}/works/{wid}")
+        page = 1
+        while True:
+            page_url = f"{AO3_BASE}/series/{series_id}?page={page}"
+            html = self._fetch(page_url)
+            soup = BeautifulSoup(html, "lxml")
+
+            if page == 1:
+                h2 = soup.find("h2", class_="heading")
+                if h2:
+                    name = h2.get_text(strip=True)
+                    if name:
+                        series_name = name
+
+            new_on_page = 0
+            # The series page lists works as h4.heading blocks whose
+            # first link points at /works/<id>. Scoping to h4.heading
+            # excludes the sidebar's "Bookmarks" / "Comments" links,
+            # which also target /works/.
+            for heading in soup.find_all("h4", class_="heading"):
+                link = heading.find("a", href=re.compile(r"^/works/\d+"))
+                if not link:
+                    continue
+                wid_m = re.search(r"/works/(\d+)", link["href"])
+                if not wid_m:
+                    continue
+                wid = wid_m.group(1)
+                if wid in seen:
+                    continue
+                seen.add(wid)
+                work_urls.append(f"{AO3_BASE}/works/{wid}")
+                new_on_page += 1
+
+            next_link = soup.find("a", attrs={"rel": "next"})
+            if not next_link or new_on_page == 0:
+                break
+            page += 1
+            self._delay()
 
         return series_name, work_urls
 

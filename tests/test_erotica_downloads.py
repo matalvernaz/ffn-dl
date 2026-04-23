@@ -280,3 +280,65 @@ def test_skip_chapters_past_end_returns_empty_chapters(
     story = scraper.download(url, skip_chapters=10)
     assert story.chapters == []
     assert story.title  # metadata still parsed
+
+
+# ── Empty-page invariant ──────────────────────────────────────────
+
+@pytest.mark.parametrize("cls,url", [
+    (AFFScraper,
+     "https://hp.adult-fanfiction.org/story.php?no=600100488"),
+    (StoriesOnlineScraper,
+     "https://storiesonline.net/s/40467/slug"),
+    (NiftyScraper,
+     "https://www.nifty.org/nifty/gay/college/the-brotherhood/"),
+    (SexStoriesScraper,
+     "https://www.sexstories.com/story/114893/slug"),
+    (MCStoriesScraper,
+     "https://mcstories.com/AToZeb/"),
+    (LushStoriesScraper,
+     "https://www.lushstories.com/stories/cuckold/a-modern-relationship"),
+    (TGStorytimeScraper,
+     "https://www.tgstorytime.com/viewstory.php?sid=9219"),
+    (ChyoaScraper,
+     "https://chyoa.com/chapter/Ooh-that-s-hot.17"),
+    (DarkWandererScraper,
+     "https://darkwanderer.net/threads/young-black-breeding-bull-in-training.23490/"),
+    (GreatFeetScraper,
+     "https://www.greatfeet.com/stories/ts1735.htm"),
+    (FictionmaniaScraper,
+     "https://fictionmania.tv/stories/readhtmlstory.html?storyID=12345"),
+])
+def test_empty_page_never_returns_silently_empty_story(monkeypatch, cls, url):
+    """If the site serves an empty page (gate, error, site redesign, or
+    an unexpected ``<html><body></body></html>`` response), the scraper
+    must raise rather than quietly hand back a Story with no chapters
+    *and* no metadata. Silent empties are corrosive in library-update:
+    they overwrite a good local copy with a stub.
+
+    Scrapers whose download path degrades gracefully on an empty page
+    (returns a Story that at least carries the upstream title) are fine
+    to pass this test; it's the "no error AND no content" combination
+    we're ruling out.
+    """
+    scraper = _scraper(cls)
+    empty = "<html><body></body></html>"
+    monkeypatch.setattr(
+        scraper, "_fetch", _make_fetcher({"": empty}),
+    )
+    try:
+        story = scraper.download(url)
+    except Exception:
+        # Any exception type counts — what we're forbidding is
+        # silent success. Specific scrapers raise ValueError,
+        # StoryNotFoundError, AttributeError, etc.; the contract is
+        # just "something went wrong was visible to the caller".
+        return
+    # If it DID return a Story, at least a title OR a chapter body
+    # must have made it through — an entirely blank story is the
+    # failure mode we're guarding against.
+    has_title = bool(story.title and story.title.strip())
+    has_body = any(ch.html and ch.html.strip() for ch in story.chapters)
+    assert has_title or has_body, (
+        f"{cls.__name__} returned an empty Story without raising — "
+        "silent empties are a library-update hazard"
+    )

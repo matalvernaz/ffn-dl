@@ -93,6 +93,73 @@ class TestMetadataAndContent:
         assert len(body.get_text(strip=True)) > 200
 
 
+class TestContentDivFallbacks:
+    """Exercise the three-layer selector chain in ``_content_div``.
+
+    Literotica's CSS-module class names rebuild per release; these
+    tests pin each structural fallback so a future rebuild that
+    invalidates the hash prefix still finds the body through
+    ``itemprop`` / ``itemtype`` microdata."""
+
+    def test_itemprop_articlebody_wins_even_without_css_module(self):
+        html = (
+            '<html><body><main>'
+            '<div itemprop="articleBody" class="totally_unrelated">'
+            '<p>body</p>'
+            '</div></main></body></html>'
+        )
+        soup = BeautifulSoup(html, "lxml")
+        body = LiteroticaScraper._content_div(soup)
+        assert body is not None
+        assert "body" in body.get_text()
+
+    def test_css_module_prefix_matches_when_itemprop_absent(self):
+        html = (
+            '<html><body>'
+            '<div class="_article__content_FUTURE_HASH_xyz"><p>body</p></div>'
+            '</body></html>'
+        )
+        soup = BeautifulSoup(html, "lxml")
+        body = LiteroticaScraper._content_div(soup)
+        assert body is not None
+        assert "body" in body.get_text()
+
+    def test_article_itemtype_fallback(self):
+        html = (
+            '<html><body>'
+            '<article itemtype="https://schema.org/Article">'
+            '<p>body</p>'
+            '</article></body></html>'
+        )
+        soup = BeautifulSoup(html, "lxml")
+        body = LiteroticaScraper._content_div(soup)
+        assert body is not None
+        assert body.name == "article"
+
+    def test_returns_none_when_no_marker(self):
+        html = (
+            '<html><body><p>no story markers here</p></body></html>'
+        )
+        soup = BeautifulSoup(html, "lxml")
+        assert LiteroticaScraper._content_div(soup) is None
+
+    def test_itemprop_preferred_over_other_matches(self):
+        # If both a CSS-module hash and an itemprop element exist, the
+        # itemprop wins so we track the stable contract, not the hash.
+        html = (
+            '<html><body>'
+            '<div class="_article__content_STALE_HASH">'
+            '<p>stale content</p></div>'
+            '<div itemprop="articleBody" class="_article__content_FRESH">'
+            '<p>fresh content</p></div>'
+            '</body></html>'
+        )
+        soup = BeautifulSoup(html, "lxml")
+        body = LiteroticaScraper._content_div(soup)
+        assert body is not None
+        assert "fresh" in body.get_text()
+
+
 class TestSeriesExtraction:
     def test_series_works_parsed_from_fixture(self):
         import re

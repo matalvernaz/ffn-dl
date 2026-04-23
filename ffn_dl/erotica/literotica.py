@@ -87,11 +87,37 @@ class LiteroticaScraper(BaseScraper):
 
     @staticmethod
     def _content_div(soup):
-        """The story body is in a div whose CSS-module class starts
-        with '_article__content_'. Module hashes change between builds,
-        so we match on the prefix."""
+        """Return the element wrapping the story body, or ``None``.
+
+        Literotica's CSS-module class names rotate on each build
+        (``_article__content_10cj1_81`` today, a different hash tomorrow),
+        so we try increasingly structural selectors and stop on the
+        first hit. Most-stable first:
+
+        1. ``itemprop="articleBody"`` — schema.org microdata. Literotica
+           has exposed this on the story body for years because it's
+           what screen readers and search indexers rely on; it survives
+           pure CSS-bundle rebuilds that would invalidate the hashed
+           class.
+        2. Any element whose class contains the ``_article__content_``
+           module prefix. Matches the current build without pinning to
+           a specific hash suffix.
+        3. ``<article itemtype="https://schema.org/Article">`` — the
+           enclosing semantic element, for the case where Literotica
+           drops the inner ``itemprop`` but keeps Article-level markup.
+        """
+        el = soup.find(attrs={"itemprop": "articleBody"})
+        if el is not None:
+            return el
+        el = soup.find(
+            ["div", "article"],
+            class_=re.compile(r"_article__content_", re.I),
+        )
+        if el is not None:
+            return el
         return soup.find(
-            "div", class_=re.compile(r"^_article__content_")
+            "article",
+            attrs={"itemtype": re.compile(r"schema\.org/Article", re.I)},
         )
 
     @staticmethod

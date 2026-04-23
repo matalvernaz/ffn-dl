@@ -535,39 +535,43 @@ class WattpadScraper(BaseScraper):
 # ── bracket-matching helper ───────────────────────────────────
 
 def _enclosing_json_object(text, idx):
-    """Return the (start, end) span of the JSON object enclosing
-    position ``idx``. Walks backwards to the matching ``{`` counting
-    braces, then forwards to the matching ``}``. Returns (None, None)
-    if no balanced span can be found.
+    """Return ``(start, end)`` of the innermost balanced JSON object that
+    contains position ``idx``, or ``(None, None)`` if no such span exists.
 
-    Rough bracket counting — we don't parse strings, so brace chars
-    inside string literals would throw off the count. In practice
-    Wattpad's SSR payload escapes braces inside strings as ``\\u007b``
-    so this holds for the pages we've seen, but if a future payload
-    breaks that assumption the caller falls back to raising on its
-    inability to parse.
+    String- and escape-aware: braces inside JSON string literals don't
+    affect the depth count. A forward, single-pass scan keeps a stack
+    of ``{`` positions; each ``}`` pops the matching open. The first
+    time a pop produces a span that covers ``idx``, we've found the
+    innermost enclosing object (inner objects close before outer ones
+    on a forward scan), so we can return immediately.
+
+    The naive version this replaces counted raw braces without string
+    awareness. Wattpad's SSR payload escapes braces inside strings as
+    ``\\u007b`` so the naive counter held in practice, but any format
+    change — user-supplied titles with raw braces, a different JSON
+    serialiser — would miscount and either strand the caller or slice
+    an unparseable span. This version is correct for any JSON.
     """
-    depth = 0
-    k = idx
-    while k >= 0:
-        c = text[k]
-        if c == '}':
-            depth += 1
-        elif c == '{':
-            if depth == 0:
-                # Forward-walk to matching close brace.
-                d2 = 0
-                j = k
-                while j < len(text):
-                    ch = text[j]
-                    if ch == '{':
-                        d2 += 1
-                    elif ch == '}':
-                        d2 -= 1
-                        if d2 == 0:
-                            return k, j + 1
-                    j += 1
-                return None, None
-            depth -= 1
-        k -= 1
+    stack = []
+    in_string = False
+    escape_next = False
+    for i, c in enumerate(text):
+        if in_string:
+            if escape_next:
+                escape_next = False
+            elif c == "\\":
+                escape_next = True
+            elif c == '"':
+                in_string = False
+            continue
+        if c == '"':
+            in_string = True
+        elif c == "{":
+            stack.append(i)
+        elif c == "}":
+            if stack:
+                start = stack.pop()
+                end = i + 1
+                if start <= idx < end:
+                    return start, end
     return None, None

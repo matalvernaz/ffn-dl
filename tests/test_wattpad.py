@@ -117,6 +117,46 @@ class TestBracketMatching:
         text = 'no braces here'
         assert _enclosing_json_object(text, 5) == (None, None)
 
+    def test_ignores_braces_inside_strings(self):
+        # A raw "{" or "}" inside a JSON string literal must not move
+        # the depth counter. An older implementation counted every brace
+        # and would have split the enclosing object in the middle of the
+        # literal.
+        text = '{"title": "Wait for it }", "id": 42}'
+        start, end = _enclosing_json_object(text, text.find('"id"'))
+        assert text[start:end] == text
+        # And round-trips through json.loads without slicing errors.
+        import json
+        assert json.loads(text[start:end]) == {"title": "Wait for it }", "id": 42}
+
+    def test_ignores_escaped_quote_inside_string(self):
+        # An escaped quote (\") must NOT close the string, so a later
+        # brace inside that string still has to be ignored.
+        text = r'{"quote": "he said \"hi }\" then left", "n": 1}'
+        start, end = _enclosing_json_object(text, text.find('"n"'))
+        import json
+        assert json.loads(text[start:end])["n"] == 1
+
+    def test_escaped_backslash_terminates_escape(self):
+        # "\\" is a literal backslash followed by a quote that DOES close
+        # the string. The following brace must be counted again.
+        text = r'{"path": "C:\\", "q": {"r": 1}}'
+        start, end = _enclosing_json_object(text, text.find('"r"'))
+        import json
+        assert json.loads(text[start:end]) == {"r": 1}
+
+    def test_innermost_when_nested_deeply(self):
+        text = '{"a": {"b": {"c": {"d": "hit"}}}}'
+        start, end = _enclosing_json_object(text, text.find('"hit"'))
+        import json
+        assert json.loads(text[start:end]) == {"d": "hit"}
+
+    def test_unbalanced_open_brace_returns_none(self):
+        # Stray "{" with no matching close must not crash; we return
+        # (None, None) rather than hand back a span that doesn't parse.
+        text = '  { "a": 1 '
+        assert _enclosing_json_object(text, 5) == (None, None)
+
 
 class TestSSRStoryParsing:
     def test_finds_primary_story_object(self):

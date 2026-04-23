@@ -49,3 +49,8 @@ def ffn_search_html():
 @pytest.fixture(scope="session")
 def ficwad_story_html():
     return _load("ficwad_story.html")
+
+
+@pytest.fixture(scope="session")
+def ficwad_chapter_view_html():
+    return _load("ficwad_chapter_view.html")

@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.23.19 — 2026-04-23
+
+### Fix
+
+- **Royal Road: ``date_updated`` picked up the last table row rather
+  than the newest chapter.** Authors who insert a bonus/omake chapter
+  out-of-sequence (e.g. a 2024 "Chapter Ω1" slotted next to 2019's
+  Chapter 4) leave the last row at an older timestamp than a middle
+  row. The scraper now derives publish/update dates from
+  ``min``/``max`` of the per-chapter timestamps instead of first/last,
+  so the library shows the real last-update date and update-mode
+  refetches at the right time.
+- **AO3: series with more than 20 works silently dropped the tail.**
+  ``scrape_series_works`` fetched a single page; AO3 paginates series
+  at 20 works/page. The scraper now walks ``rel="next"`` like the
+  author-scrape path, so 30-work and 50-work series collect cleanly.
+- **Wattpad: bracket-matching story-object extractor is now string-
+  and escape-aware.** The prior implementation counted raw braces and
+  relied on Wattpad escaping braces inside strings as ``\\u007b`` —
+  any change to that serialiser or a user title containing a raw
+  brace would have split the enclosing JSON object mid-literal. The
+  new implementation ignores braces inside JSON string literals and
+  handles ``\\"`` / ``\\\\`` escapes correctly.
+- **FicWad: Published/Updated timestamps now assigned by label, not
+  table order.** The old code indexed the first ``data-ts`` span as
+  ``date_published`` and the second as ``date_updated``; a layout
+  flip would have silently swapped them. The parser now reads the
+  label immediately preceding each span.
+
+### Change
+
+- **Literotica: three-layer selector chain for the story body.**
+  Literotica's CSS-module class names rebuild per release
+  (``_article__content_10cj1_81`` today, a different hash tomorrow).
+  The scraper now prefers the ``itemprop="articleBody"`` microdata
+  attribute — the stable contract screen readers and indexers rely
+  on — then falls back to the CSS-module prefix, then to an enclosing
+  ``<article itemtype="schema.org/Article">``. Pure CSS-bundle
+  rebuilds that would have broken the scraper now degrade gracefully.
+
+### Tests
+
+- Added 48 tests covering the above: Wattpad bracket-matcher string
+  awareness, Literotica fallback chain, FicWad label-driven dates
+  with a multi-chapter dropdown fixture, Royal Road min/max timestamp
+  derivation, AO3 series pagination and adult-gate behaviour,
+  MediaMiner edge cases, and a cross-site empty-page invariant for
+  every erotica scraper that guards against silent-empty Story
+  returns on gate/error responses.
+
 ## 1.23.16 — 2026-04-20
 
 ### Fix
