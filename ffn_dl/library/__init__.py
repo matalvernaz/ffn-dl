@@ -7,5 +7,16 @@ metadata survived.
 """
 
 from .candidate import Confidence, StoryCandidate
+from .doctor import HealReport, IntegrityReport, check_integrity, heal
+from .stats import LibraryStats, compute_stats
 
-__all__ = ["Confidence", "StoryCandidate"]
+__all__ = [
+    "Confidence",
+    "StoryCandidate",
+    "IntegrityReport",
+    "HealReport",
+    "check_integrity",
+    "heal",
+    "LibraryStats",
+    "compute_stats",
+]

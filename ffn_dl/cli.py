@@ -1012,7 +1012,11 @@ def _run_update_queue(
 
     updated: list[str] = []
     up_to_date: list[str] = []
-    failed: list[str] = []
+    # ``failed`` is a list of ``(relpath, reason)`` tuples so the
+    # end-of-run summary can show *why* each story failed, not just
+    # which ones — previously users had to scroll back through the
+    # log and re-correlate names with exceptions by hand.
+    failed: list[tuple[str, str]] = []
     would_update: list[tuple[str, int, int]] = []
 
     # Phase 2 (concurrent): remote chapter-count probes.
@@ -1164,6 +1168,10 @@ def _run_update_queue(
     # Classify up front: entries that don't need a download (errors,
     # already up to date, dry-run) emit their progress lines
     # immediately and drop out of the queue fan-out.
+    #
+    # ``failed`` carries ``(relpath, reason)`` tuples so the end-of-run
+    # summary can surface what actually went wrong instead of just a
+    # list of names the user has to re-correlate with the scrollback.
     downloadable: list[dict] = []
     for i, entry in enumerate(probe_queue, 1):
         rel = entry["rel"]
@@ -1174,7 +1182,7 @@ def _run_update_queue(
         if "error" in entry:
             progress(f"[{i}/{total}] {rel}")
             progress(f"  Probe failed: {entry['error']}")
-            failed.append(rel)
+            failed.append((rel, f"probe: {entry['error']}"))
             continue
 
         local = entry["local"]
@@ -1235,23 +1243,31 @@ def _run_update_queue(
         per_args.format = _FMT_MAP.get(path.suffix.lower(), "epub")
         per_args.output = str(path.parent)
         ok = False
+        failure_reason: str | None = None
         try:
             ok = _download_one(
                 entry["url"], per_args, Path(per_args.output),
                 update_path=path, existing_chapters=local,
                 status_callback=progress,
             )
+            if not ok:
+                # _download_one swallowed an error and logged it; we
+                # don't have the exception message, but the scrollback
+                # already shows it. "download failed" is all we can
+                # surface in the summary.
+                failure_reason = "download failed (see log above)"
         except KeyboardInterrupt:
             # Re-raise so the outer wait loop sees the cancel.
             raise
         except Exception as exc:
             logger.debug("Phase 3 download raised", exc_info=True)
             progress(f"  Download failed: {exc}")
+            failure_reason = f"{type(exc).__name__}: {exc}"
         with result_lock:
             if ok:
                 updated.append(rel)
             else:
-                failed.append(rel)
+                failed.append((rel, failure_reason or "unknown failure"))
 
     futures = []
     for entry in downloadable:
@@ -1318,8 +1334,17 @@ def _run_update_queue(
         )
     if failed:
         progress("Failed:")
-        for name in failed:
-            progress(f"  {name}")
+        for entry in failed:
+            # Entries are ``(relpath, reason)`` tuples; fall back to
+            # ``str(entry)`` if anything older snuck in during the
+            # transition so the summary never crashes on a malformed
+            # failure list.
+            if isinstance(entry, tuple) and len(entry) == 2:
+                name, reason = entry
+                progress(f"  {name}")
+                progress(f"    → {reason}")
+            else:
+                progress(f"  {entry}")
     progress('='*60)
     return 0 if not failed else 1
 
@@ -1469,6 +1494,73 @@ def _handle_review_library(args: argparse.Namespace) -> None:
         f"\nReview complete: {promoted} promoted, {skipped} skipped, "
         f"{len(untrackable) - promoted - skipped} not shown."
     )
+    sys.exit(0)
+
+
+def _handle_library_doctor(args: argparse.Namespace) -> None:
+    """Diagnose (and optionally heal) drift between the library index
+    and the files on disk. Read-only unless ``--heal`` is passed."""
+    from .library import check_integrity, heal
+    from .library.index import LibraryIndex
+
+    root = Path(args.library_doctor)
+    if not root.is_dir():
+        print(f"Error: {root} is not a directory.", file=sys.stderr)
+        sys.exit(1)
+    root_resolved = root.resolve()
+
+    idx = LibraryIndex.load()
+    report = check_integrity(root_resolved, idx)
+    print(report.summary())
+
+    if report.is_clean():
+        sys.exit(0)
+
+    if not args.heal:
+        print(
+            "\nRun again with --heal to apply fixes "
+            "(drop missing entries, index orphan files, refresh stat "
+            "cache, prune stale records).",
+        )
+        # Exit non-zero so shell callers can detect drift programmatically.
+        sys.exit(2)
+
+    result = heal(
+        root_resolved,
+        idx,
+        report,
+        drop_missing=True,
+        refresh_drift=True,
+        prune_untrackable=True,
+        prune_duplicates=True,
+        scan_orphans=True,
+    )
+    idx.save()
+    print("\n" + result.summary())
+    sys.exit(0)
+
+
+def _handle_library_stats(args: argparse.Namespace) -> None:
+    """Print a one-paragraph summary of DIR's library: totals, per-site
+    and per-status counts, top fandoms, and freshness breakdown."""
+    from .library import compute_stats
+    from .library.index import LibraryIndex
+
+    root = Path(args.library_stats)
+    if not root.is_dir():
+        print(f"Error: {root} is not a directory.", file=sys.stderr)
+        sys.exit(1)
+    root_resolved = root.resolve()
+
+    idx = LibraryIndex.load()
+    stats = compute_stats(root_resolved, idx)
+    if stats.total_stories == 0 and stats.untrackable_files == 0:
+        print(
+            f"No stories indexed for {root_resolved}. "
+            "Run --scan-library first.",
+        )
+        sys.exit(0)
+    print(stats.summary())
     sys.exit(0)
 
 
@@ -1819,6 +1911,34 @@ def _build_parser() -> argparse.ArgumentParser:
             "a source URL per file. Confirmed entries are promoted into "
             "the stories list with MEDIUM confidence so subsequent "
             "--update-library runs pick them up."
+        ),
+    )
+    parser.add_argument(
+        "--library-doctor",
+        metavar="DIR",
+        help=(
+            "Report index/disk drift for DIR's library: missing files, "
+            "orphan files on disk not in the index, mtime/size cache "
+            "drift, and stale untrackable records. Read-only by default "
+            "— add --heal to apply fixes."
+        ),
+    )
+    parser.add_argument(
+        "--library-stats",
+        metavar="DIR",
+        help=(
+            "Print a summary of DIR's library: total stories, counts "
+            "by site/status/format, top fandoms, and freshness "
+            "(never-probed, stale, pending updates). Read-only."
+        ),
+    )
+    parser.add_argument(
+        "--heal",
+        action="store_true",
+        help=(
+            "With --library-doctor: apply every recommended fix "
+            "(drop missing entries, index orphan files, refresh stat "
+            "cache, prune stale untrackable/duplicate records)."
         ),
     )
     parser.add_argument(
@@ -2868,6 +2988,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.review_library:
         _handle_review_library(args)
+        return
+    if args.library_doctor:
+        _handle_library_doctor(args)
+        return
+    if args.library_stats:
+        _handle_library_stats(args)
         return
     if args.update_all:
         _handle_update_all(args)

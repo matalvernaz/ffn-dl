@@ -1,5 +1,6 @@
 """Export a Story to EPUB, HTML, or plain text."""
 
+import io
 import re
 from datetime import datetime, timezone
 from html import escape
@@ -7,6 +8,7 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
+from .atomic import atomic_path, atomic_write_text
 from .models import Story
 
 DEFAULT_TEMPLATE = "{title} - {author}"
@@ -170,16 +172,19 @@ def export_txt(
     filename = format_filename(story, template) + ".txt"
     path = Path(output_dir) / filename
 
-    with open(path, "w", encoding="utf-8") as f:
-        for label, value in _meta_fields(story):
-            f.write(f"{label}: {value}\n")
-        f.write("=" * 60 + "\n")
-
-        for ch in story.chapters:
-            f.write(f"\n\n--- {ch.title} ---\n\n")
-            html = strip_note_paragraphs(ch.html) if strip_notes else ch.html
-            f.write(html_to_text(html))
-
+    # Assemble in memory and hand the finished payload to the atomic
+    # writer so a crash mid-export can't leave a half-written file in
+    # the library — the next library scan would treat the partial as
+    # a valid story and skip re-downloading it.
+    buf = io.StringIO()
+    for label, value in _meta_fields(story):
+        buf.write(f"{label}: {value}\n")
+    buf.write("=" * 60 + "\n")
+    for ch in story.chapters:
+        buf.write(f"\n\n--- {ch.title} ---\n\n")
+        html = strip_note_paragraphs(ch.html) if strip_notes else ch.html
+        buf.write(html_to_text(html))
+    atomic_write_text(path, buf.getvalue())
     return path
 
 
@@ -210,51 +215,53 @@ def export_html(
             cell = val_esc
         meta_rows.append(f"<tr><th>{label}</th><td>{cell}</td></tr>")
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(
-            f'<!DOCTYPE html>\n<html lang="en">\n<head>\n'
-            f'<meta charset="utf-8">\n'
-            f"<title>{title_esc} by {author_esc}</title>\n"
-            f"<style>\n"
-            f"body{{max-width:800px;margin:2em auto;padding:0 1em;"
-            f"font-family:Georgia,serif;line-height:1.6}}\n"
-            f"h1{{text-align:center}}\n"
-            f".meta-table{{border-collapse:collapse;margin:1em 0;width:100%}}\n"
-            f".meta-table th{{text-align:right;padding:.25em 1em .25em 0;"
-            f"vertical-align:top;white-space:nowrap;color:#555}}\n"
-            f".meta-table td{{padding:.25em 0;vertical-align:top}}\n"
-            f".chapter{{margin:2em 0}}\n"
-            f".chapter h2{{border-bottom:1px solid #ddd;padding-bottom:.3em}}\n"
-            f".chapter p{{margin:0 0 0.25em 0;text-indent:1.5em}}\n"
-            f".chapter h2+p,.chapter hr+p,.chapter .scenebreak+p{{text-indent:0}}\n"
-            f"blockquote{{margin:1em 2em;font-style:italic}}\n"
-            f"blockquote p{{text-indent:0}}\n"
-            f".scenebreak{{text-align:center;margin:1.5em 0;letter-spacing:.5em}}\n"
-            f".center,[align=center]{{text-align:center}}\n"
-            f"a{{color:#36c}}\n"
-            f"</style>\n</head>\n<body>\n"
-            f"<h1>{title_esc}</h1>\n"
-            f'<table class="meta-table">\n'
-        )
-        for row in meta_rows:
-            f.write(f"{row}\n")
-        f.write("</table>\n<hr>\n")
+    # Build the full document in memory first, then atomic-write it.
+    # See ``export_txt`` for why this shape matters.
+    buf = io.StringIO()
+    buf.write(
+        f'<!DOCTYPE html>\n<html lang="en">\n<head>\n'
+        f'<meta charset="utf-8">\n'
+        f"<title>{title_esc} by {author_esc}</title>\n"
+        f"<style>\n"
+        f"body{{max-width:800px;margin:2em auto;padding:0 1em;"
+        f"font-family:Georgia,serif;line-height:1.6}}\n"
+        f"h1{{text-align:center}}\n"
+        f".meta-table{{border-collapse:collapse;margin:1em 0;width:100%}}\n"
+        f".meta-table th{{text-align:right;padding:.25em 1em .25em 0;"
+        f"vertical-align:top;white-space:nowrap;color:#555}}\n"
+        f".meta-table td{{padding:.25em 0;vertical-align:top}}\n"
+        f".chapter{{margin:2em 0}}\n"
+        f".chapter h2{{border-bottom:1px solid #ddd;padding-bottom:.3em}}\n"
+        f".chapter p{{margin:0 0 0.25em 0;text-indent:1.5em}}\n"
+        f".chapter h2+p,.chapter hr+p,.chapter .scenebreak+p{{text-indent:0}}\n"
+        f"blockquote{{margin:1em 2em;font-style:italic}}\n"
+        f"blockquote p{{text-indent:0}}\n"
+        f".scenebreak{{text-align:center;margin:1.5em 0;letter-spacing:.5em}}\n"
+        f".center,[align=center]{{text-align:center}}\n"
+        f"a{{color:#36c}}\n"
+        f"</style>\n</head>\n<body>\n"
+        f"<h1>{title_esc}</h1>\n"
+        f'<table class="meta-table">\n'
+    )
+    for row in meta_rows:
+        buf.write(f"{row}\n")
+    buf.write("</table>\n<hr>\n")
 
-        # Table of Contents
-        f.write('<nav id="toc">\n<h2>Table of Contents</h2>\n<ol>\n')
-        for i, ch in enumerate(story.chapters, 1):
-            f.write(f'<li><a href="#chapter-{i}">{escape(ch.title)}</a></li>\n')
-        f.write("</ol>\n</nav>\n<hr>\n")
+    # Table of Contents
+    buf.write('<nav id="toc">\n<h2>Table of Contents</h2>\n<ol>\n')
+    for i, ch in enumerate(story.chapters, 1):
+        buf.write(f'<li><a href="#chapter-{i}">{escape(ch.title)}</a></li>\n')
+    buf.write("</ol>\n</nav>\n<hr>\n")
 
-        for i, ch in enumerate(story.chapters, 1):
-            ch_title = escape(ch.title)
-            f.write(f'<div class="chapter" id="chapter-{i}"><h2>{ch_title}</h2>\n')
-            chapter_html = _prepare_chapter_html(ch.html, hr_as_stars, strip_notes)
-            f.write(chapter_html)
-            f.write("\n</div><hr>\n")
+    for i, ch in enumerate(story.chapters, 1):
+        ch_title = escape(ch.title)
+        buf.write(f'<div class="chapter" id="chapter-{i}"><h2>{ch_title}</h2>\n')
+        chapter_html = _prepare_chapter_html(ch.html, hr_as_stars, strip_notes)
+        buf.write(chapter_html)
+        buf.write("\n</div><hr>\n")
 
-        f.write("</body>\n</html>\n")
-
+    buf.write("</body>\n</html>\n")
+    atomic_write_text(path, buf.getvalue())
     return path
 
 
@@ -771,7 +778,13 @@ def export_epub(
 
     filename = format_filename(story, template) + ".epub"
     path = Path(output_dir) / filename
-    epub.write_epub(str(path), book)
+    # ``ebooklib`` insists on writing via a filesystem path rather than
+    # a stream, so we hand it a temp path inside ``atomic_path`` and let
+    # the context manager commit the rename on a clean exit. A crash or
+    # exception from inside ``write_epub`` leaves the existing file (if
+    # any) untouched instead of corrupting it.
+    with atomic_path(path) as tmp:
+        epub.write_epub(str(tmp), book)
     return path
 
 

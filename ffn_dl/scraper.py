@@ -126,6 +126,42 @@ class BaseScraper:
 
     site_name = "unknown"
 
+    def __init_subclass__(cls, **kwargs):
+        """Wrap each subclass's ``download`` method so every call runs
+        inside a fresh :func:`~ffn_dl.logging_utils.correlation_context`.
+
+        Effect: every log line emitted during a story download is
+        tagged with a short ``[dl-<id>]`` prefix that ties together
+        the metadata fetch, per-chapter retries, rate-limit warnings,
+        and cache writes for that one story. Concurrent downloads
+        (library-wide update passes) stay distinguishable in the log
+        without any callsite having to know the feature exists.
+
+        Implementation detail: we wrap at class-definition time rather
+        than at call time, so the site scrapers can keep overriding
+        ``download`` directly without needing to cooperate with the
+        correlation machinery. The wrapper is also idempotent — a
+        subclass that inherits ``download`` from an intermediate
+        subclass won't get wrapped twice.
+        """
+        super().__init_subclass__(**kwargs)
+        fn = cls.__dict__.get("download")
+        if fn is None or getattr(fn, "__ffn_dl_cid_wrapped__", False):
+            return
+
+        from .logging_utils import correlation_context
+
+        def wrapped(self, *args, **kw):
+            with correlation_context():
+                return fn(self, *args, **kw)
+
+        wrapped.__name__ = fn.__name__
+        wrapped.__qualname__ = fn.__qualname__
+        wrapped.__doc__ = fn.__doc__
+        wrapped.__wrapped__ = fn
+        wrapped.__ffn_dl_cid_wrapped__ = True
+        cls.download = wrapped
+
     def __init__(
         self,
         delay_range: Optional[tuple[float, float]] = None,
@@ -622,8 +658,14 @@ class BaseScraper:
     def _save_meta_cache(self, story_id, meta: dict) -> None:
         if not self.use_cache:
             return
+        from .atomic import atomic_write_text
         path = self._story_cache_dir(story_id) / "meta.json"
-        path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        # Atomic write prevents a half-written meta.json from looking
+        # valid to ``_load_meta_cache`` — the corruption path below
+        # would still catch it, but we'd lose the cached metadata
+        # (and force an extra upstream request) on every subsequent
+        # run until someone noticed.
+        atomic_write_text(path, json.dumps(meta, ensure_ascii=False))
 
     def _load_meta_cache(self, story_id) -> Optional[dict]:
         if not self.use_cache:
@@ -641,10 +683,14 @@ class BaseScraper:
     def _save_chapter_cache(self, story_id, chapter: Chapter) -> None:
         if not self.use_cache:
             return
+        from .atomic import atomic_write_text
         path = self._story_cache_dir(story_id) / f"ch_{chapter.number:04d}.html"
-        path.write_text(
+        # Chapters are the expensive thing to refetch (rate-limits,
+        # Cloudflare challenges on FFN, etc.). A partial write here
+        # costs a full chapter re-download on the next run.
+        atomic_write_text(
+            path,
             json.dumps({"title": chapter.title, "html": chapter.html}),
-            encoding="utf-8",
         )
 
     def _load_chapter_cache(self, story_id, chap_num: int) -> Optional[Chapter]:

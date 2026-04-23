@@ -2,7 +2,7 @@
 
 import logging as _logging
 
-__version__ = "1.23.20"
+__version__ = "1.23.21"
 
 _logger = _logging.getLogger(__name__)
 
@@ -27,3 +27,10 @@ try:
     _neural_env.activate()
 except Exception:
     _logger.exception("neural_env.activate() failed; neural attribution backends unavailable")
+
+# Install the correlation-id LogRecordFactory so every ffn_dl log line
+# emitted inside a ``correlation_context`` block gets a stable
+# ``[dl-<id>]`` tag. Tagging is a no-op outside an active context, so
+# importing this module never changes existing log output shape.
+from .logging_utils import install_correlation_filter as _install_cid_filter
+_install_cid_filter()

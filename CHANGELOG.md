@@ -1,5 +1,70 @@
 # Changelog
 
+## 1.23.21 — 2026-04-23
+
+### Feature
+
+- **Library doctor.** A new ``--library-doctor DIR`` CLI flag reports
+  index/disk drift: entries pointing at files that no longer exist,
+  orphan files on disk not in the index, mtime/size cache drift that
+  would defeat the refresh-path "skip unchanged" optimisation, and
+  stale records in the untrackable list. Read-only by default; add
+  ``--heal`` to apply every recommended fix in one pass. Exits with
+  status 2 when drift is detected in read-only mode so shell callers
+  can detect it programmatically.
+- **Library stats.** ``--library-stats DIR`` prints a summary of
+  what's actually in a library: totals, per-site / per-status /
+  per-format counts, top-ten fandoms, and freshness breakdown
+  (never-probed, probe older than 30 days, pending updates where
+  upstream has more chapters than local). Fully read-only.
+- **Correlation IDs on download logs.** Every ``download()`` call now
+  runs inside a fresh correlation context so log lines emitted
+  anywhere in the stack — scraper, cache, exporter, library code —
+  are tagged with the same ``[dl-<id>]`` prefix. Makes triage of
+  library-wide update runs tractable: instead of eyeballing
+  timestamps to figure out which warning belongs to which story,
+  ``grep [dl-a83f4c21]`` produces the full story's trace.
+- **Batch failure summary now shows the reason per entry.**
+  ``--update-all``'s end-of-run Failed list used to be just relpaths;
+  you had to scroll back to find the matching exception. The summary
+  now carries a "→ <reason>" line under each failure, capturing the
+  probe error or the exception class name + message directly.
+
+### Fix
+
+- **Atomic writes on every story output.** TXT, HTML, and EPUB
+  exporters previously streamed directly to the destination path,
+  so a crash (Ctrl-C, OS kill, power loss) mid-export left a
+  truncated file in the library that the next scan treated as
+  valid — masking the need to re-download. Every export now goes
+  through a tmp-file + fsync + atomic rename, matching what
+  ``LibraryIndex.save`` and the watchlist already did. Same change
+  applied to the scraper's meta / chapter caches so a partial write
+  there can't leave a valid-looking but half-populated cache entry.
+
+### Change
+
+- **BaseScraper.download auto-wraps with a correlation context.**
+  Implemented via ``__init_subclass__`` so every site scraper picks
+  up the tag without any callsite changes. The context is thread-
+  local (via ``ContextVar``), so concurrent downloads in a library
+  pass stay distinguishable.
+- **``_fetch_part_text`` safety-cap constant extracted.** Wattpad's
+  200-page upper bound is now ``_MAX_PART_PAGES``, with docstrings
+  and a truncation notice surfaced to the reader when it fires.
+  (Shipped in 1.23.20 — consolidated here for completeness.)
+
+### Tests
+
+- 75 new tests. Atomic-write invariants (content, no tmp residue,
+  exception rollback), library integrity check + heal for every
+  drift category, library stats distributions and freshness buckets,
+  correlation-id scoping / thread-isolation / LogRecordFactory, end-
+  to-end exporter output for TXT/HTML/EPUB including EPUB3 ZIP
+  structure (mimetype first, container.xml valid, manifest
+  consistent), and atomic-rollback on simulated ``write_epub``
+  failure. Full suite: 784 green.
+
 ## 1.23.20 — 2026-04-23
 
 ### Change
