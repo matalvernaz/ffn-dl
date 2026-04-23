@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.23.25 — 2026-04-23
+
+### Feature
+
+- **Silent-edit detection.** Authors quietly revise chapters — fix
+  typos, tweak dialogue, sometimes rewrite scenes — without changing
+  the chapter count. The count-based ``--update-library`` check
+  can't see those, so local copies drift from canon. Two new CLI
+  flags cover this:
+
+  - ``--populate-hashes DIR`` seeds a per-chapter SHA-256 for every
+    story in DIR's library by re-parsing the local EPUB/HTML. Run
+    once to bootstrap an existing library; subsequent ``--update-
+    library`` runs refresh hashes on every successful download so
+    the baseline stays current.
+  - ``--scan-edits DIR`` probes every story's upstream, hashes the
+    fresh chapters, and reports drift. Silent edits (content change
+    under an unchanged count) and count changes (handled by the
+    regular update path) are reported separately. Exits with code 2
+    when drift was found so shell callers can branch.
+
+  Hashing normalises whitespace and drops cosmetic inter-tag
+  whitespace so a re-export through a different parser doesn't
+  trigger a false-positive flag.
+
+### Change
+
+- **Literotica merged into the unified Erotic Story Search.**
+  Literotica no longer has its own GUI search window — the standalone
+  frame was a narrower version of the fan-out surface and maintaining
+  both caused confusion about which to open. The unified search
+  already covers Literotica and auto-collapses Literotica series
+  across its results, so nothing functional is lost. The search
+  menu's accelerator keys shift up by one: Wattpad is now Ctrl+4,
+  Erotic Story Search is Ctrl+5.
+
+### Tests
+
+- 33 new tests. Content-hash primitives (normalisation under
+  whitespace churn, ordering, diffing), bootstrap-hashes flow
+  (populate, skip-existing, force-rehash, skip-missing,
+  unreadable-TXT), scan-edits flow (unchanged / silent-edit / count-
+  change detection, missing-baseline handling, StoryNotFound
+  fallback). Full suite: 900 green.
+
 ## 1.23.24 — 2026-04-23
 
 ### Feature

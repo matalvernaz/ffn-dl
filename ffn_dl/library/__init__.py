@@ -9,7 +9,21 @@ metadata survived.
 from . import backup
 from .candidate import Confidence, StoryCandidate
 from .doctor import HealReport, IntegrityReport, check_integrity, heal
+from .edits import (
+    BootstrapReport,
+    CountChange,
+    ScanReport,
+    SilentEdit,
+    bootstrap_hashes,
+    scan_edits,
+)
 from .find import LibraryMatch, search_index
+from .hashes import (
+    ChapterHashUnavailable,
+    compute_local_hashes,
+    store_hashes,
+    stored_hashes,
+)
 from .stats import LibraryStats, compute_stats
 
 __all__ = [
@@ -24,4 +38,14 @@ __all__ = [
     "LibraryMatch",
     "search_index",
     "backup",
+    "ChapterHashUnavailable",
+    "compute_local_hashes",
+    "store_hashes",
+    "stored_hashes",
+    "BootstrapReport",
+    "ScanReport",
+    "SilentEdit",
+    "CountChange",
+    "bootstrap_hashes",
+    "scan_edits",
 ]

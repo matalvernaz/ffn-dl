@@ -118,20 +118,6 @@ def _royalroad_search_spec():
     }
 
 
-def _literotica_search_spec():
-    from .search import LIT_CATEGORIES, search_literotica
-    return {
-        "label": "Search Literotica",
-        "search_fn": search_literotica,
-        "filters": [
-            ("Categor&y:", "category", list(LIT_CATEGORIES)),
-        ],
-        "text_filters": [
-            ("&Page:", "page"),
-        ],
-    }
-
-
 def _wattpad_search_spec():
     from .search import WP_COMPLETED, WP_MATURE, search_wattpad
     return {
@@ -209,7 +195,6 @@ class SearchFrame(wx.Frame):
         "ffn": "FFN",
         "ao3": "AO3",
         "royalroad": "Royal Road",
-        "literotica": "Literotica",
         "wattpad": "Wattpad",
         "erotica": "Erotic Story Search",
     }
@@ -218,7 +203,6 @@ class SearchFrame(wx.Frame):
         "ffn": "search_state_ffn",
         "ao3": "search_state_ao3",
         "royalroad": "search_state_royalroad",
-        "literotica": "search_state_literotica",
         "wattpad": "search_state_wattpad",
         "erotica": "search_state_erotica",
     }
@@ -562,14 +546,13 @@ class SearchFrame(wx.Frame):
                 )
             )
         )
-        lit_cat_browse = (
-            self.site_key == "literotica" and filters.get("category")
-        )
         # Erotica fan-out: tag-only (or site + category/fandom) browses
         # are valid without a query — the chosen kink IS the search
         # target. Every back-end site's search function treats an empty
         # query as "browse the tag/category" rather than "return
         # everything", so the fan-out still produces a useful batch.
+        # Literotica category browse also goes through the fan-out now
+        # that the standalone Literotica frame has been folded in.
         erotica_filter_only = (
             self.site_key == "erotica"
             and any(
@@ -581,8 +564,7 @@ class SearchFrame(wx.Frame):
             )
         )
         if not query and not (
-            list_browse or rr_filter_only or lit_cat_browse
-            or erotica_filter_only
+            list_browse or rr_filter_only or erotica_filter_only
         ):
             self._log("Error: Please enter a search query.")
             return
@@ -678,15 +660,13 @@ class SearchFrame(wx.Frame):
 
         if self.site_key == "ao3":
             processed = collapse_ao3_series(raw)
-        elif self.site_key == "literotica":
-            processed = collapse_literotica_series(raw)
         elif self.site_key == "erotica":
-            # The erotica fan-out mixes rows from every archive, but
+            # The erotica fan-out mixes rows from every archive.
             # Literotica is still the site most likely to return
             # numbered chapters as individual rows (``Ch. 02``, ``Pt.
-            # 03`` …). Run Literotica's series collapse over the full
-            # merged batch — the function matches on Literotica URL
-            # shapes and leaves every other site's rows untouched.
+            # 03`` …), so Literotica's series collapse runs over the
+            # full merged batch — the function matches on Literotica
+            # URL shapes and leaves every other site's rows untouched.
             processed = collapse_literotica_series(raw)
         else:
             processed = list(raw)

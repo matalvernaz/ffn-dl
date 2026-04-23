@@ -82,7 +82,6 @@ from .gui_search import (
     _ao3_search_spec,
     _erotica_search_spec,
     _ffn_search_spec,
-    _literotica_search_spec,
     _royalroad_search_spec,
     _wattpad_search_spec,
 )
@@ -2030,14 +2029,21 @@ class MainFrame(wx.Frame):
 
     _SEARCH_MENU_ITEMS = (
         # (accel, site_key, spec_fn, menu_label)
+        #
+        # Literotica used to have its own entry on Ctrl+4 but is now
+        # part of the unified Erotic Story Search — the standalone
+        # frame was a narrower version of the fan-out, and carrying
+        # both caused user confusion about which one to open when
+        # looking for a Literotica tag. The accelerators shift up by
+        # one so the menu stays contiguous; Wattpad moves to Ctrl+4,
+        # Erotic Story Search takes Ctrl+5.
         ("Ctrl+1", "ffn", _ffn_search_spec, "Search &FFN..."),
         ("Ctrl+2", "ao3", _ao3_search_spec, "Search &AO3..."),
         ("Ctrl+3", "royalroad", _royalroad_search_spec, "Search &Royal Road..."),
-        ("Ctrl+4", "literotica", _literotica_search_spec, "Search &Literotica..."),
-        ("Ctrl+5", "wattpad", _wattpad_search_spec, "Search &Wattpad..."),
+        ("Ctrl+4", "wattpad", _wattpad_search_spec, "Search &Wattpad..."),
         (
-            "Ctrl+6", "erotica", _erotica_search_spec,
-            "&Erotic Story Search (all sites)...",
+            "Ctrl+5", "erotica", _erotica_search_spec,
+            "&Erotic Story Search (all sites, incl. Literotica)...",
         ),
     )
 

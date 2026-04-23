@@ -978,6 +978,7 @@ def _run_update_queue(
     label: str = "Update-all",
     progress=print,
     on_probe_complete=None,
+    on_download_complete=None,
     cancel_event: "threading.Event | None" = None,
 ) -> int:
     """Run the probe + download cycle on a pre-built queue.
@@ -1268,6 +1269,22 @@ def _run_update_queue(
                 updated.append(rel)
             else:
                 failed.append((rel, failure_reason or "unknown failure"))
+        # Library-update hands us a callback here that re-hashes the
+        # freshly-written file and persists the list to the library
+        # index — that way ``--scan-edits`` always has a current
+        # baseline without the user having to re-run ``--populate-hashes``.
+        # Failures in the callback mustn't fail the download (the file
+        # is already on disk and the user wants the download counted
+        # as successful); the callback itself is responsible for
+        # logging its own errors.
+        if ok and on_download_complete is not None:
+            try:
+                on_download_complete(entry["url"], path)
+            except Exception:
+                logger.debug(
+                    "on_download_complete callback raised for %s",
+                    entry["url"], exc_info=True,
+                )
 
     futures = []
     for entry in downloadable:
@@ -1660,6 +1677,49 @@ def _handle_full_doctor(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
+def _handle_populate_hashes(args: argparse.Namespace) -> None:
+    """Seed chapter-content hashes for every story in DIR by parsing
+    local EPUB/HTML files. Read-only against the network."""
+    from .library import bootstrap_hashes
+    from .library.index import LibraryIndex
+
+    root = Path(args.populate_hashes)
+    if not root.is_dir():
+        print(f"Error: {root} is not a directory.", file=sys.stderr)
+        sys.exit(1)
+
+    idx = LibraryIndex.load()
+    report = bootstrap_hashes(
+        root.resolve(), idx, force=args.force_rehash,
+    )
+    if report.populated:
+        idx.save()
+    print(report.summary())
+    sys.exit(0)
+
+
+def _handle_scan_edits(args: argparse.Namespace) -> None:
+    """Probe every story in DIR and compare fresh hashes to stored."""
+    from .library import scan_edits
+    from .library.index import LibraryIndex
+
+    root = Path(args.scan_edits)
+    if not root.is_dir():
+        print(f"Error: {root} is not a directory.", file=sys.stderr)
+        sys.exit(1)
+
+    idx = LibraryIndex.load()
+
+    def progress(n, total, url):
+        print(f"  [{n}/{total}] {url}", flush=True)
+
+    report = scan_edits(root.resolve(), idx, progress=progress)
+    print()
+    print(report.summary())
+    # Exit non-zero when drift was found so shell callers can branch.
+    sys.exit(0 if report.is_clean() else 2)
+
+
 def _handle_watchlist_doctor(args: argparse.Namespace) -> None:
     """Diagnose (and optionally heal) the watchlist file."""
     from .watchlist import WatchlistStore
@@ -1820,11 +1880,47 @@ def _handle_update_library(args: argparse.Namespace) -> None:
             if len(_pending_stamps) >= _STAMP_FLUSH_EVERY:
                 _flush_stamps_locked()
 
+    # Per-download hash refresh. After every story is successfully
+    # written to disk, re-hash its chapters and persist the list to
+    # the library index so the next ``--scan-edits`` run has a
+    # current baseline. The hashing is cheap (microseconds per
+    # chapter); the index save is batched inside the helper by only
+    # saving when something actually changed.
+    _hash_lock = threading.Lock()
+
+    def _on_download_complete(url: str, path: "Path") -> None:
+        if args.dry_run:
+            return
+        try:
+            from .library import compute_local_hashes, store_hashes
+            from .library.index import LibraryIndex
+        except ImportError:
+            return
+        try:
+            hashes = compute_local_hashes(path)
+        except Exception:
+            logger.debug(
+                "chapter-hash refresh skipped for %s", url,
+                exc_info=True,
+            )
+            return
+        with _hash_lock:
+            try:
+                idx_local = LibraryIndex.load()
+                if store_hashes(idx_local, root_resolved, url, hashes):
+                    idx_local.save()
+            except (OSError, ValueError):
+                logger.debug(
+                    "chapter-hash write skipped for %s", url,
+                    exc_info=True,
+                )
+
     exit_code = _run_update_queue(
         probe_queue, args, workers,
         skipped_count=len(skipped),
         label="Library update",
         on_probe_complete=_on_probe_complete,
+        on_download_complete=_on_download_complete,
     )
 
     # Final flush of any stamps under the batch threshold, plus a
@@ -2124,6 +2220,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "With --library-find: limit the search to this library "
             "root instead of searching every indexed library."
+        ),
+    )
+    parser.add_argument(
+        "--populate-hashes",
+        metavar="DIR",
+        help=(
+            "Seed chapter-content hashes for every story in DIR's "
+            "library by re-parsing the local EPUB/HTML files. One-off "
+            "bootstrap before the first --scan-edits run; subsequent "
+            "downloads populate hashes automatically. Read-only "
+            "against the network."
+        ),
+    )
+    parser.add_argument(
+        "--force-rehash",
+        action="store_true",
+        help=(
+            "With --populate-hashes: re-compute hashes even for "
+            "entries that already have a stored list. Default is to "
+            "skip them so repeated bootstrap runs are cheap."
+        ),
+    )
+    parser.add_argument(
+        "--scan-edits",
+        metavar="DIR",
+        help=(
+            "Probe every story in DIR's library and compare its "
+            "upstream chapters to the stored hashes from "
+            "--populate-hashes. Flags silent edits (content changed "
+            "under an unchanged chapter count) and count changes. "
+            "Expensive: fetches every story from upstream. Read-only "
+            "— re-download flagged stories with --update-library or "
+            "single-file --refetch-all."
         ),
     )
     parser.add_argument(
@@ -3258,6 +3387,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.cache_doctor:
         _handle_cache_doctor(args)
+        return
+    if args.populate_hashes:
+        _handle_populate_hashes(args)
+        return
+    if args.scan_edits:
+        _handle_scan_edits(args)
         return
     if args.watchlist_doctor:
         _handle_watchlist_doctor(args)

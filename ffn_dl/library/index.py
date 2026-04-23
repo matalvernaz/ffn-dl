@@ -26,7 +26,12 @@ Schema is versioned. v1:
               "file_size": <int>,      # stat().st_size,  for cache-invalidate
               "last_checked": "<ISO-8601 UTC>",
               "last_probed": "<ISO-8601 UTC>",      # optional
-              "remote_chapter_count": N             # optional — latest probe's upstream count
+              "remote_chapter_count": N,            # optional — latest probe's upstream count
+              "chapter_hashes": ["<sha256>", ...]   # optional — per-chapter
+                                                    # content hashes for silent-
+                                                    # edit detection; populated
+                                                    # by --populate-hashes or on
+                                                    # successful download
             }
           },
           "untrackable": [
@@ -182,10 +187,18 @@ class LibraryIndex:
             # batch resume without re-probing every story.
             existing_preserved = {}
             if existing is not None:
+                # ``chapter_hashes`` is preserved across rescans for the
+                # same reason as ``last_probed`` / ``remote_chapter_count``:
+                # a plain ``--scan-library`` re-walk shouldn't wipe the
+                # ground-truth hash list that the bootstrap or a prior
+                # download populated. Silent-edit detection reads this
+                # field on every run; losing it would silently force a
+                # full refetch cycle just to repopulate.
                 for k in (
                     "last_probed",
                     "remote_chapter_count",
                     "duplicate_relpaths",
+                    "chapter_hashes",
                 ):
                     if k in existing:
                         existing_preserved[k] = existing[k]
