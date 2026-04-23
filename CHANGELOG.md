@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.23.23 — 2026-04-23
+
+### Feature
+
+- **Index backup and restore.** Three new CLI flags:
+  ``--backup-index`` (write a timestamped copy of the current
+  library index), ``--list-backups`` (show existing backups newest
+  first), and ``--restore-index FILE`` (atomically swap in a backup).
+  A rolling policy keeps the ten most recent backups. Destructive
+  operations (``--library-doctor --heal``) auto-backup before
+  mutating, so a misdiagnosed heal can be rolled back without the
+  user having remembered to take a snapshot.
+- **Watchlist doctor.** ``--watchlist-doctor`` reports malformed
+  watchlist entries: invalid ``type``, empty target URL,
+  unsupported site, URLs that no registered scraper recognises,
+  and duplicates (``type`` + URL for story/author watches;
+  ``site|query|filters`` for search watches). ``--heal`` drops
+  unrepairable entries. Parallel to the library and cache doctors
+  from the previous rounds.
+
+### Tests
+
+- 33 new tests. Backup/restore (rolling prune, atomic overwrite,
+  timestamped listing, restore leaves backup intact), watchlist
+  integrity checks across every category (invalid type, empty
+  target, unsupported site, unresolvable URL, story vs. search
+  dedupe keys), and summary-rendering invariants. Full suite: 855
+  green.
+
 ## 1.23.22 — 2026-04-23
 
 ### Feature

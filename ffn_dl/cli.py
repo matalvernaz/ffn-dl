@@ -1501,6 +1501,7 @@ def _handle_library_doctor(args: argparse.Namespace) -> None:
     """Diagnose (and optionally heal) drift between the library index
     and the files on disk. Read-only unless ``--heal`` is passed."""
     from .library import check_integrity, heal
+    from .library.backup import backup as backup_index
     from .library.index import LibraryIndex
 
     root = Path(args.library_doctor)
@@ -1525,6 +1526,14 @@ def _handle_library_doctor(args: argparse.Namespace) -> None:
         # Exit non-zero so shell callers can detect drift programmatically.
         sys.exit(2)
 
+    # Take a snapshot before mutating the index so a misdiagnosed heal
+    # can be rolled back with --restore-index. The backup is free
+    # (tiny file) and silent on success so the normal happy-path
+    # output stays clean.
+    backup_path = backup_index(idx.path)
+    if backup_path is not None:
+        logger.debug("Indexed backed up to %s before heal", backup_path)
+
     result = heal(
         root_resolved,
         idx,
@@ -1537,6 +1546,8 @@ def _handle_library_doctor(args: argparse.Namespace) -> None:
     )
     idx.save()
     print("\n" + result.summary())
+    if backup_path is not None:
+        print(f"(Pre-heal backup: {backup_path})")
     sys.exit(0)
 
 
@@ -1630,6 +1641,86 @@ def _handle_cache_doctor(args: argparse.Namespace) -> None:
         print(
             "\nRun again with --prune to delete the orphan entries.",
         )
+    sys.exit(0)
+
+
+def _handle_watchlist_doctor(args: argparse.Namespace) -> None:
+    """Diagnose (and optionally heal) the watchlist file."""
+    from .watchlist import WatchlistStore
+    from .watchlist_doctor import check_watchlist, heal_watchlist
+
+    store = WatchlistStore.load_default()
+    report = check_watchlist(store)
+    print(report.summary())
+    if report.is_clean():
+        sys.exit(0)
+    if not args.heal:
+        print(
+            "\nRun again with --heal to drop unrepairable entries "
+            "(invalid type, empty target, unsupported site, "
+            "unresolvable URL, duplicates).",
+        )
+        sys.exit(2)
+    result = heal_watchlist(
+        store,
+        report,
+        drop_invalid_type=True,
+        drop_empty_target=True,
+        drop_unsupported_site=True,
+        drop_unresolvable_url=True,
+        drop_duplicates=True,
+    )
+    print("\n" + result.summary())
+    sys.exit(0)
+
+
+def _handle_backup_index() -> None:
+    """Write a timestamped copy of the current library index."""
+    from .library.backup import backup
+    from .library.index import default_index_path
+
+    idx_path = default_index_path()
+    if not idx_path.exists():
+        print(
+            f"No library index at {idx_path} — nothing to back up.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    backup_path = backup(idx_path)
+    print(f"Backup created: {backup_path}")
+    sys.exit(0)
+
+
+def _handle_list_backups() -> None:
+    """Print every existing library-index backup, newest first."""
+    from .library.backup import list_backups
+    from .library.index import default_index_path
+
+    idx_path = default_index_path()
+    backups = list_backups(idx_path)
+    if not backups:
+        print(f"No backups for {idx_path}.")
+        sys.exit(0)
+    print(f"Library-index backups (newest first):")
+    for p in backups:
+        size = p.stat().st_size
+        print(f"  {p.name}  ({size} bytes)")
+    sys.exit(0)
+
+
+def _handle_restore_index(args: argparse.Namespace) -> None:
+    """Overwrite the current library index with a previously-taken
+    backup file's contents. Atomic: succeeds fully or not at all."""
+    from .library.backup import restore
+    from .library.index import default_index_path
+
+    backup_path = Path(args.restore_index)
+    if not backup_path.exists():
+        print(f"Error: {backup_path} does not exist.", file=sys.stderr)
+        sys.exit(1)
+    idx_path = default_index_path()
+    restore(backup_path, idx_path)
+    print(f"Restored {idx_path} from {backup_path}.")
     sys.exit(0)
 
 
@@ -2020,6 +2111,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--watchlist-doctor",
+        action="store_true",
+        help=(
+            "Check the watchlist file for malformed entries: invalid "
+            "type, empty target URL, unsupported site, URL that no "
+            "scraper recognises, and duplicates. Read-only by default "
+            "— add --heal to drop unrepairable entries."
+        ),
+    )
+    parser.add_argument(
         "--cache-doctor",
         action="store_true",
         help=(
@@ -2036,6 +2137,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "With --cache-doctor: delete orphan cache directories "
             "(stories no longer in any known library)."
+        ),
+    )
+    parser.add_argument(
+        "--backup-index",
+        action="store_true",
+        help=(
+            "Copy the current library index to a timestamped sibling "
+            "file for safe-keeping before risky operations. Destructive "
+            "commands (--heal, --reorganize --apply) auto-backup already; "
+            "this flag is for manual checkpoints."
+        ),
+    )
+    parser.add_argument(
+        "--list-backups",
+        action="store_true",
+        help=(
+            "List every library-index backup on disk, newest first."
+        ),
+    )
+    parser.add_argument(
+        "--restore-index",
+        metavar="BACKUP_FILE",
+        help=(
+            "Replace the current library index with BACKUP_FILE's "
+            "contents. Atomic: the swap either completes fully or "
+            "leaves the current index untouched."
         ),
     )
     parser.add_argument(
@@ -3106,6 +3233,18 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.cache_doctor:
         _handle_cache_doctor(args)
+        return
+    if args.watchlist_doctor:
+        _handle_watchlist_doctor(args)
+        return
+    if args.backup_index:
+        _handle_backup_index()
+        return
+    if args.list_backups:
+        _handle_list_backups()
+        return
+    if args.restore_index:
+        _handle_restore_index(args)
         return
     if args.update_all:
         _handle_update_all(args)

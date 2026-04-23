@@ -6,6 +6,7 @@ downloaders (FanFicFare, FicHub, bare HTML scrapes) when enough
 metadata survived.
 """
 
+from . import backup
 from .candidate import Confidence, StoryCandidate
 from .doctor import HealReport, IntegrityReport, check_integrity, heal
 from .find import LibraryMatch, search_index
@@ -22,4 +23,5 @@ __all__ = [
     "compute_stats",
     "LibraryMatch",
     "search_index",
+    "backup",
 ]
