@@ -265,14 +265,92 @@ def export_html(
     return path
 
 
-def _fetch_cover_image(cover_url):
-    """Download a cover image, returning (content_bytes, media_type) or None."""
+_COVER_CACHE_TTL_S = 7 * 24 * 3600
+"""Cover images are near-immutable once the author uploads them —
+AO3 re-hosts by content-hash, FFN and Wattpad serve from a CDN with
+aggressive caching. A week's TTL is long enough that re-exporting
+a story the next day doesn't re-fetch, and short enough that a
+deliberately replaced cover makes it into the library within a
+normal update cycle."""
+
+
+def _cover_cache_path(cover_url: str):
+    """Return the on-disk path for a cached cover image, or ``None``
+    when the portable/cache bootstrap isn't available (e.g. during
+    some tests). We key the cache on a hash of the URL — the URL
+    itself is too long / contains characters illegal in filenames on
+    Windows."""
+    try:
+        from . import portable
+        cache_root = portable.cache_dir() / "covers"
+    except Exception:
+        return None
+    cache_root.mkdir(parents=True, exist_ok=True)
+    import hashlib
+    digest = hashlib.sha256(cover_url.encode("utf-8")).hexdigest()[:24]
+    return cache_root / digest
+
+
+def _fetch_cover_image(cover_url, *, use_cache: bool = True):
+    """Download a cover image, returning ``(content_bytes, media_type)``
+    or ``None``.
+
+    When ``use_cache`` is true (the default), the result is cached
+    under the portable cache dir keyed on a hash of ``cover_url``.
+    Subsequent exports of the same story — or of different stories
+    with the same cover URL, which happens for anthology series —
+    skip the network fetch entirely.
+
+    The cache entry stores the content-type as a short header line
+    so reads can reconstruct the ``(bytes, media_type)`` tuple
+    without a second round-trip. Cached entries older than
+    :data:`_COVER_CACHE_TTL_S` are re-fetched so updated covers
+    propagate into re-exports within a normal update cycle.
+    """
+    import time
+    cache_path = _cover_cache_path(cover_url) if use_cache else None
+    if cache_path is not None and cache_path.exists():
+        try:
+            age = time.time() - cache_path.stat().st_mtime
+        except OSError:
+            age = _COVER_CACHE_TTL_S + 1  # force refetch
+        if age < _COVER_CACHE_TTL_S:
+            try:
+                blob = cache_path.read_bytes()
+                # Format: ``<media_type>\n<bytes>``. The media type
+                # never contains a newline in practice, so a single
+                # newline terminator is an unambiguous split.
+                newline = blob.find(b"\n")
+                if newline > 0:
+                    media_type = blob[:newline].decode(
+                        "ascii", errors="replace",
+                    )
+                    content = blob[newline + 1:]
+                    if len(content) > 500:
+                        return content, media_type
+            except OSError:
+                # Corrupt / unreadable cache entry — fall through to
+                # the live fetch. The next successful fetch overwrites
+                # the bad entry.
+                pass
+
     try:
         from curl_cffi import requests as curl_requests
 
         resp = curl_requests.get(cover_url, impersonate="chrome", timeout=15)
         if resp.status_code == 200 and len(resp.content) > 500:
             ct = resp.headers.get("content-type", "image/jpeg")
+            if cache_path is not None:
+                try:
+                    from .atomic import atomic_write_bytes
+                    atomic_write_bytes(
+                        cache_path,
+                        ct.encode("ascii", errors="replace") + b"\n" + resp.content,
+                    )
+                except OSError:
+                    # Cache is best-effort — a full disk or a
+                    # permission issue shouldn't fail the export.
+                    pass
             return resp.content, ct
     except Exception:
         pass

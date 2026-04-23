@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.23.22 — 2026-04-23
+
+### Feature
+
+- **Cover image cache.** Exporters re-downloaded the cover image on
+  every run; now they cache under the portable cache dir keyed on a
+  hash of the cover URL, with a 7-day TTL. Re-exporting a story,
+  switching output formats, or exporting a long anthology where
+  every part shares a cover URL all skip the network. Cache is
+  best-effort — a disk full or permission issue doesn't fail the
+  export, just disables caching for that run.
+- **Scraper-cache doctor.** ``--cache-doctor`` reports on the scraper
+  cache at ``~/.cache/ffn-dl``: total size, per-site distribution,
+  top-ten largest entries, and (when a library index exists) orphan
+  cache directories for stories no longer tracked in any library.
+  Add ``--prune`` to delete the orphans. Complements the library
+  doctor from 1.23.21 — both together cover the two disk-hygiene
+  surfaces the program owns.
+- **Library search.** ``--library-find QUERY`` does a case-insensitive
+  substring search across every indexed story's title, author,
+  fandom list, and URL — joined into a single haystack so multi-word
+  queries like "harry potter au" can match across fields. Pass
+  ``--library-dir DIR`` to scope to one root; otherwise all indexed
+  libraries are searched. Each hit prints its title/author, fandom,
+  status, chapter count, relative path, and canonical URL.
+
+### Tests
+
+- 38 new tests. Cover cache (TTL, failure paths, URL-keying,
+  corrupt-entry fallthrough), scraper cache doctor (per-site
+  distribution, orphan detection, prune semantics), library search
+  (per-field matching, multi-root scoping, limit, convenience
+  accessors). Full suite: 822 green.
+
 ## 1.23.21 — 2026-04-23
 
 ### Feature

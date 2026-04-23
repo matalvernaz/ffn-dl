@@ -1564,6 +1564,75 @@ def _handle_library_stats(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
+def _handle_library_find(args: argparse.Namespace) -> None:
+    """Search the library index for stories matching a query."""
+    from .library import search_index
+    from .library.index import LibraryIndex
+
+    if not args.library_find.strip():
+        print("Error: --library-find query must not be empty.", file=sys.stderr)
+        sys.exit(1)
+
+    idx = LibraryIndex.load()
+    if args.library_dir:
+        root = Path(args.library_dir)
+        if not root.is_dir():
+            print(
+                f"Error: {root} is not a directory.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        roots: list[Path] | None = [root.resolve()]
+    else:
+        roots = None  # all indexed libraries
+
+    matches = search_index(idx, args.library_find, roots=roots)
+    if not matches:
+        print(f"No stories match {args.library_find!r}.")
+        sys.exit(1)
+
+    # Group the matches by library root so the output reads the way
+    # users think of their libraries ("show me the hits in library X").
+    # ``search_index`` already returns matches in per-root order, but
+    # we track the boundary explicitly so the header only prints once
+    # per root.
+    last_root: Path | None = None
+    for m in matches:
+        if m.root != last_root:
+            if last_root is not None:
+                print()
+            print(f"Library: {m.root}")
+            last_root = m.root
+        fandoms = ", ".join(m.fandoms) or "(no fandom)"
+        status = m.entry.get("status") or "?"
+        chapters = m.entry.get("chapter_count") or "?"
+        print(f"  {m.title or '(no title)'} — {m.author or '(no author)'}")
+        print(f"    {fandoms}  |  {status}  |  {chapters} chapter(s)")
+        print(f"    {m.relpath or '(unknown path)'}")
+        print(f"    {m.url}")
+
+    print(f"\n{len(matches)} match(es).")
+    sys.exit(0)
+
+
+def _handle_cache_doctor(args: argparse.Namespace) -> None:
+    """Report (and optionally prune) scraper cache contents."""
+    from .cache_doctor import check_cache, prune
+    from .library.index import LibraryIndex
+
+    idx = LibraryIndex.load()
+    report = check_cache(index=idx)
+    print(report.summary())
+    if args.prune and report.orphan_entries:
+        result = prune(report)
+        print("\n" + result.summary())
+    elif report.orphan_entries and not args.prune:
+        print(
+            "\nRun again with --prune to delete the orphan entries.",
+        )
+    sys.exit(0)
+
+
 def _handle_update_library(args: argparse.Namespace) -> None:
     """Check every indexed story in a library for new chapters upstream."""
     from .library.refresh import build_refresh_queue
@@ -1930,6 +1999,43 @@ def _build_parser() -> argparse.ArgumentParser:
             "Print a summary of DIR's library: total stories, counts "
             "by site/status/format, top fandoms, and freshness "
             "(never-probed, stale, pending updates). Read-only."
+        ),
+    )
+    parser.add_argument(
+        "--library-find",
+        metavar="QUERY",
+        help=(
+            "Search the library index for stories whose title, "
+            "author, fandom, or URL contains QUERY (case-insensitive). "
+            "Use --library-dir to limit the search to one library "
+            "root; otherwise all indexed libraries are searched."
+        ),
+    )
+    parser.add_argument(
+        "--library-dir",
+        metavar="DIR",
+        help=(
+            "With --library-find: limit the search to this library "
+            "root instead of searching every indexed library."
+        ),
+    )
+    parser.add_argument(
+        "--cache-doctor",
+        action="store_true",
+        help=(
+            "Report on the scraper cache (~/.cache/ffn-dl): size, "
+            "per-site distribution, largest entries, and — when a "
+            "library index exists — orphan cache directories for "
+            "stories no longer tracked. Add --prune to remove the "
+            "orphans."
+        ),
+    )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help=(
+            "With --cache-doctor: delete orphan cache directories "
+            "(stories no longer in any known library)."
         ),
     )
     parser.add_argument(
@@ -2994,6 +3100,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.library_stats:
         _handle_library_stats(args)
+        return
+    if args.library_find:
+        _handle_library_find(args)
+        return
+    if args.cache_doctor:
+        _handle_cache_doctor(args)
         return
     if args.update_all:
         _handle_update_all(args)
