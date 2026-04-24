@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.23.29 — 2026-04-23
+
+### Feature
+
+- **Playwright-backed Cloudflare-challenge fallback.** ``--cf-solve``
+  opts the scraper into a real-browser fallback for stubborn HTTP
+  403s. When the built-in retry path (browser rotation + client-
+  hint injection) is still hitting the challenge on the second-to-
+  last attempt, a headless Chromium launches via Playwright, waits
+  for the challenge to clear, and hands the solved cookies +
+  UA back for injection into the curl_cffi session. Solved cookies
+  are persisted on disk for 24h so later runs reuse them without
+  re-launching the browser. Per-host dedup keeps concurrent
+  workers from stampeding the solver.
+
+  Opt-in because Playwright ships a ~300MB browser binary:
+  ``pip install 'ffn-dl[cf-solve]'`` then ``playwright install
+  chromium``. ``[all]`` does **not** pull it in. Failures fall back
+  to the normal 403 retries — solver unavailability, timeouts, or
+  human-only captchas never crash the fetch.
+
+### Tests
+
+- 19 new tests for cf-solve: cookie cache round-trip, TTL expiry,
+  hostname sanitisation, solver invocation + ImportError
+  handling + empty-cookie guard, session-injection cookie/UA
+  plumbing, malformed-cookie skip, scraper-level host extraction,
+  on-disk seeding, per-host solver dedup, opt-in gating, and an
+  end-to-end ``_fetch`` integration that drives 403→solver→200 and
+  verifies the final body is returned from the 200 response.
+  Full suite: 953 green.
+
 ## 1.23.28 — 2026-04-23
 
 ### Feature

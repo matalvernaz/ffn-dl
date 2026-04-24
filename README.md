@@ -33,7 +33,8 @@ Extras are split so you only pull what you need:
 | `audio`     | Audiobook synthesis (`edge-tts`) — requires ffmpeg on PATH |
 | `gui`       | wxPython desktop GUI          |
 | `clipboard` | Clipboard-watch mode          |
-| `all`       | All of the above              |
+| `cf-solve`  | Playwright-backed Cloudflare-challenge fallback (also needs `playwright install chromium`) |
+| `all`       | All of the above *except* `cf-solve` (opt-in due to ~300MB browser binary) |
 
 ## Using it
 

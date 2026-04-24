@@ -397,6 +397,8 @@ def _build_scraper(url: str, args: argparse.Namespace):
         kwargs["chunk_size"] = args.chunk_size
     if getattr(args, "use_wayback", False):
         kwargs["use_wayback"] = True
+    if getattr(args, "cf_solve", False):
+        kwargs["cf_solve"] = True
     return scraper_cls(**kwargs)
 
 
@@ -2784,6 +2786,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "If a story 404s or the site keeps failing, try fetching "
             "the latest archive.org snapshot instead. Useful for deleted "
             "fics and during site outages."
+        ),
+    )
+    parser.add_argument(
+        "--cf-solve",
+        action="store_true",
+        help=(
+            "On persistent HTTP 403, launch a headless Chromium via "
+            "Playwright to solve the Cloudflare challenge and inject "
+            "the resulting cookies into the scraper session. Solved "
+            "cookies are cached on disk for 24h so subsequent runs "
+            "reuse them without re-invoking the browser. Requires "
+            "the 'cf-solve' extra: "
+            "pip install 'ffn-dl[cf-solve]' && playwright install chromium."
         ),
     )
     parser.add_argument(

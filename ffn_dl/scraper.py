@@ -176,6 +176,7 @@ class BaseScraper:
         chunk_delay_range: tuple[float, float] = (60.0, 75.0),
         use_wayback: bool = False,
         concurrency: int = 1,
+        cf_solve: bool = False,
     ) -> None:
         # Two rate-limit modes:
         #   * delay_range set → static random.uniform(*delay_range) between
@@ -201,6 +202,27 @@ class BaseScraper:
         self.chunk_size = chunk_size
         self.chunk_delay_range = chunk_delay_range
         self.use_wayback = use_wayback
+        # Opt-in Playwright-backed Cloudflare-challenge fallback. Off
+        # by default because the dependency is heavy (~300MB browser
+        # binary) and most 403s resolve via the built-in retry path.
+        # When enabled, a persistent 403 triggers one real-browser
+        # challenge pass whose solved cookies are injected into the
+        # session and cached on disk for the ``COOKIE_CACHE_TTL_S``
+        # window so subsequent fetches stay fast.
+        self.cf_solve = bool(cf_solve)
+        # Per-host attempt tracking so we don't re-invoke Playwright
+        # on every 403 for the same host inside one process — the
+        # solver is expensive. ``None`` entries mean "tried and
+        # failed", so we don't retry the slow path for a host that
+        # served a human-only captcha.
+        self._cf_solve_host_state: dict[str, bool] = {}
+        self._cf_solve_lock = threading.Lock()
+        # If a cached cookie set exists for the solver's hosts, load
+        # it into the session up front so the first request benefits
+        # from a prior solve. The load is lazy — we only touch hosts
+        # whose requests actually fail, not every registered host at
+        # construction time.
+        self._cf_solve_seeded_hosts: set[str] = set()
         # Parallel chapter fetching. AIMD applies here too: we start at the
         # subclass's configured concurrency and halve it whenever a batch
         # trips a 429/503 (detected via `_current_delay` bumping up). FFN
@@ -297,6 +319,96 @@ class BaseScraper:
             label, url, self._browser, resp.status_code, cookie_names,
             headers, DIAGNOSTIC_BODY_PREFIX_BYTES, body_prefix,
         )
+
+    def _host_for_url(self, url: str) -> str:
+        """Extract ``example.com`` from ``https://www.example.com/...``
+        so the cf-solve state map keys by host the way the cookie jar
+        does. Mirror the ``www.`` collapse the cookie cache uses."""
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+
+    def _maybe_seed_cf_cookies(self, sess, url: str) -> bool:
+        """Before invoking Playwright, try the on-disk cookie cache.
+
+        A previous ffn-dl run may have already solved the challenge
+        for this host; applying those cookies to the current session
+        costs microseconds and avoids re-running the browser for the
+        TTL window. Returns True when a cached solve was applied (so
+        the caller can retry before going to Playwright)."""
+        if not self.cf_solve:
+            return False
+        host = self._host_for_url(url)
+        if not host or host in self._cf_solve_seeded_hosts:
+            return False
+        try:
+            from . import cf_solve
+        except ImportError:
+            return False
+        cached = cf_solve.load_cached(host)
+        self._cf_solve_seeded_hosts.add(host)
+        if cached is None:
+            return False
+        cf_solve.inject_into_session(sess, cached)
+        logger.info(
+            "cf-solve: reused cached challenge cookies for %s", host,
+        )
+        return True
+
+    def _invoke_cf_solver(self, sess, url: str) -> bool:
+        """Run the Playwright-backed challenge solver for ``url``'s
+        host and, on success, inject the cookies into ``sess``.
+
+        Returns True when the caller should retry the current URL,
+        False when the solver bailed (unavailable, already failed
+        for this host, or raised). Errors are logged and swallowed so
+        a solver failure never crashes the fetch loop — the caller
+        falls back to the normal 403 retry behaviour.
+        """
+        if not self.cf_solve:
+            return False
+        host = self._host_for_url(url)
+        if not host:
+            return False
+        with self._cf_solve_lock:
+            prior = self._cf_solve_host_state.get(host)
+            if prior is not None:
+                # Already tried once this process. True = succeeded
+                # previously (cookies already in the jar, nothing to
+                # do); False = failed and we don't retry.
+                return False
+            # Mark as in-flight so a concurrent worker that hits 403
+            # at the same time doesn't also invoke Playwright. We'll
+            # set the real outcome below.
+            self._cf_solve_host_state[host] = False
+        try:
+            from . import cf_solve
+        except ImportError:
+            return False
+        try:
+            result = cf_solve.solve(url)
+        except cf_solve.SolverUnavailable as exc:
+            logger.warning(
+                "cf-solve: Playwright unavailable (%s); "
+                "falling back to normal 403 retries.", exc,
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "cf-solve: solver failed for %s: %s", url, exc,
+            )
+            return False
+        cf_solve.inject_into_session(sess, result)
+        cf_solve.persist(host, result)
+        with self._cf_solve_lock:
+            self._cf_solve_host_state[host] = True
+        logger.info(
+            "cf-solve: solved Cloudflare challenge for %s; "
+            "cookies persisted for next run.", host,
+        )
+        return True
 
     def _try_wayback(self, url: str) -> Optional[str]:
         """Ask archive.org for the latest snapshot of `url` and return its
@@ -414,6 +526,20 @@ class BaseScraper:
                     sess=sess, resp=resp, url=url, label="403",
                 )
                 last_was_403 = True
+                # First 403: try the on-disk cookie cache (free) in
+                # case a previous session already solved the challenge.
+                # If that wasn't applicable or didn't help, invoke the
+                # Playwright-backed solver when the caller opted in —
+                # but only on the last retry so the cheap rotations
+                # get a chance first.
+                if self._maybe_seed_cf_cookies(sess, url):
+                    continue
+                if (
+                    self.cf_solve
+                    and attempt >= self.max_retries - 2
+                    and self._invoke_cf_solver(sess, url)
+                ):
+                    continue
                 wait = FORBIDDEN_QUICK_RETRY_S + random.uniform(
                     0, FORBIDDEN_QUICK_RETRY_S,
                 )
