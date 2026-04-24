@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.23.26 — 2026-04-23
+
+### Feature
+
+- **Stale-complete probe gate.** ``--update-library
+  --skip-stale-complete DAYS`` skips stories that are both marked
+  Complete and have a file mtime older than the threshold, cutting
+  the wasted HTTP probes for fics the author finished years ago.
+  Unlike ``--skip-complete`` it leaves recently-completed fics in
+  the queue — an author can still mark a story Complete today and
+  publish an epilogue tomorrow. ``--force-recheck`` overrides the
+  gate, and a pending-resume entry (``remote_chapter_count >
+  local``) bypasses it so an owed download isn't delayed another
+  cycle.
+
+### Tests
+
+- 5 new tests for the stale-complete gate: old Complete skipped,
+  freshly-touched Complete kept, old In-Progress kept, pending-
+  resume shortcut still fires when gated, and the gate stays off
+  by default. Full suite: 905 green.
+
 ## 1.23.25 — 2026-04-23
 
 ### Feature

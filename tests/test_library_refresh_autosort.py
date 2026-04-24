@@ -678,3 +678,147 @@ def test_index_record_preserves_remote_chapter_count_across_rescan(
     reloaded = LibraryIndex.load(idx_path)
     [(_url, entry)] = list(reloaded.stories_in(lib))
     assert entry.get("remote_chapter_count") == 99
+
+
+# ── Stale-complete TTL ──────────────────────────────────────────
+
+
+def _age_file(path: Path, days: float) -> None:
+    """Backdate both access and modification times by ``days`` days so
+    the stale-complete gate sees the file as old. Uses the file's own
+    current mtime as the anchor so the test is insensitive to wall
+    clock variation between the export call and the os.utime call."""
+    import os
+    current = path.stat().st_mtime
+    target = current - days * 86400
+    os.utime(path, (target, target))
+
+
+def test_stale_complete_skips_old_complete_story(tmp_path: Path):
+    """A story marked Complete with an mtime older than the threshold
+    should be skipped. The skip message names the file age and points
+    at --force-recheck so the user knows how to override."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    path = ffndl_epub(
+        lib,
+        title="Ancient Complete",
+        url="https://www.fanfiction.net/s/40/1/",
+        status="Complete",
+    )
+    _age_file(path, days=400)
+    scan(lib, index_path=_index(tmp_path))
+
+    messages: list[str] = []
+    queue, skipped = build_refresh_queue(
+        lib,
+        index_path=_index(tmp_path),
+        skip_stale_complete_days=365,
+        progress=messages.append,
+    )
+    assert queue == []
+    assert len(skipped) == 1
+    assert any("untouched" in m and "force-recheck" in m for m in messages)
+
+
+def test_stale_complete_keeps_fresh_complete_story(tmp_path: Path):
+    """A story that's Complete but was re-exported recently (mtime
+    younger than the threshold) must stay in the probe queue — the
+    whole point of this gate over --skip-complete is that
+    recently-completed fics still get a chance to show an epilogue."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(
+        lib,
+        title="Fresh Complete",
+        url="https://www.fanfiction.net/s/41/1/",
+        status="Complete",
+    )
+    scan(lib, index_path=_index(tmp_path))
+
+    queue, skipped = build_refresh_queue(
+        lib,
+        index_path=_index(tmp_path),
+        skip_stale_complete_days=365,
+    )
+    assert len(queue) == 1
+    assert skipped == []
+
+
+def test_stale_complete_keeps_old_in_progress_story(tmp_path: Path):
+    """An In-Progress story that happens to be old must still be
+    probed — the gate is explicitly restricted to Complete status so
+    abandoned WIPs don't get silently dropped from updates."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    path = ffndl_epub(
+        lib,
+        title="Old WIP",
+        url="https://www.fanfiction.net/s/42/1/",
+        status="In-Progress",
+    )
+    _age_file(path, days=400)
+    scan(lib, index_path=_index(tmp_path))
+
+    queue, skipped = build_refresh_queue(
+        lib,
+        index_path=_index(tmp_path),
+        skip_stale_complete_days=365,
+    )
+    assert len(queue) == 1
+    assert skipped == []
+
+
+def test_stale_complete_bypassed_for_pending_resume(tmp_path: Path):
+    """If a previous probe recorded remote > local, the resume shortcut
+    must fire even when the file is old and Complete — the download is
+    already owed and shouldn't wait another N days to land."""
+    from ffn_dl.library.index import LibraryIndex
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    path = ffndl_epub(
+        lib,
+        title="Old Complete With Pending",
+        url="https://www.fanfiction.net/s/43/1/",
+        status="Complete",
+        chapters=3,
+    )
+    _age_file(path, days=500)
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    idx = LibraryIndex.load(idx_path)
+    idx.mark_probed(lib, {"https://www.fanfiction.net/s/43": 5})
+
+    queue, skipped = build_refresh_queue(
+        lib,
+        index_path=idx_path,
+        skip_stale_complete_days=365,
+    )
+    assert len(queue) == 1
+    assert skipped == []
+    assert queue[0]["remote"] == 5
+
+
+def test_stale_complete_disabled_by_default(tmp_path: Path):
+    """Omitting the flag preserves the pre-gate behaviour — old
+    Complete stories still get probed. Protects scripted callers that
+    don't opt into the new gate."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    path = ffndl_epub(
+        lib,
+        title="Old Complete (no gate)",
+        url="https://www.fanfiction.net/s/44/1/",
+        status="Complete",
+    )
+    _age_file(path, days=400)
+    scan(lib, index_path=_index(tmp_path))
+
+    queue, skipped = build_refresh_queue(
+        lib,
+        index_path=_index(tmp_path),
+    )
+    assert len(queue) == 1
+    assert skipped == []

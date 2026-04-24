@@ -92,12 +92,18 @@ def _cached_chapter_count(path: Path, entry: dict) -> int | None:
     return cached_count
 
 
+SECONDS_PER_DAY = 86400
+"""Used by the stale-complete gate so the CLI flag reads in days while
+the internal comparison stays in epoch seconds."""
+
+
 def build_refresh_queue(
     root: Path,
     *,
     index_path: Path | None = None,
     skip_complete: bool = False,
     recheck_interval_s: int = 0,
+    skip_stale_complete_days: int = 0,
     progress: Callable[[str], None] = print,
     now: Callable[[], float] = time.time,
 ) -> tuple[list[dict], list[str]]:
@@ -117,12 +123,28 @@ def build_refresh_queue(
     of re-hitting the network for every story. ``0`` (the CLI default)
     preserves the pre-TTL behaviour so scripted callers don't change
     behaviour without opting in.
+
+    ``skip_stale_complete_days`` is a gentler companion to
+    ``skip_complete``: it skips a story only when it's both marked
+    Complete *and* its file has been untouched for that many days.
+    The intent is to stop hammering upstream for stories that the
+    author finished years ago, without blinding the update to the
+    author who marks their fic Complete today and publishes an
+    epilogue tomorrow. ``0`` disables the gate; a pending-resume
+    entry (``remote_chapter_count > local``) bypasses it because
+    those still have a download to finish locally.
     """
     root = Path(root).expanduser().resolve()
     idx = LibraryIndex.load(index_path)
     stories = list(idx.stories_in(root))
 
-    now_epoch = now() if recheck_interval_s > 0 else 0.0
+    stale_gate_active = skip_stale_complete_days > 0
+    now_epoch = now() if (recheck_interval_s > 0 or stale_gate_active) else 0.0
+    stale_cutoff_epoch = (
+        now_epoch - skip_stale_complete_days * SECONDS_PER_DAY
+        if stale_gate_active
+        else 0.0
+    )
 
     probe_queue: list[dict] = []
     skipped: list[str] = []
@@ -228,6 +250,26 @@ def build_refresh_queue(
                 skipped.append(display_rel)
                 continue
 
+        if stale_gate_active:
+            try:
+                status = extract_status(path)
+            except Exception:
+                status = ""
+            if status.lower() == "complete":
+                try:
+                    file_mtime = path.stat().st_mtime
+                except OSError:
+                    file_mtime = None
+                if file_mtime is not None and file_mtime < stale_cutoff_epoch:
+                    age_days = int((now_epoch - file_mtime) // SECONDS_PER_DAY)
+                    progress(
+                        f"  [skip] {display_rel}: Complete and untouched "
+                        f"for {age_days}d "
+                        "(use --force-recheck to override)"
+                    )
+                    skipped.append(display_rel)
+                    continue
+
         probe_queue.append(
             {"path": path, "rel": display_rel, "url": url, "local": local}
         )
@@ -256,6 +298,7 @@ def default_refresh_args(
     recheck_interval_s: int = 0,
     force_recheck: bool = False,
     refetch_all: bool = False,
+    skip_stale_complete_days: int = 0,
 ) -> Namespace:
     """Namespace with sensible defaults for callers that need to drive
     ``cli._build_scraper`` / ``cli._download_one`` without having gone
@@ -296,6 +339,7 @@ def default_refresh_args(
         recheck_interval=recheck_interval_s,
         force_recheck=force_recheck,
         refetch_all=refetch_all,
+        skip_stale_complete=skip_stale_complete_days,
         # Export path knobs. ``name`` is the filename template; without
         # it, ``_download_one``'s export branch raises AttributeError.
         format=None,

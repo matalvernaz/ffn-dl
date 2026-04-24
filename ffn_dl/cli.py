@@ -1818,21 +1818,27 @@ def _handle_update_library(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     workers = max(1, int(args.probe_workers or 5))
+    recheck_interval = 0 if args.force_recheck else int(
+        args.recheck_interval or 0
+    )
+    stale_complete_days = 0 if args.force_recheck else int(
+        getattr(args, "skip_stale_complete", 0) or 0
+    )
     mode_bits = []
     if args.dry_run:
         mode_bits.append("dry-run")
     if args.skip_complete:
         mode_bits.append("skipping completed")
+    if stale_complete_days > 0:
+        mode_bits.append(f"skip stale-complete >{stale_complete_days}d")
     mode_bits.append(f"{workers} probe worker{'s' if workers != 1 else ''}")
     mode = f" ({', '.join(mode_bits)})"
 
-    recheck_interval = 0 if args.force_recheck else int(
-        args.recheck_interval or 0
-    )
     probe_queue, skipped = build_refresh_queue(
         root_resolved,
         skip_complete=args.skip_complete,
         recheck_interval_s=recheck_interval,
+        skip_stale_complete_days=stale_complete_days,
     )
     if not probe_queue and not skipped:
         print(
@@ -2386,7 +2392,22 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "With --update-library: ignore --recheck-interval and "
-            "probe every story. Equivalent to --recheck-interval 0."
+            "--skip-stale-complete, probe every story. Equivalent "
+            "to --recheck-interval 0 for that run."
+        ),
+    )
+    parser.add_argument(
+        "--skip-stale-complete",
+        type=int,
+        default=0,
+        metavar="DAYS",
+        help=(
+            "With --update-library: skip stories that are marked "
+            "Complete AND whose file hasn't been touched for at least "
+            "DAYS days. Gentler than --skip-complete — a fic completed "
+            "yesterday is still probed (author may add an epilogue), "
+            "but one untouched for a year stops costing an HTTP probe "
+            "each run. Default: 0 (disabled)."
         ),
     )
     parser.add_argument(
