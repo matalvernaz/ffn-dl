@@ -124,12 +124,22 @@ class PreferencesDialog(wx.Dialog):
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
 
     def _make_labeled_row(self, parent, label, ctrl, *, help_text=None):
-        """Label + control on one row; optional help text under it."""
+        """Label + control on one row; optional help text under it.
+
+        MSAA on Windows resolves a control's implicit label by walking
+        backward through the parent's child list for the nearest
+        StaticText. Call sites create the ``ctrl`` before invoking this
+        helper, so the StaticText we make here would land *after* the
+        ctrl in Z-order — and MSAA would then attach whatever
+        StaticText happens to precede the ctrl (usually a section
+        header or the preceding field's help text) as the label.
+        ``MoveAfterInTabOrder`` fixes the Z-order so the actual label
+        is what screen readers read, not the nearest neighbour.
+        """
+        static = wx.StaticText(parent, label=label)
+        ctrl.MoveAfterInTabOrder(static)
         row = wx.BoxSizer(wx.HORIZONTAL)
-        row.Add(
-            wx.StaticText(parent, label=label),
-            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6,
-        )
+        row.Add(static, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         row.Add(ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
         return row
 
@@ -298,17 +308,20 @@ class PreferencesDialog(wx.Dialog):
             "disable it.",
         )
 
+        # Labels carry the service name as a prefix so a screen
+        # reader landing on "Pushover user key edit blank" already
+        # knows which service it's configuring without having to
+        # remember a separately-spoken section header. Section-
+        # header StaticTexts are gone for the same reason: MSAA
+        # treated the previous headers as label candidates for the
+        # first following edit, which hijacked the real label.
         sizer.AddSpacer(6)
-        sizer.Add(
-            wx.StaticText(panel, label="Pushover"),
-            0, wx.LEFT | wx.RIGHT, 6,
-        )
 
         self.pushover_token_ctrl = wx.TextCtrl(panel)
         self.pushover_token_ctrl.SetName("Pushover API token")
         sizer.Add(
             self._make_labeled_row(
-                panel, "API &token:", self.pushover_token_ctrl,
+                panel, "Pushover API &token:", self.pushover_token_ctrl,
             ),
             0, wx.EXPAND | wx.ALL, 6,
         )
@@ -317,37 +330,30 @@ class PreferencesDialog(wx.Dialog):
         self.pushover_user_ctrl.SetName("Pushover user key")
         sizer.Add(
             self._make_labeled_row(
-                panel, "User &key:", self.pushover_user_ctrl,
+                panel, "Pushover user &key:", self.pushover_user_ctrl,
             ),
             0, wx.EXPAND | wx.ALL, 6,
         )
         self._add_help_text(sizer, panel, _PUSHOVER_HELP)
 
         sizer.AddSpacer(8)
-        sizer.Add(
-            wx.StaticText(panel, label="Discord"),
-            0, wx.LEFT | wx.RIGHT, 6,
-        )
         self.discord_webhook_ctrl = wx.TextCtrl(panel)
         self.discord_webhook_ctrl.SetName("Discord webhook URL")
         sizer.Add(
             self._make_labeled_row(
-                panel, "&Webhook URL:", self.discord_webhook_ctrl,
+                panel, "Discord &webhook URL:", self.discord_webhook_ctrl,
             ),
             0, wx.EXPAND | wx.ALL, 6,
         )
         self._add_help_text(sizer, panel, _DISCORD_HELP)
 
         sizer.AddSpacer(8)
-        sizer.Add(
-            wx.StaticText(panel, label="Email"),
-            0, wx.LEFT | wx.RIGHT, 6,
-        )
         self.notify_email_ctrl = wx.TextCtrl(panel)
         self.notify_email_ctrl.SetName("Notification email address")
         sizer.Add(
             self._make_labeled_row(
-                panel, "&Email address:", self.notify_email_ctrl,
+                panel, "Notification &email address:",
+                self.notify_email_ctrl,
             ),
             0, wx.EXPAND | wx.ALL, 6,
         )

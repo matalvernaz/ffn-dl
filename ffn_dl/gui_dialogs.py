@@ -842,13 +842,23 @@ class OptionalFeaturesDialog(wx.Dialog):
         return self._MISSING_LABEL
 
     def _button_label(self, feature: str) -> str:
+        """Per-button label that includes the feature name.
+
+        Four identical "Reinstall..." buttons render as four
+        indistinguishable rows in a screen reader — users hear
+        "Reinstall... button" four times and have to remember which
+        row the focus is on. Baking the feature's display name into
+        the label means every button self-describes: "Reinstall EPUB
+        export", "Install cf-solve", etc. The accelerator ampersand
+        stays on the action verb so Alt+I / Alt+R still work.
+        """
+        info = self._feat.FEATURES[feature]
+        display = info.get("display") or feature
         if self._feat.install_unsupported_reason(feature):
-            return "Unsupported"
-        return (
-            "&Reinstall..."
-            if self._feat.is_installed(feature)
-            else "&Install..."
-        )
+            return f"Unsupported: {display}"
+        if self._feat.is_installed(feature):
+            return f"&Reinstall {display}..."
+        return f"&Install {display}..."
 
     def _refresh_feature_row(self, feature: str) -> None:
         self._status_labels[feature].SetLabel(self._status_text(feature))

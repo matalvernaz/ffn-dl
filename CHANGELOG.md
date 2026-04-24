@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.0.2 — 2026-04-24
+
+### Fix
+
+- **Screen-reader labels on Preferences fields and Optional
+  Features buttons.** ``_make_labeled_row`` was creating its
+  StaticText after the control in window Z-order, so MSAA walked
+  backward from the control and found the wrong StaticText as
+  the implicit label — which made the Notifications tab read
+  the section headers ("Pushover", "Discord", "Email") as the
+  first field's label and shifted every following field's label
+  by one. Helper now calls ``ctrl.MoveAfterInTabOrder(static)``
+  so the label sits in the right Z-order position, and
+  notification labels carry their service name as a prefix
+  ("Pushover API token", "Discord webhook URL", "Notification
+  email address") so each field stands alone even without the
+  section-header StaticText (which is now gone, since MSAA kept
+  eating the first label anyway).
+- **Optional Features install buttons now include the feature
+  name.** Four identical "Reinstall..." buttons read
+  indistinguishably under a screen reader; users couldn't tell
+  which row focus was on. Buttons are now "Install EPUB
+  export...", "Reinstall Audiobook synthesis (edge-tts)...",
+  etc. — self-describing per-row labels, with the accelerator
+  still on the action verb.
+
 ## 2.0.1 — 2026-04-24
 
 ### Docs
