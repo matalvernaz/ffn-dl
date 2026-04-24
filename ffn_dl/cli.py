@@ -1643,6 +1643,34 @@ def _handle_library_find(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
+def _handle_find_mirrors(args: argparse.Namespace) -> None:
+    """Report suspected cross-site mirror pairs."""
+    from .library import find_mirrors
+    from .library.index import LibraryIndex
+    from .library.mirrors import summarise
+
+    idx = LibraryIndex.load()
+    roots: list[Path] | None
+    if args.find_mirrors and args.find_mirrors != "ALL":
+        root = Path(args.find_mirrors)
+        if not root.is_dir():
+            print(f"Error: {root} is not a directory.", file=sys.stderr)
+            sys.exit(1)
+        roots = [root.resolve()]
+    else:
+        roots = None  # all indexed libraries
+
+    candidates = find_mirrors(
+        idx,
+        roots=roots,
+        use_first_chapter=not args.mirrors_metadata_only,
+    )
+    print(summarise(candidates))
+    # Exit 2 when candidates were found so shell callers can branch
+    # (mirrors the convention --scan-edits uses for drift detection).
+    sys.exit(2 if candidates else 0)
+
+
 def _handle_populate_search(args: argparse.Namespace) -> None:
     """Rebuild the full-text search index for a library root."""
     from .library import (
@@ -2398,6 +2426,36 @@ def _build_parser() -> argparse.ArgumentParser:
             "library by re-parsing each story's EPUB/HTML body. "
             "Bootstrap step before --library-search; subsequent "
             "downloads refresh affected entries automatically."
+        ),
+    )
+    parser.add_argument(
+        "--find-mirrors",
+        nargs="?",
+        const="ALL",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Scan every indexed story for possible cross-site "
+            "mirrors (same work posted to FFN and AO3, Literotica "
+            "and StoriesOnline, etc.). Requires at least two of "
+            "three signals to flag a pair — normalised title match, "
+            "normalised author match, and first-chapter word "
+            "overlap — so common titles alone don't cause false "
+            "positives. Pass DIR to scope to one library root; "
+            "omit it to sweep every indexed library. Read-only — "
+            "never deletes; the caller decides what to act on. "
+            "Exits 2 when candidates are found so shell callers "
+            "can branch."
+        ),
+    )
+    parser.add_argument(
+        "--mirrors-metadata-only",
+        action="store_true",
+        help=(
+            "With --find-mirrors: skip the first-chapter overlap "
+            "signal so the scan runs without touching story files. "
+            "Faster on huge libraries, at the cost of missing pairs "
+            "whose titles/authors drifted between mirrors."
         ),
     )
     parser.add_argument(
@@ -3583,6 +3641,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.populate_search:
         _handle_populate_search(args)
+        return
+    if args.find_mirrors is not None:
+        _handle_find_mirrors(args)
         return
     if args.cache_doctor:
         _handle_cache_doctor(args)

@@ -26,6 +26,7 @@ from .fulltext import (
     default_db_path as default_search_db_path,
     populate_from_library as populate_fulltext_from_library,
 )
+from .mirrors import MirrorCandidate, find_mirrors
 from .hashes import (
     ChapterHashUnavailable,
     compute_local_hashes,
@@ -51,6 +52,8 @@ __all__ = [
     "chapter_text",
     "default_search_db_path",
     "populate_fulltext_from_library",
+    "MirrorCandidate",
+    "find_mirrors",
     "backup",
     "ChapterHashUnavailable",
     "compute_local_hashes",

@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.23.28 — 2026-04-23
+
+### Feature
+
+- **Cross-site mirror detection.** ``--find-mirrors [DIR]`` reports
+  suspected mirror pairs — the same story posted to FFN and AO3,
+  Literotica and StoriesOnline, etc. — that currently sit in the
+  library as separate tracked works. Three signals contribute:
+  normalised title match (Jaccard ≥ 0.85), normalised author
+  equality, and first-chapter word overlap (Jaccard ≥ 0.6).
+  Flagging requires ≥2 signals so common titles alone don't cause
+  false positives. Read-only — never deletes; the caller decides
+  what to act on. Pass a directory to scope the sweep, or omit
+  it to compare across every indexed library. ``--mirrors-metadata-
+  only`` skips the file-parsing first-chapter pass for fast
+  metadata sweeps. Exits 2 when candidates are found so shell
+  callers can branch.
+
+### Tests
+
+- 14 new tests for mirror detection: normalisation (case, accent,
+  punctuation, apostrophe-collapse), Jaccard edge cases, exact
+  title+author across sites, same-site pairs not flagged, single-
+  signal pairs not flagged, punctuation drift still catches a
+  real mirror, metadata-only mode, drabble-length fallback to
+  metadata signals, summary rendering, empty libraries, and
+  stable ordering by signal strength. Full suite: 934 green.
+
 ## 1.23.27 — 2026-04-23
 
 ### Feature
