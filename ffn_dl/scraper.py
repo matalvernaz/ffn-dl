@@ -212,9 +212,9 @@ class BaseScraper:
         self.cf_solve = bool(cf_solve)
         # Per-host attempt tracking so we don't re-invoke Playwright
         # on every 403 for the same host inside one process — the
-        # solver is expensive. ``None`` entries mean "tried and
-        # failed", so we don't retry the slow path for a host that
-        # served a human-only captcha.
+        # solver is expensive. Values: True = solved successfully,
+        # False = attempted and failed/bailed. Either way, once an
+        # entry exists we don't retry the slow path in this process.
         self._cf_solve_host_state: dict[str, bool] = {}
         self._cf_solve_lock = threading.Lock()
         # If a cached cookie set exists for the solver's hosts, load

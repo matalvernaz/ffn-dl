@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.23.30 — 2026-04-23
+
+### Fix
+
+- **cf-solve comment accuracy.** The docstring on
+  ``_cf_solve_host_state`` described a three-state ``None``/True/
+  False layout that the code never used (the actual scheme is just
+  True/False). No behaviour change — the comment now matches the
+  code so future readers aren't chasing a ghost semantic.
+
 ## 1.23.29 — 2026-04-23
 
 ### Feature
