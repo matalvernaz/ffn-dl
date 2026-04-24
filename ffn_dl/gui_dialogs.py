@@ -717,3 +717,202 @@ class SeriesPartsDialog(wx.Dialog):
 
     def picked_url(self):
         return self._picked
+
+
+class OptionalFeaturesDialog(wx.Dialog):
+    """Install / reinstall the optional PyPI extras declared in
+    ``pyproject.toml``.
+
+    One row per feature with the current install status and an action
+    button. The action button spawns the installer on a worker thread
+    and streams pip output into the dialog's log pane so the user
+    sees progress instead of a frozen UI. MSAA-reliable state:
+    every row's status text is live (``wx.StaticText``) and gets
+    updated in-place so NVDA re-announces it when it changes.
+    """
+
+    _INSTALLED_LABEL = "Installed"
+    _MISSING_LABEL = "Not installed"
+
+    def __init__(self, parent):
+        super().__init__(
+            parent, title="Optional features",
+            size=(720, 520),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        # Imported lazily so headless test environments can import
+        # the dialogs module without pulling in the registry.
+        from . import optional_features as _feat
+        self._feat = _feat
+        self._buttons: dict[str, wx.Button] = {}
+        self._status_labels: dict[str, wx.StaticText] = {}
+        self._active_installs: set[str] = set()
+        self._build_ui()
+
+    def _build_ui(self):
+        panel = wx.Panel(self)
+        outer = wx.BoxSizer(wx.VERTICAL)
+
+        header = wx.StaticText(
+            panel,
+            label=(
+                "ffn-dl ships a minimal core install. Optional features "
+                "live behind separate extras; install the ones you need "
+                "below. Each install runs pip in the background — the "
+                "log at the bottom streams its output."
+            ),
+        )
+        header.Wrap(680)
+        outer.Add(header, 0, wx.ALL, 8)
+
+        grid = wx.FlexGridSizer(rows=0, cols=3, hgap=10, vgap=10)
+        grid.AddGrowableCol(0)
+
+        for feature in self._feat.available():
+            info = self._feat.FEATURES[feature]
+            title = wx.StaticText(
+                panel,
+                label=f"{info['display']} ({info['size_hint']})",
+            )
+            # Bold-ish via font weight so the dialog scan-reads with
+            # NVDA's "skim" (Ctrl+Down) — the display string is the
+            # first token SR picks up per row.
+            font = title.GetFont()
+            font.SetWeight(wx.FONTWEIGHT_BOLD)
+            title.SetFont(font)
+
+            status = wx.StaticText(panel, label=self._status_text(feature))
+            status.SetName(f"{info['display']} status")
+            self._status_labels[feature] = status
+
+            btn = wx.Button(panel, label=self._button_label(feature))
+            btn.SetName(f"Install {info['display']}")
+            btn.Bind(
+                wx.EVT_BUTTON,
+                lambda evt, f=feature: self._on_install(f),
+            )
+            self._buttons[feature] = btn
+
+            grid.Add(title, 1, wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+            grid.Add(status, 0, wx.ALIGN_CENTER_VERTICAL)
+            grid.Add(btn, 0, wx.ALIGN_CENTER_VERTICAL)
+
+            # Full description spans all three columns as a second
+            # row. Not using TextCtrl because we want the label to
+            # participate in MSAA tree traversal cleanly.
+            desc = wx.StaticText(panel, label=info["description"])
+            desc.Wrap(640)
+            grid.Add(desc, 1, wx.EXPAND | wx.LEFT | wx.BOTTOM, 2)
+            grid.Add((0, 0))  # spacer
+            grid.Add((0, 0))  # spacer
+
+        outer.Add(grid, 0, wx.EXPAND | wx.ALL, 8)
+
+        outer.Add(
+            wx.StaticText(panel, label="&Installer log:"),
+            0, wx.LEFT | wx.RIGHT | wx.TOP, 8,
+        )
+        self.log_ctrl = wx.TextCtrl(
+            panel,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
+        )
+        self.log_ctrl.SetName("Installer log")
+        outer.Add(self.log_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+
+        btn_row = wx.StdDialogButtonSizer()
+        close_btn = wx.Button(panel, wx.ID_CLOSE, "&Close")
+        close_btn.Bind(wx.EVT_BUTTON, lambda evt: self.EndModal(wx.ID_CLOSE))
+        btn_row.AddButton(close_btn)
+        btn_row.Realize()
+        outer.Add(btn_row, 0, wx.EXPAND | wx.ALL, 8)
+        self.SetEscapeId(wx.ID_CLOSE)
+
+        panel.SetSizer(outer)
+
+    # ── Per-feature state helpers ───────────────────────────────
+
+    def _status_text(self, feature: str) -> str:
+        reason = self._feat.install_unsupported_reason(feature)
+        if reason:
+            # Surface the refusal inline so the user understands why
+            # the button is disabled.
+            return "(unsupported on this build)"
+        if self._feat.is_installed(feature):
+            return self._INSTALLED_LABEL
+        return self._MISSING_LABEL
+
+    def _button_label(self, feature: str) -> str:
+        if self._feat.install_unsupported_reason(feature):
+            return "Unsupported"
+        return (
+            "&Reinstall..."
+            if self._feat.is_installed(feature)
+            else "&Install..."
+        )
+
+    def _refresh_feature_row(self, feature: str) -> None:
+        self._status_labels[feature].SetLabel(self._status_text(feature))
+        btn = self._buttons[feature]
+        btn.SetLabel(self._button_label(feature))
+        btn.Enable(
+            self._feat.install_unsupported_reason(feature) is None
+            and feature not in self._active_installs
+        )
+
+    # ── Install flow ────────────────────────────────────────────
+
+    def _on_install(self, feature: str) -> None:
+        info = self._feat.FEATURES[feature]
+        pip_hint = self._feat.pip_hint(feature)
+        confirm = (
+            f"Install '{info['display']}'?\n\n"
+            f"{info['description']}\n\n"
+            f"Size: {info['size_hint']}\n"
+            f"Equivalent command-line: {pip_hint}"
+        )
+        if wx.MessageBox(
+            confirm, "Confirm install", wx.YES_NO | wx.ICON_QUESTION,
+        ) != wx.YES:
+            return
+
+        import threading
+
+        self._active_installs.add(feature)
+        self._status_labels[feature].SetLabel("(installing...)")
+        self._buttons[feature].Enable(False)
+        self._append_log(f"\nInstalling {info['display']}...")
+
+        def run():
+            ok = self._feat.install(feature, log_callback=self._log_from_thread)
+            wx.CallAfter(self._after_install, feature, ok)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _log_from_thread(self, line: str) -> None:
+        wx.CallAfter(self._append_log, line)
+
+    def _append_log(self, line: str) -> None:
+        self.log_ctrl.AppendText(line.rstrip() + "\n")
+
+    def _after_install(self, feature: str, ok: bool) -> None:
+        self._active_installs.discard(feature)
+        self._refresh_feature_row(feature)
+        info = self._feat.FEATURES[feature]
+        if ok:
+            self._append_log(f"\nInstalled {info['display']} successfully.")
+            # Frozen builds need a restart for .pth-style packages
+            # (torch, playwright) to import cleanly on the running
+            # interpreter.
+            import sys as _sys
+            if getattr(_sys, "frozen", False):
+                wx.MessageBox(
+                    f"{info['display']} was installed successfully.\n\n"
+                    "Please restart ffn-dl so the new package is "
+                    "available in the running app.",
+                    "Restart required",
+                    wx.OK | wx.ICON_INFORMATION,
+                )
+        else:
+            self._append_log(
+                f"\nInstall of {info['display']} failed — see log above."
+            )

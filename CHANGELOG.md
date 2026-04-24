@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.23.32 — 2026-04-24
+
+### Feature
+
+- **In-app installer for optional extras.** Edit → Optional
+  Features... opens a dialog that lists every optional PyPI extra
+  declared in ``pyproject.toml`` (``epub``, ``audio``,
+  ``clipboard``, ``cf-solve``) with its current install status and
+  an Install / Reinstall button. This was already the story for
+  neural attribution backends; the other extras had no in-GUI
+  story, which is especially painful on the frozen Windows .exe
+  where users can't run ``pip`` themselves.
+
+  The installer reuses ``ffn_dl.neural_env`` — same pattern as the
+  attribution backends — so frozen builds pip-install into an
+  embedded-Python ``deps/`` folder that ``ffn_dl/__init__.py`` adds
+  to ``sys.path`` at startup. Pip-installed ffn-dl uses
+  ``sys.executable -m pip install`` directly.
+
+  ``cf-solve`` declares a post-install step (``python -m playwright
+  install chromium``) so the ~400 MB browser binary lands after
+  the pip package without the user having to know about it. The
+  dialog streams pip's stdout + stderr line-by-line into a log
+  pane so you can see progress, and prompts for a restart on a
+  frozen build when the newly-installed package needs a fresh
+  interpreter to import.
+
+### Tests
+
+- 15 new tests for ``optional_features``: registry shape (every
+  entry has the required fields, post_install is list-or-None),
+  pip-hint formatting, ``is_installed`` uses ``find_spec`` (not
+  actual import — avoids triggering the package's side effects
+  every time the dialog refreshes), unsupported-feature handling,
+  pip-path routing for non-frozen, post-install runs for
+  ``cf-solve`` and only ``cf-solve``, bailing on pip failure,
+  bailing on post-install failure, refusing unknown features,
+  refusing on unsupported platform, and frozen-build routing
+  through a faked ``neural_env``. Full suite: 970 green.
+
 ## 1.23.31 — 2026-04-24
 
 ### Fix

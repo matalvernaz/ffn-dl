@@ -73,6 +73,7 @@ from .download_queue import (
 )
 from .gui_dialogs import (
     MultiPickerDialog,
+    OptionalFeaturesDialog,
     SeriesPartsDialog,
     StoryPickerDialog,
     VoicePreviewDialog,
@@ -2080,6 +2081,11 @@ class MainFrame(wx.Frame):
             wx.ID_PREFERENCES, "&Preferences...\tCtrl+,",
         )
         self.Bind(wx.EVT_MENU, self._on_preferences_menu, prefs_item)
+        edit_menu.AppendSeparator()
+        features_item = edit_menu.Append(
+            wx.ID_ANY, "Optional &Features...",
+        )
+        self.Bind(wx.EVT_MENU, self._on_optional_features_menu, features_item)
         bar.Append(edit_menu, "&Edit")
 
         search_menu = wx.Menu()
@@ -2165,6 +2171,13 @@ class MainFrame(wx.Frame):
         from .preferences import PreferencesDialog
 
         dlg = PreferencesDialog(self, self.prefs, main_frame=self)
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+
+    def _on_optional_features_menu(self, event):
+        dlg = OptionalFeaturesDialog(self)
         try:
             dlg.ShowModal()
         finally:
