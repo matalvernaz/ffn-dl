@@ -2,9 +2,19 @@
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
+# Explicit package discovery — the CI build workflows drop
+# ffmpeg_bin/ and other transient folders alongside the source
+# tree before the pip install step, and setuptools' flat-layout
+# auto-discovery refuses to build when it sees more than one
+# top-level directory. Pinning the pattern to "ffn_dl*" makes
+# discovery deterministic regardless of what's in the workspace.
+[tool.setuptools.packages.find]
+include = ["ffn_dl*"]
+namespaces = false
+
 [project]
 name = "ffn-dl"
-version = "1.23.35"
+version = "2.0.0"
 description = "Cross-platform fanfiction + erotica downloader (FFN, AO3, FicWad, Royal Road, MediaMiner, Wattpad, Literotica, AFF, StoriesOnline, Nifty, SexStories, MCStories, Lushstories, Fictionmania, TGStorytime, Chyoa, Dark Wanderer, GreatFeet)"
 requires-python = ">=3.9"
 dependencies = [

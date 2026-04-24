@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3 — 2026-04-24
+## 2.0.0 — 2026-04-24
 
 A milestone release folding in a month of library-management,
 anti-bot, and cross-platform work. Highlights:
