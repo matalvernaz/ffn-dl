@@ -160,22 +160,39 @@ class FullTextIndex:
             )
             """,
         )
-        cur.execute(
-            """
-            CREATE VIRTUAL TABLE IF NOT EXISTS chapters
-            USING fts5(
-                root UNINDEXED,
-                url UNINDEXED,
-                relpath UNINDEXED,
-                title,
-                author,
-                chapter_number UNINDEXED,
-                chapter_title,
-                content,
-                tokenize = 'unicode61 remove_diacritics 2'
+        try:
+            cur.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS chapters
+                USING fts5(
+                    root UNINDEXED,
+                    url UNINDEXED,
+                    relpath UNINDEXED,
+                    title,
+                    author,
+                    chapter_number UNINDEXED,
+                    chapter_title,
+                    content,
+                    tokenize = 'unicode61 remove_diacritics 2'
+                )
+                """,
             )
-            """,
-        )
+        except sqlite3.OperationalError as exc:
+            # FTS5 is a compile-time option. It's enabled in every
+            # recent CPython build I'm aware of, but a minimal or
+            # distro-stripped SQLite can land without it. Trade the
+            # opaque "no such module: fts5" for something the user
+            # can act on.
+            if "fts5" in str(exc).lower() or "no such module" in str(exc).lower():
+                raise RuntimeError(
+                    "Full-text search needs SQLite built with the "
+                    "FTS5 extension. Your Python's sqlite3 module "
+                    "wasn't, so --populate-search / --library-search "
+                    "can't work on this install. Install a CPython "
+                    "built with FTS5 (every python.org build and "
+                    "most distro packages qualify) and re-run."
+                ) from exc
+            raise
         cur.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),

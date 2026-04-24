@@ -254,6 +254,7 @@ def inject_into_session(session, result: SolveResult) -> None:
                 value=value,
                 domain=domain,
                 path=c.get("path") or "/",
+                secure=bool(c.get("secure", False)),
             )
         except Exception:  # pragma: no cover — curl_cffi internal
             logger.debug(

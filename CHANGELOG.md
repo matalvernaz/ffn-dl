@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.23.31 — 2026-04-24
+
+### Fix
+
+- **Mirror detection: non-ASCII titles were silently excluded.**
+  The title/author normaliser used an ASCII-only character class,
+  so CJK and Cyrillic titles collapsed to empty strings. The
+  empty-title guard then dropped every pair before comparison —
+  making ``--find-mirrors`` a no-op on Japanese, Russian, Chinese,
+  or any non-Latin fanfic library. Normalisation now keeps all
+  Unicode letters and digits; a Japanese/Japanese mirror pair with
+  matching title + author flags the way a Latin pair would.
+- **cf-solve: preserve the cookie ``Secure`` flag** when injecting
+  Playwright-solved cookies into the curl_cffi session. Not a real
+  bug (we only hit HTTPS URLs) but the jar state now matches what
+  the browser actually received.
+- **Clearer error when SQLite lacks FTS5.** Stripped-down SQLite
+  builds (some minimal distro packages) omit FTS5. Previously
+  ``--populate-search`` raised an opaque ``no such module: fts5``;
+  now it raises a RuntimeError that names the cause and points at
+  the fix (install a CPython with FTS5 enabled).
+
+### Tests
+
+- +2 tests: Unicode title normalisation (CJK + Cyrillic survive),
+  and an end-to-end ``find_mirrors`` pair with a CJK title that
+  would have been missed before. Full suite: 955 green.
+
 ## 1.23.30 — 2026-04-23
 
 ### Fix

@@ -74,7 +74,14 @@ _DROP_RE = re.compile(r"['‘’“”]")
 quotes shouldn't produce a word boundary — ``Renée's`` matching
 ``Renees`` is the whole point of normalisation."""
 
-_NORMALISE_RE = re.compile(r"[^a-z0-9\s]+")
+_NORMALISE_RE = re.compile(r"[^\w\s]+", re.UNICODE)
+"""Strip punctuation but *keep* Unicode letters and digits. An
+earlier draft restricted the character class to ASCII, which
+silently erased CJK, Cyrillic, and other non-Latin titles: both
+sides of a Japanese mirror pair normalised to empty strings, the
+empty-title guard dropped them, and the feature quietly missed
+every non-Latin fanfic in the library."""
+
 _WS_RE = re.compile(r"\s+")
 
 

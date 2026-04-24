@@ -31,6 +31,20 @@ def test_normalise_title_folds_case_accents_punctuation():
     assert normalise_title(None) == ""
 
 
+def test_normalise_title_preserves_non_ascii_letters():
+    """CJK and Cyrillic titles must survive normalisation.
+    Regression: an earlier draft used an ASCII-only character class
+    that silently erased them, making the empty-title guard drop
+    every Japanese or Russian fic pair before comparison."""
+    assert normalise_title("失われた物語") == "失われた物語"
+    # Cyrillic "А" (not ASCII "A") stays a letter
+    result = normalise_title("А Tale")
+    assert "tale" in result
+    # Single-token CJK title still yields a non-empty token set
+    from ffn_dl.library.mirrors import _token_set
+    assert _token_set(normalise_title("失われた物語"))
+
+
 def test_normalise_author_matches_title_rules():
     # J.K. splits on the period (keeps the "initials" convention
     # recognisable); apostrophe collapse is inherited from titles.
@@ -367,6 +381,36 @@ def test_empty_library_returns_no_candidates(tmp_path: Path):
     scan(lib, index_path=_index_path(tmp_path))
     idx = LibraryIndex.load(_index_path(tmp_path))
     assert find_mirrors(idx, roots=[lib]) == []
+
+
+def test_non_ascii_title_pair_is_still_detectable(tmp_path: Path):
+    """A cross-site pair with a CJK title must be detectable. Before
+    the Unicode-aware normalisation fix, both titles collapsed to
+    empty strings and the empty-title guard dropped the pair before
+    comparison — silently excluding every non-Latin fanfic mirror
+    from the detector."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _drabble_epub(
+        lib,
+        title="失われた物語",
+        author="Test Sensei",
+        url="https://www.fanfiction.net/s/5000/1/",
+        story_id=5000,
+    )
+    _drabble_epub(
+        lib,
+        title="失われた物語",
+        author="Test Sensei",
+        url="https://archiveofourown.org/works/5100",
+        story_id=5100,
+    )
+    scan(lib, index_path=_index_path(tmp_path))
+
+    idx = LibraryIndex.load(_index_path(tmp_path))
+    candidates = find_mirrors(idx, roots=[lib])
+    assert len(candidates) == 1
+    assert {"title", "author"}.issubset(candidates[0].signals)
 
 
 def test_ordering_is_stable_and_by_signal_strength(tmp_path: Path):
