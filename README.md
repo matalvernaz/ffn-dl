@@ -126,6 +126,20 @@ them in a library index and layers several tools on top.
 # metadata, bootstraps the library index.
 ffn-dl --scan-library ~/Fanfic
 
+# During scan: auto-mark WIPs (status != Complete) whose file
+# hasn't been touched in DAYS days as abandoned, so subsequent
+# --update-library runs skip them. Reads the
+# library_abandoned_after_days user pref by default; pass
+# --abandoned-after-days N to override, or 0 to disable.
+ffn-dl --scan-library ~/Fanfic --abandoned-after-days 730
+
+# Review the abandoned list (scope with --library-dir)
+ffn-dl --list-abandoned
+
+# Revive one URL (the author posted again!) or all at once
+ffn-dl --revive-abandoned https://www.fanfiction.net/s/12345
+ffn-dl --revive-abandoned          # no URL = revive every marked story
+
 # Search by metadata (title / author / fandom / URL substring)
 ffn-dl --library-find "time travel"
 
@@ -211,7 +225,7 @@ proposed moves first.
 
 ## Library-update performance knobs
 
-Large libraries (thousands of fics) benefit from two gates on
+Large libraries (thousands of fics) benefit from three gates on
 `--update-library`:
 
 - **`--recheck-interval SECONDS`** — skip stories whose index
@@ -223,8 +237,22 @@ Large libraries (thousands of fics) benefit from two gates on
   than `--skip-complete`: a fic completed yesterday still gets
   probed (the author may add an epilogue), but one untouched for a
   year stops costing an HTTP probe each run.
+- **Abandoned WIPs get skipped automatically.** Any story carrying
+  an `abandoned_at` timestamp in the index is dropped from the
+  probe queue — the mark is set by `--scan-library` when
+  `library_abandoned_after_days` is configured (or
+  `--abandoned-after-days N` is passed explicitly) and the story's
+  file has been untouched that long without being Complete. The
+  mark is sticky until revived with `--revive-abandoned URL` (or
+  all at once via the same flag with no argument). The Library
+  dialog in the GUI exposes both the threshold setting and a
+  "Manage abandoned..." review list so screen-reader users can
+  walk the list and revive without touching the CLI.
 
-Both are overridden by `--force-recheck`.
+`--recheck-interval` and `--skip-stale-complete` are overridden by
+`--force-recheck`. Abandoned entries stay skipped — once you've
+declared a WIP dead, a forced recheck doesn't automatically bring
+it back; use `--revive-abandoned` to undo the mark.
 
 ## Audiobook notes
 

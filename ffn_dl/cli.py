@@ -1415,6 +1415,7 @@ def _handle_scan_library(args: argparse.Namespace) -> None:
         root,
         recursive=True,
         clear_existing=args.clear_library,
+        abandoned_after_days=getattr(args, "abandoned_after_days", None),
     )
     print(
         f"Scanned {result.total_files} file(s): "
@@ -1423,6 +1424,12 @@ def _handle_scan_library(args: argparse.Namespace) -> None:
         f"--review-library to resolve), "
         f"{result.errors} error(s)."
     )
+    if result.newly_abandoned:
+        print(
+            f"Marked {result.newly_abandoned} WIP(s) as abandoned "
+            "(unchanged beyond the configured threshold). "
+            "--list-abandoned to review, --revive-abandoned URL to undo."
+        )
     if result.duplicates:
         print(
             f"{result.duplicates} file(s) share a source URL with another "
@@ -1683,6 +1690,13 @@ readable without having to reach for the source. Users who happen
 to have a directory literally named ``ALL`` in the current working
 folder can disambiguate by passing ``./ALL``."""
 
+_REVIVE_ABANDONED_ALL_SENTINEL = "ALL"
+"""Argparse ``const=`` value for ``--revive-abandoned`` when invoked
+without a specific URL. Chosen for the same readability rationale
+as ``_FIND_MIRRORS_ALL_SENTINEL``. A URL beginning with ``ALL`` is
+vanishingly unlikely, so the sentinel won't collide with a real
+story identifier."""
+
 
 def _handle_find_mirrors(args: argparse.Namespace) -> None:
     """Report suspected cross-site mirror pairs."""
@@ -1819,6 +1833,78 @@ def _handle_cache_doctor(args: argparse.Namespace) -> None:
         print(
             "\nRun again with --prune to delete the orphan entries.",
         )
+    sys.exit(0)
+
+
+def _handle_revive_abandoned(args: argparse.Namespace) -> None:
+    """Clear the abandoned flag on one or every marked story."""
+    from .library import revive_abandoned
+    from .library.index import LibraryIndex
+
+    idx = LibraryIndex.load()
+    roots: list[Path] | None
+    if args.library_dir:
+        r = Path(args.library_dir)
+        if not r.is_dir():
+            print(f"Error: {r} is not a directory.", file=sys.stderr)
+            sys.exit(1)
+        roots = [r.resolve()]
+    else:
+        roots = None
+
+    value = args.revive_abandoned
+    urls: list[str] | None
+    if value == _REVIVE_ABANDONED_ALL_SENTINEL:
+        urls = None
+    else:
+        urls = [value]
+
+    report = revive_abandoned(idx, urls=urls, roots=roots)
+    if report.revived:
+        idx.save()
+    print(report.summary())
+    for url, rel in report.revived:
+        print(f"  revived: {rel or '(no path)'}  {url}")
+    for url in report.missing:
+        print(f"  no abandoned entry for: {url}")
+    sys.exit(0 if report.revived else 1)
+
+
+def _handle_list_abandoned(args: argparse.Namespace) -> None:
+    """Print every currently-abandoned story across the library."""
+    from .library import list_abandoned
+    from .library.index import LibraryIndex
+
+    idx = LibraryIndex.load()
+    roots: list[Path] | None
+    if args.library_dir:
+        r = Path(args.library_dir)
+        if not r.is_dir():
+            print(f"Error: {r} is not a directory.", file=sys.stderr)
+            sys.exit(1)
+        roots = [r.resolve()]
+    else:
+        roots = None
+
+    rows = list_abandoned(idx, roots=roots)
+    if not rows:
+        print("No abandoned stories in the indexed libraries.")
+        sys.exit(0)
+
+    last_root: Path | None = None
+    for row in rows:
+        if row.root != last_root:
+            if last_root is not None:
+                print()
+            print(f"Library: {row.root}")
+            last_root = row.root
+        marked = row.abandoned_at[:10] if row.abandoned_at else "?"
+        title = row.title or "(no title)"
+        author = row.author or "(no author)"
+        print(f"  {title} — {author}  [marked {marked}]")
+        print(f"    {row.relpath or '(unknown path)'}")
+        print(f"    {row.url}")
+    print(f"\n{len(rows)} abandoned stor{'y' if len(rows) == 1 else 'ies'}.")
     sys.exit(0)
 
 
@@ -2367,6 +2453,43 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "With --scan-library: drop this library's existing index entries "
             "before scanning, so orphan files (deleted off disk) are removed."
+        ),
+    )
+    parser.add_argument(
+        "--abandoned-after-days",
+        type=int,
+        default=None,
+        metavar="DAYS",
+        help=(
+            "With --scan-library: auto-mark WIPs (status != Complete) "
+            "whose file mtime is older than DAYS days as abandoned, "
+            "so subsequent --update-library runs skip them. Overrides "
+            "the KEY_LIBRARY_ABANDONED_AFTER_DAYS user pref for this "
+            "run. 0 disables the sweep regardless of pref. Unset: "
+            "use the pref (default: 0 / off)."
+        ),
+    )
+    parser.add_argument(
+        "--revive-abandoned",
+        nargs="?",
+        const=_REVIVE_ABANDONED_ALL_SENTINEL,
+        default=None,
+        metavar="URL",
+        help=(
+            "Clear the abandoned flag on one URL, or every abandoned "
+            "story across the library when invoked with no argument. "
+            "Use --library-dir to scope to a single library root. "
+            "Revived stories re-enter the --update-library probe "
+            "queue on the next run."
+        ),
+    )
+    parser.add_argument(
+        "--list-abandoned",
+        action="store_true",
+        help=(
+            "Print every story currently marked abandoned, newest "
+            "mark first. Use --library-dir to scope to a single "
+            "library root; otherwise every indexed library is listed."
         ),
     )
     parser.add_argument(
@@ -3700,6 +3823,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.find_mirrors is not None:
         _handle_find_mirrors(args)
+        return
+    if args.revive_abandoned is not None:
+        _handle_revive_abandoned(args)
+        return
+    if args.list_abandoned:
+        _handle_list_abandoned(args)
         return
     if args.cache_doctor:
         _handle_cache_doctor(args)

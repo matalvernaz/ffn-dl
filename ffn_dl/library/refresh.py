@@ -104,6 +104,7 @@ def build_refresh_queue(
     skip_complete: bool = False,
     recheck_interval_s: int = 0,
     skip_stale_complete_days: int = 0,
+    skip_abandoned: bool = True,
     progress: Callable[[str], None] = print,
     now: Callable[[], float] = time.time,
 ) -> tuple[list[dict], list[str]]:
@@ -133,6 +134,12 @@ def build_refresh_queue(
     epilogue tomorrow. ``0`` disables the gate; a pending-resume
     entry (``remote_chapter_count > local``) bypasses it because
     those still have a download to finish locally.
+
+    ``skip_abandoned`` (default on) drops any entry carrying an
+    ``abandoned_at`` timestamp — set by ``--mark-abandoned-after``
+    or the programmatic :func:`mark_abandoned` helper — from the
+    queue. Intent: once the user has declared a WIP dead, stop
+    spending HTTP probes on it until they revive it explicitly.
     """
     root = Path(root).expanduser().resolve()
     idx = LibraryIndex.load(index_path)
@@ -157,6 +164,20 @@ def build_refresh_queue(
             progress(f"  [skip] {display_rel}: file missing on disk")
             skipped.append(display_rel)
             continue
+
+        if skip_abandoned:
+            abandoned_at = entry.get("abandoned_at")
+            if abandoned_at:
+                # The date prefix (first 10 chars of the ISO string)
+                # is what a reader cares about — surfaces "marked Jan
+                # 2025" rather than a full second-resolution stamp.
+                date_prefix = str(abandoned_at)[:10]
+                progress(
+                    f"  [skip] {display_rel}: marked abandoned "
+                    f"({date_prefix}; --revive-abandoned to undo)"
+                )
+                skipped.append(display_rel)
+                continue
 
         cached = _cached_chapter_count(path, entry)
         if cached is not None:

@@ -36,6 +36,13 @@ KEY_LIBRARY_MISC_FOLDER = "library_misc_folder"
 # from the misc bucket because "no fandom on an original-fiction
 # site" means "the work IS original", not "we couldn't classify".
 KEY_LIBRARY_ORIGINAL_FOLDER = "library_original_folder"
+# Auto-mark WIP stories (status != Complete) as abandoned when
+# their file mtime is older than this many days. Non-positive
+# disables the auto-mark entirely. Marked stories are skipped by
+# --update-library until the user revives them explicitly. Off
+# (0) by default so an upgrade doesn't silently declare a pile
+# of WIPs dead on the user's first scan.
+KEY_LIBRARY_ABANDONED_AFTER_DAYS = "library_abandoned_after_days"
 KEY_LIBRARY_AMBIGUOUS_PROMPT = "library_ambiguous_prompt"
 KEY_LIBRARY_REORGANIZE_CONFIRM_EACH = "library_reorganize_confirm_each"
 # Has the GUI already offered the user the one-time "your scanned

@@ -7,6 +7,14 @@ metadata survived.
 """
 
 from . import backup
+from .abandoned import (
+    AbandonedListing,
+    MarkReport,
+    ReviveReport,
+    list_abandoned,
+    mark_abandoned,
+    revive_abandoned,
+)
 from .candidate import Confidence, StoryCandidate
 from .doctor import HealReport, IntegrityReport, check_integrity, heal
 from .edits import (
@@ -54,6 +62,12 @@ __all__ = [
     "populate_fulltext_from_library",
     "MirrorCandidate",
     "find_mirrors",
+    "AbandonedListing",
+    "MarkReport",
+    "ReviveReport",
+    "mark_abandoned",
+    "revive_abandoned",
+    "list_abandoned",
     "backup",
     "ChapterHashUnavailable",
     "compute_local_hashes",

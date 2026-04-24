@@ -69,6 +69,21 @@ anti-bot, and cross-platform work. Highlights:
   HTTP probe each run. ``--force-recheck`` overrides; pending
   resumes (``remote_chapter_count > local``) bypass.
 
+- **Abandoned-WIP detection.** WIPs that haven't seen a new
+  chapter in ages were costing a probe per update run forever.
+  ``--scan-library`` now auto-marks WIP stories (status !=
+  Complete) whose file mtime is older than
+  ``library_abandoned_after_days`` days; marked stories are
+  skipped by every subsequent ``--update-library`` run until
+  revived. The threshold is configurable from the Library
+  dialog in the GUI; pref default is 0 (off) so upgraders don't
+  wake up to a pile of silently-dead fics. Management commands:
+  ``--list-abandoned`` to review, ``--revive-abandoned URL`` to
+  clear one, ``--revive-abandoned`` with no argument to clear
+  every abandoned entry in scope. The GUI's Library dialog gets
+  a **Manage Abandoned...** button that opens a list + revive
+  surface.
+
 ### Changes
 
 - **Auto-sort cleans category strings before picking a folder.**
@@ -123,11 +138,12 @@ anti-bot, and cross-platform work. Highlights:
 
 ### Tests
 
-- +114 tests across the session: FTS5 search primitives, mirror-
+- +129 tests across the session: FTS5 search primitives, mirror-
   detection signals and Unicode fallbacks, cf-solve round-trip +
   concurrency + permissions, optional-features installer, auto-
   sort category parsing, stale-complete gate, silent-edit
-  detection. Full suite: 981 green.
+  detection, abandoned-WIP mark/revive/list + scan-time
+  auto-sweep + refresh-queue skip. Full suite: 996 green.
 
 ## 1.23.25 — 2026-04-23
 

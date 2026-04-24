@@ -137,6 +137,45 @@ class LibraryFrame(wx.Frame):
         misc_row.Add(self.misc_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
         sizer.Add(misc_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
+        # ── Abandoned-WIP threshold ────────────────────────
+        abandoned_row = wx.BoxSizer(wx.HORIZONTAL)
+        abandoned_row.Add(
+            wx.StaticText(
+                panel,
+                label="Mark WIPs as &abandoned after (days; 0 = off):",
+            ),
+            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6,
+        )
+        # SpinCtrl rather than free-form TextCtrl because the value
+        # is always an integer day count; 9999 is a generous upper
+        # bound (~27 years — past the point where anyone would
+        # meaningfully want to keep probing) and keeps the widget
+        # from scrolling into nonsense territory.
+        self.abandoned_after_ctrl = wx.SpinCtrl(
+            panel, min=0, max=9999, initial=0,
+        )
+        self.abandoned_after_ctrl.SetName("Abandoned-after threshold in days")
+        self.abandoned_after_ctrl.SetToolTip(
+            "When --scan-library (or Scan Library) runs, WIP stories "
+            "whose file mtime is older than this many days are marked "
+            "abandoned and skipped in subsequent update checks. 0 "
+            "disables the sweep. Matt's library used ~730 (2 years) "
+            "as a reasonable starting point during development."
+        )
+        abandoned_row.Add(self.abandoned_after_ctrl, 0, wx.RIGHT, 6)
+
+        self.manage_abandoned_btn = wx.Button(
+            panel, label="Manage A&bandoned...",
+        )
+        self.manage_abandoned_btn.Bind(
+            wx.EVT_BUTTON, self._on_manage_abandoned,
+        )
+        abandoned_row.Add(
+            self.manage_abandoned_btn, 0,
+            wx.ALIGN_CENTER_VERTICAL,
+        )
+        sizer.Add(abandoned_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
         # ── Status pane ─────────────────────────────────
         sizer.Add(
             wx.StaticText(panel, label="S&tatus:"),
@@ -225,6 +264,11 @@ class LibraryFrame(wx.Frame):
         self.misc_ctrl.SetValue(
             self._prefs.get(_prefs.KEY_LIBRARY_MISC_FOLDER) or DEFAULT_MISC_FOLDER
         )
+        try:
+            raw = self._prefs.get(_prefs.KEY_LIBRARY_ABANDONED_AFTER_DAYS) or "0"
+            self.abandoned_after_ctrl.SetValue(max(0, int(raw)))
+        except (TypeError, ValueError):
+            self.abandoned_after_ctrl.SetValue(0)
 
     def _save_prefs(self) -> None:
         self._prefs.set(_prefs.KEY_LIBRARY_PATH, self.path_ctrl.GetValue())
@@ -233,6 +277,10 @@ class LibraryFrame(wx.Frame):
         )
         self._prefs.set(
             _prefs.KEY_LIBRARY_MISC_FOLDER, self.misc_ctrl.GetValue()
+        )
+        self._prefs.set(
+            _prefs.KEY_LIBRARY_ABANDONED_AFTER_DAYS,
+            str(int(self.abandoned_after_ctrl.GetValue())),
         )
 
     def _current_path(self) -> Path | None:
@@ -353,6 +401,26 @@ class LibraryFrame(wx.Frame):
             return
         self._append_status(f"Scan failed: {exc}")
         self._set_busy(False)
+
+    def _on_manage_abandoned(self, event: wx.Event) -> None:
+        """Open the abandoned-stories review dialog scoped to the
+        library path the user has configured. Falls back to "all
+        indexed libraries" if the field is empty, so the dialog is
+        still usable as a cross-library audit view."""
+        raw = (self.path_ctrl.GetValue() or "").strip()
+        root = Path(raw).expanduser() if raw else None
+        if root is not None and not root.is_dir():
+            wx.MessageBox(
+                f"{root} is not a directory — showing every indexed "
+                "library instead.",
+                "Library", wx.OK | wx.ICON_INFORMATION, self,
+            )
+            root = None
+        dlg = AbandonedStoriesDialog(self, root)
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
 
     def _on_check_updates(
         self,
@@ -936,5 +1004,143 @@ class ReviewDialog(wx.Dialog):
             self.list_ctrl.Focus(i + 1)
         self.url_ctrl.SetValue("")
         self.status_ctrl.SetLabel("")
+
+
+class AbandonedStoriesDialog(wx.Dialog):
+    """Review, revive, or bulk-clear abandoned-WIP markings.
+
+    Every row shows ``title — author  [marked YYYY-MM-DD]`` in a
+    ``wx.ListCtrl`` so NVDA speaks the story identity plus the
+    mark date as one unit. Revive operates on the selected row
+    (single or multi-select); Revive All drops every flag in the
+    current scope. Scope is the library root passed in by
+    ``LibraryFrame._on_manage_abandoned``; ``None`` scopes to every
+    indexed library (cross-library audit).
+    """
+
+    def __init__(self, parent: wx.Window, root: Path | None):
+        super().__init__(
+            parent, title="Abandoned stories",
+            size=(720, 440),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._root = root
+        self._rows: list = []
+        self._build_ui()
+        self._refresh_rows()
+
+    def _build_ui(self) -> None:
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        scope_text = (
+            f"Library: {self._root}"
+            if self._root is not None
+            else "Scope: every indexed library"
+        )
+        sizer.Add(
+            wx.StaticText(panel, label=scope_text),
+            0, wx.ALL, 8,
+        )
+
+        self.list_ctrl = wx.ListCtrl(
+            panel,
+            style=wx.LC_REPORT | wx.BORDER_SUNKEN,
+        )
+        self.list_ctrl.SetName("Abandoned stories")
+        for i, (label, width) in enumerate([
+            ("Title", 260), ("Author", 150),
+            ("Marked", 110), ("Path", 400),
+        ]):
+            self.list_ctrl.InsertColumn(i, label, width=width)
+        sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.revive_btn = wx.Button(panel, label="&Revive selected")
+        self.revive_btn.Bind(wx.EVT_BUTTON, self._on_revive_selected)
+        btn_row.Add(self.revive_btn, 0, wx.RIGHT, 6)
+
+        self.revive_all_btn = wx.Button(panel, label="Revive &all")
+        self.revive_all_btn.Bind(wx.EVT_BUTTON, self._on_revive_all)
+        btn_row.Add(self.revive_all_btn, 0, wx.RIGHT, 6)
+
+        btn_row.AddStretchSpacer(1)
+        close_btn = wx.Button(panel, id=wx.ID_CLOSE, label="&Close")
+        close_btn.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
+        btn_row.Add(close_btn, 0)
+        sizer.Add(btn_row, 0, wx.EXPAND | wx.ALL, 8)
+
+        self.SetEscapeId(wx.ID_CLOSE)
+        panel.SetSizer(sizer)
+
+    def _refresh_rows(self) -> None:
+        from .abandoned import list_abandoned
+
+        idx = LibraryIndex.load()
+        roots_arg = [self._root] if self._root is not None else None
+        self._rows = list_abandoned(idx, roots=roots_arg)
+        self.list_ctrl.DeleteAllItems()
+        for i, row in enumerate(self._rows):
+            marked = row.abandoned_at[:10] if row.abandoned_at else ""
+            self.list_ctrl.InsertItem(i, row.title or "(no title)")
+            self.list_ctrl.SetItem(i, 1, row.author or "(no author)")
+            self.list_ctrl.SetItem(i, 2, marked)
+            self.list_ctrl.SetItem(i, 3, row.relpath or "")
+        self._update_button_state()
+
+    def _update_button_state(self) -> None:
+        has_rows = bool(self._rows)
+        self.revive_btn.Enable(has_rows)
+        self.revive_all_btn.Enable(has_rows)
+
+    def _selected_urls(self) -> list[str]:
+        urls: list[str] = []
+        i = -1
+        while True:
+            i = self.list_ctrl.GetNextSelected(i)
+            if i < 0:
+                break
+            if 0 <= i < len(self._rows):
+                urls.append(self._rows[i].url)
+        return urls
+
+    def _on_revive_selected(self, event: wx.Event) -> None:
+        urls = self._selected_urls()
+        if not urls:
+            wx.MessageBox(
+                "Select one or more rows first.",
+                "Abandoned stories", wx.OK | wx.ICON_INFORMATION, self,
+            )
+            return
+        self._do_revive(urls)
+
+    def _on_revive_all(self, event: wx.Event) -> None:
+        if not self._rows:
+            return
+        if wx.MessageBox(
+            f"Revive all {len(self._rows)} abandoned stor"
+            f"{'y' if len(self._rows) == 1 else 'ies'} in the current "
+            "scope? They will be re-included in the next update check.",
+            "Confirm revive all",
+            wx.YES_NO | wx.ICON_QUESTION, self,
+        ) != wx.YES:
+            return
+        self._do_revive(None)
+
+    def _do_revive(self, urls: list[str] | None) -> None:
+        from .abandoned import revive_abandoned
+
+        idx = LibraryIndex.load()
+        roots_arg = [self._root] if self._root is not None else None
+        report = revive_abandoned(idx, urls=urls, roots=roots_arg)
+        if report.revived:
+            idx.save()
+        self._refresh_rows()
+        wx.MessageBox(
+            report.summary(),
+            "Abandoned stories",
+            wx.OK | wx.ICON_INFORMATION,
+            self,
+        )
 
 
