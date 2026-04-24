@@ -202,13 +202,17 @@ def test_default_refresh_args_carries_refetch_all():
 # ── Auto-sort ────────────────────────────────────────────────────
 
 
-def _story(fandom: str | None = "Harry Potter") -> Story:
+def _story(
+    fandom: str | None = "Harry Potter",
+    *,
+    url: str = "https://www.fanfiction.net/s/1/1/",
+) -> Story:
     s = Story(
         id=1,
         title="Demo",
         author="A",
         summary="",
-        url="https://www.fanfiction.net/s/1/1/",
+        url=url,
     )
     if fandom is not None:
         s.metadata["category"] = fandom
@@ -223,6 +227,7 @@ def _autosort_args(**overrides) -> Namespace:
         _library_autosort=True,
         _library_template="{fandom}/{title} - {author}.{ext}",
         _library_misc="Misc",
+        _library_original="Original Works",
     )
     for k, v in overrides.items():
         setattr(args, k, v)
@@ -304,6 +309,56 @@ def test_library_subdir_combines_breadcrumb_and_ao3_join():
     subdir = _library_subdir_for(
         _story("Books > Harry Potter / Naruto"), _autosort_args(),
     )
+    assert subdir == Path("Misc")
+
+
+def test_library_subdir_royal_road_goes_to_original_works():
+    """Royal Road is entirely original fiction — "no fandom" there
+    is a feature, not missing metadata. The auto-sorter routes RR
+    downloads to the Original Works folder rather than Misc so the
+    user's library surfaces original novels as their own subtree."""
+    rr_story = _story(
+        fandom=None,
+        url="https://www.royalroad.com/fiction/26727",
+    )
+    subdir = _library_subdir_for(rr_story, _autosort_args())
+    assert subdir == Path("Original Works")
+
+
+def test_library_subdir_original_folder_honours_override():
+    """Matt can rename the bucket via the pref; the default of
+    'Original Works' is what the CLI uses when the pref is blank."""
+    rr_story = _story(
+        fandom=None,
+        url="https://www.royalroad.com/fiction/26727",
+    )
+    args = _autosort_args(_library_original="Web Novels")
+    subdir = _library_subdir_for(rr_story, args)
+    assert subdir == Path("Web Novels")
+
+
+def test_library_subdir_royal_road_respects_explicit_category():
+    """If a user manually categorises an RR download (pref or
+    future metadata injection), honour that instead of forcing the
+    original-works bucket. Keeps the one-off override path open."""
+    rr_story = _story(
+        fandom="Some Franchise",
+        url="https://www.royalroad.com/fiction/26727",
+    )
+    subdir = _library_subdir_for(rr_story, _autosort_args())
+    assert subdir == Path("Some Franchise")
+
+
+def test_library_subdir_non_rr_fanfic_without_fandom_still_misc():
+    """Non-original sites with missing metadata stay in misc — the
+    original-works routing is strictly for sites whose catalogue is
+    entirely original fiction. A FFN story that somehow lost its
+    category belongs in misc for manual review, not Original Works."""
+    ffn_story = _story(
+        fandom=None,
+        url="https://www.fanfiction.net/s/1/1/",
+    )
+    subdir = _library_subdir_for(ffn_story, _autosort_args())
     assert subdir == Path("Misc")
 
 

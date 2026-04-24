@@ -32,6 +32,10 @@ KEY_LIBRARY_PATH = "library_path"
 KEY_LIBRARY_PATH_TEMPLATE = "library_path_template"
 KEY_LIBRARY_INDEX_PATH = "library_index_path"  # blank → program config dir
 KEY_LIBRARY_MISC_FOLDER = "library_misc_folder"
+# Folder name for original-fiction downloads (Royal Road). Distinct
+# from the misc bucket because "no fandom on an original-fiction
+# site" means "the work IS original", not "we couldn't classify".
+KEY_LIBRARY_ORIGINAL_FOLDER = "library_original_folder"
 KEY_LIBRARY_AMBIGUOUS_PROMPT = "library_ambiguous_prompt"
 KEY_LIBRARY_REORGANIZE_CONFIRM_EACH = "library_reorganize_confirm_each"
 # Has the GUI already offered the user the one-time "your scanned

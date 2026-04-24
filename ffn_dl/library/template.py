@@ -28,6 +28,21 @@ from ..updater import FileMetadata
 
 DEFAULT_TEMPLATE = "{fandom}/{title} - {author}.{ext}"
 DEFAULT_MISC_FOLDER = "Misc"
+DEFAULT_ORIGINAL_FOLDER = "Original Works"
+"""Folder name for downloads from original-fiction sites (Royal Road
+today, plausibly ScribbleHub later). Separate from the misc bucket
+so a user's library surfaces "here are the original novels I'm
+reading" as its own visible subtree, rather than burying them
+alongside genuine unclassifiable fic."""
+
+# Site adapters whose entire catalog is original fiction — "no
+# fandom" on a download from these sites means the work IS original,
+# not that metadata extraction failed. When one of these is the
+# source, the auto-sorter routes to the original-works folder rather
+# than the misc bucket. Keyed by the string returned by
+# :func:`ffn_dl.library.identifier.adapter_for_url` so the library
+# package doesn't need to import every scraper class.
+ORIGINAL_FICTION_ADAPTERS = frozenset({"royalroad"})
 
 
 # `/` is included so a title or author containing a slash can't

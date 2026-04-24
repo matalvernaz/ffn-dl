@@ -320,9 +320,14 @@ def _apply_library_autosort(args) -> None:
     """
     if args.output is not None:
         return
-    from .library.template import DEFAULT_MISC_FOLDER, DEFAULT_TEMPLATE
+    from .library.template import (
+        DEFAULT_MISC_FOLDER,
+        DEFAULT_ORIGINAL_FOLDER,
+        DEFAULT_TEMPLATE,
+    )
     from .prefs import (
         KEY_LIBRARY_MISC_FOLDER,
+        KEY_LIBRARY_ORIGINAL_FOLDER,
         KEY_LIBRARY_PATH,
         KEY_LIBRARY_PATH_TEMPLATE,
         Prefs,
@@ -341,6 +346,9 @@ def _apply_library_autosort(args) -> None:
     args._library_misc = (
         prefs.get(KEY_LIBRARY_MISC_FOLDER) or DEFAULT_MISC_FOLDER
     )
+    args._library_original = (
+        prefs.get(KEY_LIBRARY_ORIGINAL_FOLDER) or DEFAULT_ORIGINAL_FOLDER
+    )
 
 
 def _library_subdir_for(story, args) -> Path | None:
@@ -353,14 +361,36 @@ def _library_subdir_for(story, args) -> Path | None:
     """
     if not getattr(args, "_library_autosort", False):
         return None
-    from .library.template import parse_category, render
+    from .library.identifier import adapter_for_url
+    from .library.template import (
+        ORIGINAL_FICTION_ADAPTERS,
+        parse_category,
+        render,
+    )
     from .updater import FileMetadata
 
-    # ``parse_category`` strips FFN's ``Books > `` breadcrumb prefix
-    # and splits AO3's `` / ``-joined crossovers into individual
-    # fandoms, while leaving clean single-fandom strings (FicWad,
-    # MediaMiner, etc.) untouched.
-    fandoms = parse_category(story.metadata.get("category"))
+    # Original-fiction sources: "no fandom" on a Royal Road download
+    # means the book IS original, not that metadata extraction
+    # failed. Route those to the dedicated original-works folder
+    # rather than the misc bucket, so the user's library has a
+    # visible "original novels" subtree alongside the fandom
+    # subtrees. Overridden by an explicit category field (unlikely
+    # on RR but future-proof): if a user tags an RR story with a
+    # fandom manually, honour it as a one-off rather than forcing
+    # the original-works bucket.
+    adapter = adapter_for_url(story.url or "")
+    story_category = story.metadata.get("category")
+    if adapter in ORIGINAL_FICTION_ADAPTERS and not story_category:
+        fandoms: list[str] = [
+            getattr(args, "_library_original", None)
+            or "Original Works"
+        ]
+    else:
+        # ``parse_category`` strips FFN's ``Books > `` breadcrumb prefix
+        # and splits AO3's `` / ``-joined crossovers into individual
+        # fandoms, while leaving clean single-fandom strings (FicWad,
+        # MediaMiner, etc.) untouched.
+        fandoms = parse_category(story_category)
 
     md = FileMetadata(
         title=story.title,

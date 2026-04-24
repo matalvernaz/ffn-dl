@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.23.35 — 2026-04-24
+
+### Change
+
+- **Royal Road auto-sorts to "Original Works", not Misc.** Royal
+  Road's catalogue is entirely original fiction, so "no fandom on
+  an RR download" means "the book is original", not "we couldn't
+  classify it". The auto-sorter now recognises RR as an original-
+  fiction source and routes those downloads into an "Original
+  Works" folder alongside the fandom subtrees. Misc stays
+  reserved for genuine crossovers and unclassifiable cases. A new
+  ``library_original_folder`` pref in ``settings.ini`` lets users
+  rename the folder (default: ``Original Works``). If an RR story
+  ever arrives with an explicit category — e.g. manually tagged
+  by the user in a future build — that still wins over the
+  automatic routing.
+
+### Tests
+
+- +4 auto-sort tests: RR with no fandom → Original Works, folder
+  name override via pref, RR with explicit category honoured,
+  non-RR missing-fandom still routes to Misc so the original-
+  works bucket doesn't accidentally attract fic that just lost
+  its metadata. Full suite: 981 green.
+
 ## 1.23.34 — 2026-04-24
 
 ### Change
