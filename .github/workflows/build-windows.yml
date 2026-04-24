@@ -101,29 +101,17 @@ jobs:
       # folder as the exe.
       - name: Build executable
         shell: bash
+        # --collect-submodules ffn_dl walks every submodule under the
+        # package so new files (optional_features, cf_solve, library.*,
+        # erotica.*, etc.) are picked up automatically without
+        # maintaining an explicit hidden-import list. The --hidden-import
+        # lines that remain are for third-party packages whose lazy
+        # imports PyInstaller's static analysis doesn't see.
         run: |
           pyinstaller --onedir --name ffn-dl --console \
             --add-binary "ffmpeg_bin/ffmpeg.exe;." \
             --add-binary "ffmpeg_bin/ffprobe.exe;." \
-            --hidden-import ffn_dl.cli \
-            --hidden-import ffn_dl.scraper \
-            --hidden-import ffn_dl.ficwad \
-            --hidden-import ffn_dl.ao3 \
-            --hidden-import ffn_dl.royalroad \
-            --hidden-import ffn_dl.mediaminer \
-            --hidden-import ffn_dl.literotica \
-            --hidden-import ffn_dl.exporters \
-            --hidden-import ffn_dl.updater \
-            --hidden-import ffn_dl.models \
-            --hidden-import ffn_dl.tts \
-            --hidden-import ffn_dl.gui \
-            --hidden-import ffn_dl.mailer \
-            --hidden-import ffn_dl.prefs \
-            --hidden-import ffn_dl.portable \
-            --hidden-import ffn_dl.neural_env \
-            --hidden-import ffn_dl.attribution \
-            --hidden-import ffn_dl.self_update \
-            --hidden-import ffn_dl.search \
+            --collect-submodules ffn_dl \
             --hidden-import edge_tts \
             --hidden-import ebooklib \
             --hidden-import curl_cffi \

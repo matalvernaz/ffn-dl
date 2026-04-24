@@ -1,0 +1,98 @@
+name: Build macOS Binary
+
+# Produces a portable macOS arm64 binary (ffn-dl folder, tar.gz
+# bundled) for each v-tag release. Apple-Silicon only — Intel Mac
+# users install via pip. Accessibility: wxPython on macOS wraps
+# native Cocoa widgets, which VoiceOver reads the same way it
+# reads any macOS app; the CLI is clean text and works in any
+# VoiceOver'd Terminal session.
+#
+# The build is unsigned — users hit Gatekeeper on first launch.
+# Code-signing + notarization would need a paid Apple Developer
+# account; the README documents the right-click → Open workaround.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # macos-latest is arm64 (Apple Silicon) as of the mid-2024
+    # runner swap. Produces an arm64 binary; Rosetta 2 lets Intel
+    # Macs run it but a native Intel build would need macos-13.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install ffmpeg and ffprobe
+        # Evermeet ships static-built macOS binaries of ffmpeg and
+        # ffprobe with no runtime dependencies beyond the macOS
+        # system libs. Same "bundle it, don't require users to
+        # brew install" philosophy the Windows build uses.
+        run: |
+          set -e
+          mkdir -p ffmpeg_bin
+          curl -L -o ffmpeg.zip https://evermeet.cx/ffmpeg/getrelease/zip
+          curl -L -o ffprobe.zip https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip
+          unzip -o ffmpeg.zip -d ffmpeg_bin/
+          unzip -o ffprobe.zip -d ffmpeg_bin/
+          chmod +x ffmpeg_bin/ffmpeg ffmpeg_bin/ffprobe
+          ls -la ffmpeg_bin/
+
+      - name: Install Python dependencies
+        # wxPython ships macOS wheels on PyPI for both arm64 and
+        # x86_64, so the plain install works without the extras
+        # URL dance the Linux build needs.
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[all]"
+          pip install pyinstaller
+
+      - name: Build executable
+        # --collect-submodules ffn_dl scoops up every submodule
+        # under the package so new files land in the binary
+        # without maintaining a hidden-import list.
+        run: |
+          pyinstaller --onedir --name ffn-dl --console \
+            --add-binary "ffmpeg_bin/ffmpeg:." \
+            --add-binary "ffmpeg_bin/ffprobe:." \
+            --collect-submodules ffn_dl \
+            --hidden-import edge_tts \
+            --hidden-import ebooklib \
+            --hidden-import curl_cffi \
+            --hidden-import wx \
+            --collect-all curl_cffi \
+            --collect-all wx \
+            ffn_dl/__main__.py
+
+      - name: Smoke-test executable
+        run: dist/ffn-dl/ffn-dl --help
+
+      - name: Package
+        # tar.gz preserves the executable bit; unlike a zip on
+        # macOS, users can extract with the default Archive
+        # Utility and the binary stays runnable.
+        run: |
+          cd dist && tar czf ffn-dl-macos-arm64.tar.gz ffn-dl
+          ls -la ffn-dl-macos-arm64.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffn-dl-macos-arm64
+          path: dist/ffn-dl-macos-arm64.tar.gz
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ffn-dl-macos-arm64.tar.gz

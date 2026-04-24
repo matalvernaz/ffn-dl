@@ -5,21 +5,37 @@ Cross-platform fanfiction downloader. Pulls stories from **FanFiction.net**,
 **Literotica**, and **Wattpad** and exports them as EPUB, HTML, plain text,
 or a chaptered M4B audiobook.
 
-Accessible by design — the Windows build and wxPython GUI are tested with
-NVDA, and the CLI produces screen-reader-friendly text output with no
-interactive TUI gotchas.
+Accessible by design — the desktop GUI uses native widgets on every
+platform (wxPython wraps Win32 on Windows, Cocoa on macOS, GTK3 on
+Linux), so NVDA, JAWS, VoiceOver, and Orca read it the same way they
+read any app on those platforms. The CLI is plain text with no
+interactive TUI gotchas, usable from any screen-readable terminal.
 
 ## Install
 
 ### Windows (recommended)
 
-Download the latest `ffn-dl.exe` from the
+Download the latest `ffn-dl-portable.zip` from the
 [Releases page](https://github.com/matalvernaz/ffn-dl/releases). It's a
-single self-contained binary with its own Python, ffmpeg, and ffprobe
-bundled — no dependencies to install. The app auto-updates from GitHub
-when a new release is published.
+self-contained folder with its own Python, ffmpeg, and ffprobe bundled —
+no dependencies to install. The app auto-updates from GitHub when a new
+release is published.
 
-### pip (Linux / macOS / dev)
+### macOS (Apple Silicon)
+
+Download `ffn-dl-macos-arm64.tar.gz` from the Releases page, extract, and
+run `./ffn-dl/ffn-dl`. The binary is unsigned, so the first launch needs
+right-click → Open (or **System Settings → Privacy & Security → Open
+Anyway**) to clear Gatekeeper.
+
+### Linux (x86_64)
+
+Download `ffn-dl-linux-x86_64.tar.gz` from the Releases page, extract,
+and run `./ffn-dl/ffn-dl`. Built against GTK3 — any modern desktop Linux
+(Ubuntu 22.04+, Fedora 38+, Debian 12+) has the runtime libraries
+already installed.
+
+### pip (any platform, dev)
 
 ```bash
 pip install "ffn-dl[all] @ git+https://github.com/matalvernaz/ffn-dl"
@@ -34,7 +50,11 @@ Extras are split so you only pull what you need:
 | `gui`       | wxPython desktop GUI          |
 | `clipboard` | Clipboard-watch mode          |
 | `cf-solve`  | Playwright-backed Cloudflare-challenge fallback (also needs `playwright install chromium`) |
-| `all`       | All of the above *except* `cf-solve` (opt-in due to ~300MB browser binary) |
+| `all`       | All of the above *except* `cf-solve` (opt-in due to ~400MB browser binary) |
+
+The desktop binaries (Windows / macOS / Linux) ship with every extra
+except `cf-solve` already included. Install `cf-solve` from **Edit →
+Optional Features...** if you need it.
 
 ## Using it
 
@@ -47,9 +67,13 @@ python -m ffn_dl.gui
 ```
 
 Tabs for Download, FFN Search, AO3 Search, Royal Road Search (with list
-browse for Rising Stars / Best Rated / etc.), Literotica Search, and
-Wattpad Search. Author / bookmark pickers are multi-select with
-NVDA-readable check state and a summary pane.
+browse for Rising Stars / Best Rated / etc.), and unified Erotic Story
+Search. Author / bookmark pickers are multi-select with check state
+mirrored into the row label so every screen reader speaks it reliably.
+**Edit → Optional Features...** installs the extras (EPUB, audio,
+clipboard, cf-solve) at runtime on any build — the frozen desktop
+binaries pip-install into a portable `deps/` folder so "delete the
+folder" actually uninstalls.
 
 ### CLI — common tasks
 
@@ -92,6 +116,68 @@ ffn-dl --send-to-kindle you@kindle.com https://...
 
 `ffn-dl --help` has the full list.
 
+## Library management
+
+Once you've scanned a directory of downloaded stories, ffn-dl tracks
+them in a library index and layers several tools on top.
+
+```bash
+# One-time scan of a directory — identifies every story, records
+# metadata, bootstraps the library index.
+ffn-dl --scan-library ~/Fanfic
+
+# Search by metadata (title / author / fandom / URL substring)
+ffn-dl --library-find "time travel"
+
+# Full-text search across every indexed chapter body. Uses SQLite
+# FTS5 syntax: prefix wildcards (dragon*), NEAR(a b), and boolean
+# operators (AND / OR / NOT) all work. Bootstrap is a one-time
+# --populate-search DIR; subsequent --update-library runs keep the
+# index warm. Stories downloaded via direct URL (not the library
+# update path) land in the text index on the next --populate-search.
+ffn-dl --populate-search ~/Fanfic
+ffn-dl --library-search "orphanage scene"
+
+# Detect suspected cross-site mirror pairs (same story on FFN and
+# AO3, Literotica and StoriesOnline, etc.). Needs >=2 corroborating
+# signals (normalised title match, author match, first-chapter word
+# overlap) to flag a pair, so common titles don't produce false
+# positives. Read-only; never deletes.
+ffn-dl --find-mirrors ~/Fanfic
+
+# Hygiene: library doctor, watchlist doctor, cache doctor, or all
+# three at once. --heal applies safe fixes; the index is auto-
+# backed-up before destructive operations so --restore-index FILE
+# can roll back a bad heal.
+ffn-dl --doctor
+ffn-dl --doctor --heal
+
+# Per-chapter silent-edit detection. Hash-based, so an author's
+# in-place typo fix shows up even though the chapter count didn't
+# change.
+ffn-dl --populate-hashes ~/Fanfic    # one-time bootstrap
+ffn-dl --scan-edits ~/Fanfic         # drift report
+```
+
+### Auto-sort and the Original Works folder
+
+When you configure a library path in preferences, new downloads are
+sorted into fandom subfolders automatically. The auto-sorter
+recognises each site's category format: FFN's `Books > Harry Potter`
+breadcrumbs get their leading meta-category stripped, AO3's
+`Harry Potter / Naruto` crossover joins get split so multi-fandom
+routes to the misc bucket, and plain single-fandom strings pass
+through untouched. Royal Road is treated as an original-fiction
+source — RR downloads land in `Original Works/` rather than `Misc/`,
+so your library surfaces original novels as a dedicated subtree
+alongside the fandom folders.
+
+Upgrading from a version older than 1.23.34 with an existing library?
+The folder layout for FFN and RR downloads has changed — run
+`ffn-dl --reorganize ~/Fanfic --apply` to migrate your existing files
+to match the new layout. The dry-run (without `--apply`) prints the
+proposed moves first.
+
 ## What it handles automatically
 
 - **Rate limiting**: adaptive (AIMD) inter-chapter delay — starts fast,
@@ -103,8 +189,15 @@ ffn-dl --send-to-kindle you@kindle.com https://...
   (default 3 workers, same AIMD feedback halves concurrency on
   rate-limit responses). FFN stays sequential.
 - **Cloudflare impersonation** via `curl_cffi` (Chrome, Edge, Safari).
+  Stubborn 403s can opt into `--cf-solve`, which launches a headless
+  Chromium via Playwright, lets the challenge resolve, and injects
+  the solved cookies into the scraper session. Solved cookies are
+  cached under `~/.cache/ffn-dl/cf-cookies/` (chmod 0600) for 24
+  hours so later runs reuse them without re-launching the browser.
 - **Per-chapter caching** in `~/.cache/ffn-dl`, so interrupted downloads
   resume cheaply and update-mode only fetches what actually changed.
+- **Cover image cache** at 7-day TTL so re-exporting a long series
+  doesn't re-download the same cover per part.
 - **Wayback fallback** (`--use-wayback`): when the live site 404s, try
   the most recent archive.org snapshot before giving up.
 - **Series handling**: AO3 series collapse in search results when 2+
@@ -116,13 +209,56 @@ ffn-dl --send-to-kindle you@kindle.com https://...
   replaced with `Complete (Stubbed)` / `In-Progress (Stubbed)` /
   `Stubbed` depending on what RR exposes.
 
+## Library-update performance knobs
+
+Large libraries (thousands of fics) benefit from two gates on
+`--update-library`:
+
+- **`--recheck-interval SECONDS`** — skip stories whose index
+  `last_probed` timestamp is within SECONDS of now. A value like
+  `3600` makes a second `--update-library` minutes after the first
+  near-instant.
+- **`--skip-stale-complete DAYS`** — skip stories that are both
+  marked Complete and whose file mtime is at least DAYS old. Gentler
+  than `--skip-complete`: a fic completed yesterday still gets
+  probed (the author may add an epilogue), but one untouched for a
+  year stops costing an HTTP probe each run.
+
+Both are overridden by `--force-recheck`.
+
 ## Audiobook notes
 
 `-f audio` synthesises each chapter through
 [edge-tts](https://github.com/rany2/edge-tts) (Microsoft's neural voices)
 and concatenates into a chaptered M4B with embedded cover art. Needs
-`ffmpeg` and `ffprobe` on PATH for the Linux/macOS install; they're
-bundled in the Windows .exe.
+`ffmpeg` and `ffprobe` on PATH for the pip install; they're bundled in
+the Windows / macOS / Linux binaries.
+
+Character voice casting runs through
+[BookNLP](https://github.com/booknlp/booknlp) when installed — each
+speaker gets a distinct Microsoft voice, the narrator stays on a
+stable baseline, and dialogue attribution falls back to a regex-based
+parser when BookNLP isn't available or fails mid-run.
+
+## Accessibility
+
+ffn-dl is built and tested with screen-reader users as a first-class
+audience. Concretely:
+
+- **Windows**: GUI tested with NVDA. Multi-select pickers, search
+  result rows, and watchlist entries mirror their check/selection
+  state into the visible label text so MSAA-fragile controls still
+  read correctly.
+- **macOS**: wxPython wraps native Cocoa widgets; VoiceOver reads
+  the GUI using the same AXUIElement tree it reads in Safari or
+  Mail.
+- **Linux**: wxPython wraps GTK3 widgets; Orca reads the GUI via
+  at-spi2 (the system accessibility bus). Any distro that installs
+  GNOME or KDE has at-spi2 active by default.
+- **CLI on every platform**: plain text, one line per decision, no
+  animated progress bars or cursor manipulation. Works in any
+  terminal a screen reader can read (Windows Terminal, macOS
+  Terminal + VoiceOver, any Linux terminal with Orca or BRLTTY).
 
 ## Development
 

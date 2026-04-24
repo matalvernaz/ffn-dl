@@ -1,0 +1,112 @@
+name: Build Linux Binary
+
+# Produces a portable x86_64 Linux binary (ffn-dl folder, tar.gz
+# bundled) for each v-tag release. Accessibility: wxPython on
+# Linux wraps GTK3 widgets, which Orca (the GNOME screen reader)
+# reads natively. The CLI is plain text and works in any
+# terminal with any screen reader (Orca, Fenrir, BRLTTY). GTK3
+# accessibility bridge (at-spi2) is part of every desktop Linux
+# install — the binary doesn't need to bundle it.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install GTK runtime (wxPython dependency)
+        # libgtk-3-0 + the at-spi2 accessibility bridge are the
+        # runtime libs wxPython's GTK3 backend needs. Both are
+        # preinstalled on ubuntu-latest, but the explicit install
+        # pins the surface so a future image rebuild that dropped
+        # either one would fail loudly here rather than producing
+        # a silently broken GUI binary.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-0 libsdl2-2.0-0 \
+            libegl1 libgl1 libglu1-mesa \
+            libnotify4 libsm6 libxkbcommon0 \
+            at-spi2-core
+
+      - name: Install ffmpeg (static build)
+        # John Van Sickle's static ffmpeg builds have no runtime
+        # dep on system libraries, so the bundle works on any
+        # desktop Linux without requiring the user to apt-get
+        # install ffmpeg separately.
+        run: |
+          set -e
+          mkdir -p ffmpeg_bin
+          curl -L -o ffmpeg.tar.xz \
+            https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar -xf ffmpeg.tar.xz
+          dir=$(find . -maxdepth 1 -type d -name "ffmpeg-*-amd64-static" | head -1)
+          cp "$dir/ffmpeg" "$dir/ffprobe" ffmpeg_bin/
+          chmod +x ffmpeg_bin/ffmpeg ffmpeg_bin/ffprobe
+          ls -la ffmpeg_bin/
+
+      - name: Install Python dependencies
+        # wxPython doesn't ship universal Linux wheels on PyPI
+        # because the GTK3 ABI is distro-version-specific. The
+        # official extras repo at extras.wxpython.org hosts pre-
+        # built wheels keyed by Ubuntu version; using -f with that
+        # URL adds it as a find-links source so pip picks the
+        # right wheel for the runner's Ubuntu version.
+        run: |
+          python -m pip install --upgrade pip
+          UBUNTU_VERSION=$(lsb_release -rs)
+          echo "Detected Ubuntu $UBUNTU_VERSION"
+          pip install -f \
+            "https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-${UBUNTU_VERSION}" \
+            wxPython || pip install wxPython
+          pip install ".[all]"
+          pip install pyinstaller
+
+      - name: Build executable
+        run: |
+          pyinstaller --onedir --name ffn-dl --console \
+            --add-binary "ffmpeg_bin/ffmpeg:." \
+            --add-binary "ffmpeg_bin/ffprobe:." \
+            --collect-submodules ffn_dl \
+            --hidden-import edge_tts \
+            --hidden-import ebooklib \
+            --hidden-import curl_cffi \
+            --hidden-import wx \
+            --collect-all curl_cffi \
+            --collect-all wx \
+            ffn_dl/__main__.py
+
+      - name: Smoke-test executable
+        run: dist/ffn-dl/ffn-dl --help
+
+      - name: Package
+        # tar.gz preserves the executable bit so the binary stays
+        # runnable after extraction.
+        run: |
+          cd dist && tar czf ffn-dl-linux-x86_64.tar.gz ffn-dl
+          ls -la ffn-dl-linux-x86_64.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffn-dl-linux-x86_64
+          path: dist/ffn-dl-linux-x86_64.tar.gz
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ffn-dl-linux-x86_64.tar.gz
