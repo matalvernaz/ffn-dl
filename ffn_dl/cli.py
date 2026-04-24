@@ -1643,6 +1643,98 @@ def _handle_library_find(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
+def _handle_populate_search(args: argparse.Namespace) -> None:
+    """Rebuild the full-text search index for a library root."""
+    from .library import (
+        FullTextIndex,
+        default_search_db_path,
+        populate_fulltext_from_library,
+    )
+
+    root = Path(args.populate_search)
+    if not root.is_dir():
+        print(f"Error: {root} is not a directory.", file=sys.stderr)
+        sys.exit(1)
+    root_resolved = root.resolve()
+
+    db_path = default_search_db_path()
+    print(
+        f"Building full-text index for {root_resolved}\n"
+        f"(DB: {db_path})...\n"
+    )
+    with FullTextIndex(db_path) as fti:
+        report = populate_fulltext_from_library(
+            fti, root_resolved, progress=print,
+        )
+    print("\n" + report.summary())
+    sys.exit(0)
+
+
+def _handle_library_search(args: argparse.Namespace) -> None:
+    """Full-text search across the library index's chapter content."""
+    from .library import FullTextIndex, default_search_db_path
+
+    if not args.library_search.strip():
+        print(
+            "Error: --library-search query must not be empty.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    db_path = default_search_db_path()
+    if not db_path.exists():
+        print(
+            f"No full-text index at {db_path}. "
+            "Run --populate-search DIR first.",
+        )
+        sys.exit(1)
+
+    root_filter: str | None = None
+    if args.library_dir:
+        root = Path(args.library_dir)
+        if not root.is_dir():
+            print(f"Error: {root} is not a directory.", file=sys.stderr)
+            sys.exit(1)
+        root_filter = str(root.resolve())
+
+    with FullTextIndex(db_path) as fti:
+        try:
+            hits = fti.search(
+                args.library_search,
+                root=root_filter,
+                limit=args.library_search_limit,
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    if not hits:
+        print(f"No chapters match {args.library_search!r}.")
+        sys.exit(1)
+
+    last_root: str | None = None
+    for hit in hits:
+        if hit.root != last_root:
+            if last_root is not None:
+                print()
+            print(f"Library: {hit.root}")
+            last_root = hit.root
+        title = hit.title or "(no title)"
+        author = hit.author or "(no author)"
+        ch = hit.chapter_number or "?"
+        ch_title = hit.chapter_title or ""
+        ch_label = f"ch. {ch}"
+        if ch_title:
+            ch_label += f" — {ch_title}"
+        print(f"  {title} — {author}")
+        print(f"    {hit.relpath or '(unknown path)'} [{ch_label}]")
+        print(f"    {hit.url}")
+        print(f"    {hit.snippet}")
+
+    print(f"\n{len(hits)} hit(s).")
+    sys.exit(0)
+
+
 def _handle_cache_doctor(args: argparse.Namespace) -> None:
     """Report (and optionally prune) scraper cache contents."""
     from .cache_doctor import check_cache, prune
@@ -1800,6 +1892,53 @@ def _handle_restore_index(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
+def _refresh_fulltext_for(
+    index,
+    root: Path,
+    url: str,
+    path: Path,
+) -> None:
+    """Re-index one story into the full-text DB if the DB already exists.
+
+    This is best-effort: if the FTS DB hasn't been built yet (user
+    never ran ``--populate-search``) we skip silently — the update
+    path shouldn't force a full bootstrap on them. If the DB does
+    exist, we keep it in sync so the next ``--library-search`` sees
+    the newly-downloaded chapters without requiring a rebuild.
+    """
+    try:
+        from .library import FullTextIndex, default_search_db_path
+        from .updater import read_chapters
+    except ImportError:
+        return
+    db_path = default_search_db_path()
+    if not db_path.exists():
+        return
+    entry = index.lookup_by_url(root, url) if hasattr(index, "lookup_by_url") else None
+    try:
+        chapters = read_chapters(path)
+    except Exception:
+        logger.debug(
+            "fulltext refresh skipped for %s: cannot read chapters",
+            url, exc_info=True,
+        )
+        return
+    try:
+        with FullTextIndex(db_path) as fti:
+            fti.index_story(
+                root=str(root),
+                url=url,
+                relpath=(entry or {}).get("relpath") or "",
+                title=(entry or {}).get("title") or "",
+                author=(entry or {}).get("author") or "",
+                chapters=chapters,
+            )
+    except Exception:
+        logger.debug(
+            "fulltext refresh failed for %s", url, exc_info=True,
+        )
+
+
 def _handle_update_library(args: argparse.Namespace) -> None:
     """Check every indexed story in a library for new chapters upstream."""
     from .library.refresh import build_refresh_queue
@@ -1915,6 +2054,7 @@ def _handle_update_library(args: argparse.Namespace) -> None:
                 idx_local = LibraryIndex.load()
                 if store_hashes(idx_local, root_resolved, url, hashes):
                     idx_local.save()
+                _refresh_fulltext_for(idx_local, root_resolved, url, path)
             except (OSError, ValueError):
                 logger.debug(
                     "chapter-hash write skipped for %s", url,
@@ -2224,8 +2364,40 @@ def _build_parser() -> argparse.ArgumentParser:
         "--library-dir",
         metavar="DIR",
         help=(
-            "With --library-find: limit the search to this library "
-            "root instead of searching every indexed library."
+            "With --library-find / --library-search: limit the "
+            "search to this library root instead of searching every "
+            "indexed library."
+        ),
+    )
+    parser.add_argument(
+        "--library-search",
+        metavar="QUERY",
+        help=(
+            "Full-text search across indexed chapter content (not "
+            "just metadata). Uses SQLite FTS5 syntax: bare terms are "
+            "AND-joined, and prefix wildcards (dragon*), NEAR(a b), "
+            "and boolean operators (OR / AND / NOT) work. Requires "
+            "--populate-search DIR to have been run at least once."
+        ),
+    )
+    parser.add_argument(
+        "--library-search-limit",
+        type=int,
+        default=50,
+        metavar="N",
+        help=(
+            "With --library-search: cap the number of hits returned "
+            "(default: 50, ranked by FTS5 BM25 relevance)."
+        ),
+    )
+    parser.add_argument(
+        "--populate-search",
+        metavar="DIR",
+        help=(
+            "Build or rebuild the full-text search index for DIR's "
+            "library by re-parsing each story's EPUB/HTML body. "
+            "Bootstrap step before --library-search; subsequent "
+            "downloads refresh affected entries automatically."
         ),
     )
     parser.add_argument(
@@ -3405,6 +3577,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.library_find:
         _handle_library_find(args)
+        return
+    if args.library_search:
+        _handle_library_search(args)
+        return
+    if args.populate_search:
+        _handle_populate_search(args)
         return
     if args.cache_doctor:
         _handle_cache_doctor(args)

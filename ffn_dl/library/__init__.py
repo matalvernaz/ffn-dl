@@ -18,6 +18,14 @@ from .edits import (
     scan_edits,
 )
 from .find import LibraryMatch, search_index
+from .fulltext import (
+    BootstrapReport as FullTextBootstrapReport,
+    FullTextHit,
+    FullTextIndex,
+    chapter_text,
+    default_db_path as default_search_db_path,
+    populate_from_library as populate_fulltext_from_library,
+)
 from .hashes import (
     ChapterHashUnavailable,
     compute_local_hashes,
@@ -37,6 +45,12 @@ __all__ = [
     "compute_stats",
     "LibraryMatch",
     "search_index",
+    "FullTextHit",
+    "FullTextIndex",
+    "FullTextBootstrapReport",
+    "chapter_text",
+    "default_search_db_path",
+    "populate_fulltext_from_library",
     "backup",
     "ChapterHashUnavailable",
     "compute_local_hashes",

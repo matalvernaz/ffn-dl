@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.23.27 — 2026-04-23
+
+### Feature
+
+- **Full-text library search.** ``--library-find`` only walks
+  metadata (title, author, fandom, URL), so "which fic had that
+  scene at the orphanage?" was unanswerable. Two new flags close
+  that gap:
+
+  - ``--populate-search DIR`` re-parses every story in DIR's
+    library and builds a SQLite FTS5 index of the chapter bodies.
+    The DB lives next to ``library-index.json`` in the portable
+    root. Safe to re-run — each root is wiped and rebuilt cleanly
+    so stale rows from deleted stories don't linger.
+  - ``--library-search QUERY`` queries the index. SQLite FTS5
+    syntax passes through verbatim: bare terms are AND-joined,
+    prefix wildcards (``dragon*``), ``NEAR(a b)``, and boolean
+    operators all work. ``--library-search-limit N`` caps the hit
+    count (default 50, BM25-ranked). ``--library-dir`` scopes the
+    search to one root, same as ``--library-find``.
+
+  Subsequent ``--update-library`` runs auto-refresh affected
+  entries so the first bootstrap is the only expensive step —
+  downloads keep the index warm without an explicit rebuild.
+
+### Tests
+
+- 15 new tests for the FTS5 surface: tag stripping + whitespace
+  normalisation, per-story upsert cleanliness (rewrite doesn't
+  leak old text), root-scoped filter, empty-query and invalid-
+  syntax handling, stats rollup, and four bootstrap cases
+  (full library scan, unsupported formats, missing files, and
+  re-running cleanly). Full suite: 920 green.
+
 ## 1.23.26 — 2026-04-23
 
 ### Feature
