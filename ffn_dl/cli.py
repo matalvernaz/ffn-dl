@@ -353,16 +353,14 @@ def _library_subdir_for(story, args) -> Path | None:
     """
     if not getattr(args, "_library_autosort", False):
         return None
-    from .library.template import render
+    from .library.template import parse_category, render
     from .updater import FileMetadata
 
-    category = story.metadata.get("category")
-    fandoms: list[str] = []
-    if category:
-        # AO3 sometimes comma-separates crossover fandoms; other
-        # scrapers hand us a single string. Splitting on comma mirrors
-        # the exporter's own "category" rendering logic.
-        fandoms = [f.strip() for f in category.split(",") if f.strip()]
+    # ``parse_category`` strips FFN's ``Books > `` breadcrumb prefix
+    # and splits AO3's `` / ``-joined crossovers into individual
+    # fandoms, while leaving clean single-fandom strings (FicWad,
+    # MediaMiner, etc.) untouched.
+    fandoms = parse_category(story.metadata.get("category"))
 
     md = FileMetadata(
         title=story.title,

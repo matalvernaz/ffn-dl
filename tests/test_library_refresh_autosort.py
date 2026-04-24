@@ -252,6 +252,61 @@ def test_library_subdir_splits_comma_separated_fandoms_to_misc():
     assert subdir == Path("Misc")
 
 
+def test_library_subdir_strips_ffn_breadcrumb_prefix():
+    """FFN hands us "Books > Harry Potter" — the user's folder
+    should be just "Harry Potter", not "Books _ Harry Potter" with
+    the `>` underscored out by the filename sanitiser."""
+    subdir = _library_subdir_for(
+        _story("Books > Harry Potter"), _autosort_args(),
+    )
+    assert subdir == Path("Harry Potter")
+
+
+def test_library_subdir_splits_ao3_crossover_to_misc():
+    """AO3 joins crossover fandoms with ` / `. Two distinct fandoms
+    means the story belongs in the misc bucket, not a folder named
+    "Harry Potter _ Naruto" (the slash-scrubbed single-fandom form
+    the old behaviour produced)."""
+    subdir = _library_subdir_for(
+        _story("Harry Potter / Naruto"), _autosort_args(),
+    )
+    assert subdir == Path("Misc")
+
+
+def test_library_subdir_preserves_clean_fandom_name():
+    """If a site hands us a plain fandom string with no FFN
+    breadcrumb, no AO3 crossover join, and no comma list, it must
+    land in a folder with exactly that name. Protects FicWad,
+    MediaMiner, and every single-fandom case from bureaucratic
+    regressions."""
+    subdir = _library_subdir_for(
+        _story("The Dresden Files"), _autosort_args(),
+    )
+    assert subdir == Path("The Dresden Files")
+
+
+def test_library_subdir_handles_nested_ffn_breadcrumb():
+    """A deeper breadcrumb ("Books > Harry Potter > The Marauders")
+    should still yield just the leaf — taking the last `>`-segment.
+    Unlikely shape in practice but the rsplit handles it for free
+    and the test documents the invariant."""
+    subdir = _library_subdir_for(
+        _story("Books > Harry Potter > The Marauders"), _autosort_args(),
+    )
+    assert subdir == Path("The Marauders")
+
+
+def test_library_subdir_combines_breadcrumb_and_ao3_join():
+    """A hypothetical site that wrapped an AO3-style crossover in
+    an FFN-style breadcrumb should strip the breadcrumb first, then
+    recognise the crossover → Misc. The order of the two splits
+    matters and this pin guards it."""
+    subdir = _library_subdir_for(
+        _story("Books > Harry Potter / Naruto"), _autosort_args(),
+    )
+    assert subdir == Path("Misc")
+
+
 def test_apply_library_autosort_noop_when_output_explicit():
     args = Namespace(output="/some/path")
     _apply_library_autosort(args)

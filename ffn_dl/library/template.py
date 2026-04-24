@@ -92,6 +92,49 @@ def _pick_fandom(fandoms: list[str], misc_folder: str) -> str:
     return misc_folder
 
 
+def parse_category(category: str | None) -> list[str]:
+    """Split a site's ``category`` metadata string into a list of
+    fandom names, stripped of site-specific decoration.
+
+    Different scrapers hand us different shapes for the same field:
+
+    * **FFN** builds a breadcrumb: ``"Books > Harry Potter"``. The
+      leading meta-category ("Books", "Anime/Manga", "Movies", etc.)
+      is inherent to the site's browsing taxonomy, not part of the
+      fandom name — the user's folder should be ``Harry Potter``,
+      not ``Books _ Harry Potter``.
+    * **AO3** joins crossovers with `` / ``:
+      ``"Harry Potter - J. K. Rowling / Naruto"``. Each ``/``-piece
+      is a distinct fandom, so a crossover lands as multi-fandom
+      (and :func:`_pick_fandom` routes it to the misc bucket).
+    * **FicWad / MediaMiner / others** hand us a plain string with
+      no special separator. That goes through untouched.
+
+    The ordering of the splits matters. We strip the FFN breadcrumb
+    first (take the last ``>``-delimited segment), then split the
+    result on `` / `` for AO3 crossovers, then split each piece on
+    commas as the legacy fallback. A string containing none of the
+    separators returns as a single-element list with its original
+    value — the "clean site" case Matt asked for.
+    """
+    if not category:
+        return []
+    # FFN breadcrumb: take only the tail after the last " > ".
+    text = category.rsplit(" > ", 1)[-1].strip()
+    # AO3 crossover join — splits into N fandoms.
+    pieces = [p.strip() for p in text.split(" / ")]
+    # Legacy comma fallback, applied after " / " so an AO3 fandom
+    # that happens to have a comma inside one name still splits
+    # predictably.
+    fandoms: list[str] = []
+    for piece in pieces:
+        for sub in piece.split(","):
+            s = sub.strip()
+            if s:
+                fandoms.append(s)
+    return fandoms
+
+
 def render(
     metadata: FileMetadata,
     template: str = DEFAULT_TEMPLATE,

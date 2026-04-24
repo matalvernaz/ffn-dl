@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.23.34 — 2026-04-24
+
+### Change
+
+- **Auto-sort cleans category strings before picking a folder.**
+  FFN hands us breadcrumbs like ``"Books > Harry Potter"``; AO3
+  joins crossovers with `` / ``. The old auto-sort code treated
+  each as a single opaque fandom, producing folder names like
+  ``Books _ Harry Potter`` (the `>` sanitised to `_`) or
+  ``Harry Potter _ Naruto``. New behaviour: strip the FFN
+  breadcrumb prefix (take the last ``>`` segment), split AO3
+  crossovers on `` / `` into multiple fandoms, and route any
+  multi-fandom result to the misc bucket as before. Single-fandom
+  strings with none of those separators pass through untouched,
+  so a clean ``"The Dresden Files"`` still lands in
+  ``The Dresden Files/``.
+
+### Tests
+
+- +5 auto-sort tests: FFN breadcrumb stripped, AO3 crossover
+  routed to misc, clean single-fandom preserved, deep breadcrumb
+  takes the leaf, combined breadcrumb + crossover order-of-ops
+  pinned. Full suite: 977 green.
+
 ## 1.23.33 — 2026-04-24
 
 ### Fix
