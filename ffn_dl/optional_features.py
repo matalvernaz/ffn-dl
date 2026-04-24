@@ -231,12 +231,20 @@ def install(feature: str, log_callback: Logger | None = None) -> bool:
 
 
 def _stream_subprocess(
-    cmd: Iterable[str], log_callback: Logger | None,
+    cmd: Iterable[str],
+    log_callback: Logger | None,
+    *,
+    env: dict | None = None,
 ) -> bool:
     """Run ``cmd``, forwarding merged stdout/stderr line-by-line to
     ``log_callback``. Returns True on exit code 0. Mirrors the
     streaming behaviour of :func:`attribution.install` so log output
-    shape stays consistent across installers."""
+    shape stays consistent across installers.
+
+    ``env`` lets the caller inject extra environment variables (e.g.
+    ``PLAYWRIGHT_BROWSERS_PATH`` for the post-install step) without
+    leaking them into the parent process.
+    """
     cmd = list(cmd)
     if log_callback:
         log_callback(f"\nRunning: {' '.join(cmd)}")
@@ -247,6 +255,7 @@ def _stream_subprocess(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=env,
         )
     except OSError as exc:
         if log_callback:
@@ -269,6 +278,13 @@ def _run_post_install(args: list[str], log_callback: Logger | None) -> bool:
     Uses the embedded interpreter under the frozen Windows build
     (so post-install runs inside the same environment that just
     received the pip install), and ``sys.executable`` otherwise.
+
+    Environment inheritance is left to the default — on frozen
+    Windows, :func:`ffn_dl.portable.setup_env` has already pinned
+    ``PLAYWRIGHT_BROWSERS_PATH`` inside the portable folder so the
+    ~400 MB browser binary lands next to the .exe and survives an
+    uninstall by "delete the folder" rather than lingering under
+    ``%LOCALAPPDATA%\\ms-playwright``.
     """
     if _is_frozen():
         from . import neural_env

@@ -131,7 +131,14 @@ def persist(host: str, result: SolveResult) -> None:
     """Write the solved cookies for ``host`` to the cache dir. The
     filename is hostname-sanitised (see :func:`_host_cache_path`)
     so an attacker-controlled URL can't traverse out of the cache.
+
+    The file is chmod'd to 0600 after write: ``cf_clearance`` is a
+    session token another user on a shared host could replay against
+    the site. On Windows the mode change is effectively a no-op, but
+    it's a cheap defensive measure on Linux/macOS where the default
+    umask leaves world-readable cache files.
     """
+    import os
     path = _host_cache_path(host)
     payload = {
         "cookies": result.cookies,
@@ -145,6 +152,14 @@ def persist(host: str, result: SolveResult) -> None:
         )
     except OSError as exc:
         logger.debug("cf-cookie persist failed for %s: %s", host, exc)
+        return
+    try:
+        os.chmod(path, 0o600)
+    except OSError:  # pragma: no cover — filesystem-dependent
+        # Best-effort — a chmod failure doesn't invalidate the
+        # cookie, it just means the file is still at the default
+        # umask. Debug log and move on rather than re-raising.
+        logger.debug("cf-cookie chmod 0600 failed for %s", host)
 
 
 def solve(

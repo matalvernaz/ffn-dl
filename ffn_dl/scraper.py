@@ -217,12 +217,6 @@ class BaseScraper:
         # entry exists we don't retry the slow path in this process.
         self._cf_solve_host_state: dict[str, bool] = {}
         self._cf_solve_lock = threading.Lock()
-        # If a cached cookie set exists for the solver's hosts, load
-        # it into the session up front so the first request benefits
-        # from a prior solve. The load is lazy — we only touch hosts
-        # whose requests actually fail, not every registered host at
-        # construction time.
-        self._cf_solve_seeded_hosts: set[str] = set()
         # Parallel chapter fetching. AIMD applies here too: we start at the
         # subclass's configured concurrency and halve it whenever a batch
         # trips a 429/503 (detected via `_current_delay` bumping up). FFN
@@ -333,22 +327,31 @@ class BaseScraper:
     def _maybe_seed_cf_cookies(self, sess, url: str) -> bool:
         """Before invoking Playwright, try the on-disk cookie cache.
 
-        A previous ffn-dl run may have already solved the challenge
-        for this host; applying those cookies to the current session
-        costs microseconds and avoids re-running the browser for the
-        TTL window. Returns True when a cached solve was applied (so
-        the caller can retry before going to Playwright)."""
+        A previous run — or a sibling worker thread in this run — may
+        have already solved the challenge for this host; applying
+        those cookies to the current session is a cheap disk read
+        and avoids another Playwright launch.
+
+        Intentionally re-reads the cache on *every* 403 rather than
+        caching "already tried this host". Under concurrent library
+        updates, worker A solves the challenge and persists cookies
+        after worker B has already hit its first 403; B needs to be
+        able to pick up A's freshly-written cookies on its next 403
+        retry instead of being short-circuited by a per-session
+        "already seeded" flag. The cost is one ~200-byte JSON read
+        per 403, which is negligible against the retry-loop cost
+        the seed avoids.
+        """
         if not self.cf_solve:
             return False
         host = self._host_for_url(url)
-        if not host or host in self._cf_solve_seeded_hosts:
+        if not host:
             return False
         try:
             from . import cf_solve
         except ImportError:
             return False
         cached = cf_solve.load_cached(host)
-        self._cf_solve_seeded_hosts.add(host)
         if cached is None:
             return False
         cf_solve.inject_into_session(sess, cached)

@@ -183,6 +183,21 @@ def setup_env() -> None:
         os.environ["HOME"] = home_str
         if sys.platform == "win32":
             os.environ["USERPROFILE"] = home_str
+
+        # Keep Playwright's ~400 MB browser binary inside the portable
+        # folder so "delete the ffn-dl folder" actually reclaims every
+        # byte the app put on disk. Default would land under
+        # ``%LOCALAPPDATA%\\ms-playwright``, which survives an
+        # uninstall and surprises users who expect the portable
+        # layout to be self-contained. Restricted to frozen builds so
+        # pip-installed users keep whatever Playwright config they
+        # already have (they may have run ``playwright install`` at
+        # the default path before touching ffn-dl). ``setdefault`` so
+        # an explicit override the user set still wins.
+        os.environ.setdefault(
+            "PLAYWRIGHT_BROWSERS_PATH",
+            str(root / "playwright-browsers"),
+        )
     _env_set = True
 
 

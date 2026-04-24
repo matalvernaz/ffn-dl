@@ -303,6 +303,61 @@ def test_invoke_cf_solver_handles_generic_failure(
     ) is False
 
 
+def test_seed_rechecks_cache_on_every_call_for_cross_thread_pickup(
+    cache_dir, scraper, monkeypatch,
+):
+    """Regression: an earlier design cached "already tried to seed
+    host X" in a per-scraper set. Under concurrent library updates
+    that short-circuited every thread that ran its first 403 check
+    *before* the worker that solved the challenge persisted cookies
+    — those threads were marked 'seeded' with no cookies applied and
+    never re-checked the disk cache, so each had to exhaust its own
+    retry budget before failing. Fix: re-read the cache on every
+    call; the cost is one JSON load per 403, which is negligible."""
+    sess_a = MagicMock(); sess_a.headers = {}
+    sess_b = MagicMock(); sess_b.headers = {}
+
+    # First 403 for both threads: nothing in cache → both return False.
+    assert scraper._maybe_seed_cf_cookies(sess_a, "https://www.fanfiction.net/s/1") is False
+    assert scraper._maybe_seed_cf_cookies(sess_b, "https://www.fanfiction.net/s/2") is False
+
+    # Worker A "solves" the challenge and persists cookies.
+    cf_solve.persist("fanfiction.net", _sample_result())
+
+    # Worker B's next 403 MUST pick up A's persisted cookies even
+    # though _maybe_seed_cf_cookies already ran once for this scraper.
+    applied: list = []
+    monkeypatch.setattr(
+        cf_solve,
+        "inject_into_session",
+        lambda s, r: applied.append(r),
+    )
+    assert scraper._maybe_seed_cf_cookies(
+        sess_b, "https://www.fanfiction.net/s/3",
+    ) is True
+    assert len(applied) == 1
+
+
+def test_persist_sets_restrictive_permissions(cache_dir):
+    """cf_clearance is a session secret; on a shared Linux host the
+    default umask would leave the cache file group/world-readable.
+    The persist path chmods it to 0600 so other local users can't
+    replay the token."""
+    import os
+    import stat
+    import platform
+    cf_solve.persist("perm-test.example", _sample_result())
+    path = cf_solve._host_cache_path("perm-test.example")
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    if platform.system() == "Windows":
+        # Windows ignores POSIX mode bits; we only assert on real
+        # POSIX systems. The file still exists; that's all we can
+        # guarantee cross-platform.
+        assert path.exists()
+    else:
+        assert mode == 0o600, f"expected 0o600, got 0o{mode:o}"
+
+
 def test_fetch_403_then_solver_success_produces_body(
     cache_dir, monkeypatch,
 ):

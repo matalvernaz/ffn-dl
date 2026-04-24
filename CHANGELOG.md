@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.23.33 — 2026-04-24
+
+### Fix
+
+- **cf-solve cookie cache now propagates across worker threads.**
+  Under a concurrent library update, worker A solves the challenge
+  and persists cookies to disk *after* workers B..N have already
+  hit their first 403. Those threads were then short-circuited by
+  a per-scraper "already tried to seed this host" flag, so they
+  never re-checked the disk cache and exhausted their retry
+  budgets solo. Fix: re-read the cache on every 403. The cost is
+  one ~200-byte JSON load per 403, which is nothing against the
+  retry-loop time the seed avoids.
+- **cf-solve cookie file is now chmod 0600.** ``cf_clearance`` is
+  a session token another local user could replay against the
+  site. Default umask left the file group/world-readable on
+  Linux/macOS; the persist path now tightens it after write.
+  Windows ignores POSIX mode bits, no-op there.
+- **Portable Playwright browser path.** On the frozen Windows
+  build, ``PLAYWRIGHT_BROWSERS_PATH`` now points inside the
+  portable folder so the ~400 MB Chromium binary lands next to
+  the .exe. "Delete the ffn-dl folder" used to leave the browser
+  stranded under ``%LOCALAPPDATA%\\ms-playwright``.
+  ``os.environ.setdefault`` so an explicit user override still
+  wins; scoped to frozen builds so pip-installed users' existing
+  ``playwright install`` location is respected.
+
+### Change
+
+- **--library-search help documents the direct-download gap.**
+  The FTS auto-refresh hook fires inside ``--update-library``,
+  not on direct-URL downloads — so a freshly downloaded story's
+  chapter bodies land in the text index on the next
+  ``--populate-search`` run. Help text now says so explicitly.
+
+### Tests
+
+- 2 new cf-solve tests: cross-thread cookie pickup (regression
+  guard for the concurrency bug) and restrictive file permissions
+  on the persisted cookie cache. Full suite: 972 green.
+
 ## 1.23.32 — 2026-04-24
 
 ### Feature

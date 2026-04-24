@@ -2407,7 +2407,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "just metadata). Uses SQLite FTS5 syntax: bare terms are "
             "AND-joined, and prefix wildcards (dragon*), NEAR(a b), "
             "and boolean operators (OR / AND / NOT) work. Requires "
-            "--populate-search DIR to have been run at least once."
+            "--populate-search DIR to have been run at least once. "
+            "Stories downloaded via direct URL (not --update-library) "
+            "land in the text index on the next --populate-search run."
         ),
     )
     parser.add_argument(
