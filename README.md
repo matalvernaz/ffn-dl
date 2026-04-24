@@ -1,9 +1,21 @@
 # ffn-dl
 
-Cross-platform fanfiction downloader. Pulls stories from **FanFiction.net**,
-**Archive of Our Own**, **FicWad**, **Royal Road**, **MediaMiner**,
-**Literotica**, and **Wattpad** and exports them as EPUB, HTML, plain text,
-or a chaptered M4B audiobook.
+Cross-platform fanfiction and original-fiction downloader. Exports as
+EPUB, HTML, plain text, or a chaptered M4B audiobook.
+
+**Fanfic / original-fiction sites**
+FanFiction.net · Archive of Our Own · FicWad · Royal Road ·
+MediaMiner · Wattpad
+
+**Erotica sites**
+Literotica · Adult-FanFiction.org (AFF) · StoriesOnline · Nifty ·
+SexStories · MCStories · Lushstories · Fictionmania · TGStorytime ·
+Chyoa (interactive) · Dark Wanderer · GreatFeet
+
+Every site supports direct-URL download and appears in the GUI's
+search windows. The erotica sites share a unified "Erotic Story
+Search" that fans out a query across all of them in parallel and
+collapses results per site.
 
 Accessible by design — the desktop GUI uses native widgets on every
 platform (wxPython wraps Win32 on Windows, Cocoa on macOS, GTK3 on
@@ -60,29 +72,50 @@ Optional Features...** if you need it.
 
 ### GUI
 
+`ffn-dl` with no arguments launches the GUI — that's what
+double-clicking the desktop binary does. From a pip install:
+
 ```bash
-ffn-dl-gui      # installed as a script when the gui extra is present
-# or
-python -m ffn_dl.gui
+ffn-dl                    # no args → GUI
+python -m ffn_dl.gui      # explicit GUI launch
 ```
 
-Tabs for Download, FFN Search, AO3 Search, Royal Road Search (with list
-browse for Rising Stars / Best Rated / etc.), and unified Erotic Story
-Search. Author / bookmark pickers are multi-select with check state
-mirrored into the row label so every screen reader speaks it reliably.
-**Edit → Optional Features...** installs the extras (EPUB, audio,
-clipboard, cf-solve) at runtime on any build — the frozen desktop
-binaries pip-install into a portable `deps/` folder so "delete the
-folder" actually uninstalls.
+The main window is a download form. Search windows open from the
+**Search** menu:
+
+- **FFN** (Ctrl+1) — full filter set: genre, rating, language, word
+  count, status, world, up to four characters, pairing, exclusions
+- **AO3** (Ctrl+2) — with series collapse when 2+ parts appear
+- **Royal Road** (Ctrl+3) — query-based search plus list browse for
+  Rising Stars / Best Rated / Complete / Weekly Popular
+- **Wattpad** (Ctrl+4)
+- **Erotic Story Search** (Ctrl+5) — unified fan-out across all
+  twelve erotica sites (Literotica, AFF, StoriesOnline, Nifty,
+  SexStories, MCStories, Lushstories, Fictionmania, TGStorytime,
+  Chyoa, Dark Wanderer, GreatFeet) with a per-site scope dropdown
+  for when you already know where you want to search
+
+The **Library** menu has scan / reorganize / update / abandoned
+management. **Watchlist** lets you follow authors or searches and
+get a Pushover / Discord / email ping when a tracked story
+updates. **Edit → Optional Features...** installs the extras
+(EPUB, audio, clipboard, cf-solve) at runtime on any build — the
+frozen desktop binaries pip-install into a portable `deps/`
+folder so "delete the folder" actually uninstalls. Multi-select
+pickers and result lists mirror their check / selection state
+into the row label so every screen reader speaks it reliably.
 
 ### CLI — common tasks
 
 ```bash
-# Single story (URL or ID)
+# Single story (URL or ID). URLs for any of the supported sites
+# work — the scraper is auto-selected from the URL.
 ffn-dl https://www.fanfiction.net/s/12345
 ffn-dl 12345
+ffn-dl https://www.literotica.com/s/example-story
+ffn-dl https://storiesonline.net/s/12345
 
-# Batch from a text file
+# Batch from a text file (one URL per line, mixed sites allowed)
 ffn-dl -b urls.txt
 
 # Pick format
@@ -100,6 +133,9 @@ ffn-dl --merge-series https://archiveofourown.org/series/1234
 ffn-dl -s "time travel" --site ffn  --sort favorites
 ffn-dl -s "dungeon"      --site royalroad --rr-tags progression,magic
 ffn-dl --rr-list "rising stars"   # list browse — no query needed
+ffn-dl -s "werewolf"     --site literotica
+# (fan-out search across every erotica site is GUI-only — open the
+# Erotic Story Search window from the GUI search menu)
 
 # Update an existing export with new chapters
 ffn-dl -u "Path/To/Story.epub"
@@ -186,11 +222,11 @@ source — RR downloads land in `Original Works/` rather than `Misc/`,
 so your library surfaces original novels as a dedicated subtree
 alongside the fandom folders.
 
-Upgrading from a version older than 1.23.34 with an existing library?
-The folder layout for FFN and RR downloads has changed — run
-`ffn-dl --reorganize ~/Fanfic --apply` to migrate your existing files
-to match the new layout. The dry-run (without `--apply`) prints the
-proposed moves first.
+Upgrading from a 1.x install with an existing library?
+2.0.0 changes the auto-sort layout for FFN and Royal Road downloads —
+run `ffn-dl --reorganize ~/Fanfic --apply` to migrate your existing
+files to match the new layout. The dry-run (without `--apply`) prints
+the proposed moves first.
 
 ## What it handles automatically
 

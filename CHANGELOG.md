@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.0.1 — 2026-04-24
+
+### Docs
+
+- README reorganised: opening paragraph now lists every supported
+  site, split into fanfic / original-fiction and erotica buckets,
+  so the twelve erotica sites (Literotica, AFF, StoriesOnline,
+  Nifty, SexStories, MCStories, Lushstories, Fictionmania,
+  TGStorytime, Chyoa, Dark Wanderer, GreatFeet) are visible
+  alongside the obvious ones.
+- GUI section corrected: the main window is a download form, not
+  a tabbed Notebook. Search lives on its own menu with five
+  windows (FFN, AO3, Royal Road, Wattpad, Erotic Story Search),
+  each with its accelerator and filter surface called out.
+- CLI examples expanded with Literotica / StoriesOnline URLs and
+  a literotica-scoped search. The fan-out search note is now
+  truthful — erotica fan-out is GUI-only; the CLI only exposes
+  single-site erotica searches via ``--site literotica``.
+- GUI launch instructions corrected — ``ffn-dl-gui`` was never a
+  real entry point. ``ffn-dl`` with no arguments launches the
+  GUI (what double-clicking the desktop binary does); from a
+  pip install, ``python -m ffn_dl.gui`` is the explicit form.
+- Migration note targets the 2.0.0 transition rather than the
+  mid-session 1.23.34 number.
+
 ## 2.0.0 — 2026-04-24
 
 A milestone release folding in a month of library-management,
