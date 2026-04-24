@@ -1,288 +1,133 @@
 # Changelog
 
-## 1.23.35 — 2026-04-24
+## 1.3 — 2026-04-24
 
-### Change
+A milestone release folding in a month of library-management,
+anti-bot, and cross-platform work. Highlights:
 
-- **Royal Road auto-sorts to "Original Works", not Misc.** Royal
-  Road's catalogue is entirely original fiction, so "no fandom on
-  an RR download" means "the book is original", not "we couldn't
-  classify it". The auto-sorter now recognises RR as an original-
-  fiction source and routes those downloads into an "Original
-  Works" folder alongside the fandom subtrees. Misc stays
-  reserved for genuine crossovers and unclassifiable cases. A new
-  ``library_original_folder`` pref in ``settings.ini`` lets users
-  rename the folder (default: ``Original Works``). If an RR story
-  ever arrives with an explicit category — e.g. manually tagged
-  by the user in a future build — that still wins over the
-  automatic routing.
+### Features
 
-### Tests
-
-- +4 auto-sort tests: RR with no fandom → Original Works, folder
-  name override via pref, RR with explicit category honoured,
-  non-RR missing-fandom still routes to Misc so the original-
-  works bucket doesn't accidentally attract fic that just lost
-  its metadata. Full suite: 981 green.
-
-## 1.23.34 — 2026-04-24
-
-### Change
-
-- **Auto-sort cleans category strings before picking a folder.**
-  FFN hands us breadcrumbs like ``"Books > Harry Potter"``; AO3
-  joins crossovers with `` / ``. The old auto-sort code treated
-  each as a single opaque fandom, producing folder names like
-  ``Books _ Harry Potter`` (the `>` sanitised to `_`) or
-  ``Harry Potter _ Naruto``. New behaviour: strip the FFN
-  breadcrumb prefix (take the last ``>`` segment), split AO3
-  crossovers on `` / `` into multiple fandoms, and route any
-  multi-fandom result to the misc bucket as before. Single-fandom
-  strings with none of those separators pass through untouched,
-  so a clean ``"The Dresden Files"`` still lands in
-  ``The Dresden Files/``.
-
-### Tests
-
-- +5 auto-sort tests: FFN breadcrumb stripped, AO3 crossover
-  routed to misc, clean single-fandom preserved, deep breadcrumb
-  takes the leaf, combined breadcrumb + crossover order-of-ops
-  pinned. Full suite: 977 green.
-
-## 1.23.33 — 2026-04-24
-
-### Fix
-
-- **cf-solve cookie cache now propagates across worker threads.**
-  Under a concurrent library update, worker A solves the challenge
-  and persists cookies to disk *after* workers B..N have already
-  hit their first 403. Those threads were then short-circuited by
-  a per-scraper "already tried to seed this host" flag, so they
-  never re-checked the disk cache and exhausted their retry
-  budgets solo. Fix: re-read the cache on every 403. The cost is
-  one ~200-byte JSON load per 403, which is nothing against the
-  retry-loop time the seed avoids.
-- **cf-solve cookie file is now chmod 0600.** ``cf_clearance`` is
-  a session token another local user could replay against the
-  site. Default umask left the file group/world-readable on
-  Linux/macOS; the persist path now tightens it after write.
-  Windows ignores POSIX mode bits, no-op there.
-- **Portable Playwright browser path.** On the frozen Windows
-  build, ``PLAYWRIGHT_BROWSERS_PATH`` now points inside the
-  portable folder so the ~400 MB Chromium binary lands next to
-  the .exe. "Delete the ffn-dl folder" used to leave the browser
-  stranded under ``%LOCALAPPDATA%\\ms-playwright``.
-  ``os.environ.setdefault`` so an explicit user override still
-  wins; scoped to frozen builds so pip-installed users' existing
-  ``playwright install`` location is respected.
-
-### Change
-
-- **--library-search help documents the direct-download gap.**
-  The FTS auto-refresh hook fires inside ``--update-library``,
-  not on direct-URL downloads — so a freshly downloaded story's
-  chapter bodies land in the text index on the next
-  ``--populate-search`` run. Help text now says so explicitly.
-
-### Tests
-
-- 2 new cf-solve tests: cross-thread cookie pickup (regression
-  guard for the concurrency bug) and restrictive file permissions
-  on the persisted cookie cache. Full suite: 972 green.
-
-## 1.23.32 — 2026-04-24
-
-### Feature
-
-- **In-app installer for optional extras.** Edit → Optional
-  Features... opens a dialog that lists every optional PyPI extra
-  declared in ``pyproject.toml`` (``epub``, ``audio``,
-  ``clipboard``, ``cf-solve``) with its current install status and
-  an Install / Reinstall button. This was already the story for
-  neural attribution backends; the other extras had no in-GUI
-  story, which is especially painful on the frozen Windows .exe
-  where users can't run ``pip`` themselves.
-
-  The installer reuses ``ffn_dl.neural_env`` — same pattern as the
-  attribution backends — so frozen builds pip-install into an
-  embedded-Python ``deps/`` folder that ``ffn_dl/__init__.py`` adds
-  to ``sys.path`` at startup. Pip-installed ffn-dl uses
-  ``sys.executable -m pip install`` directly.
-
-  ``cf-solve`` declares a post-install step (``python -m playwright
-  install chromium``) so the ~400 MB browser binary lands after
-  the pip package without the user having to know about it. The
-  dialog streams pip's stdout + stderr line-by-line into a log
-  pane so you can see progress, and prompts for a restart on a
-  frozen build when the newly-installed package needs a fresh
-  interpreter to import.
-
-### Tests
-
-- 15 new tests for ``optional_features``: registry shape (every
-  entry has the required fields, post_install is list-or-None),
-  pip-hint formatting, ``is_installed`` uses ``find_spec`` (not
-  actual import — avoids triggering the package's side effects
-  every time the dialog refreshes), unsupported-feature handling,
-  pip-path routing for non-frozen, post-install runs for
-  ``cf-solve`` and only ``cf-solve``, bailing on pip failure,
-  bailing on post-install failure, refusing unknown features,
-  refusing on unsupported platform, and frozen-build routing
-  through a faked ``neural_env``. Full suite: 970 green.
-
-## 1.23.31 — 2026-04-24
-
-### Fix
-
-- **Mirror detection: non-ASCII titles were silently excluded.**
-  The title/author normaliser used an ASCII-only character class,
-  so CJK and Cyrillic titles collapsed to empty strings. The
-  empty-title guard then dropped every pair before comparison —
-  making ``--find-mirrors`` a no-op on Japanese, Russian, Chinese,
-  or any non-Latin fanfic library. Normalisation now keeps all
-  Unicode letters and digits; a Japanese/Japanese mirror pair with
-  matching title + author flags the way a Latin pair would.
-- **cf-solve: preserve the cookie ``Secure`` flag** when injecting
-  Playwright-solved cookies into the curl_cffi session. Not a real
-  bug (we only hit HTTPS URLs) but the jar state now matches what
-  the browser actually received.
-- **Clearer error when SQLite lacks FTS5.** Stripped-down SQLite
-  builds (some minimal distro packages) omit FTS5. Previously
-  ``--populate-search`` raised an opaque ``no such module: fts5``;
-  now it raises a RuntimeError that names the cause and points at
-  the fix (install a CPython with FTS5 enabled).
-
-### Tests
-
-- +2 tests: Unicode title normalisation (CJK + Cyrillic survive),
-  and an end-to-end ``find_mirrors`` pair with a CJK title that
-  would have been missed before. Full suite: 955 green.
-
-## 1.23.30 — 2026-04-23
-
-### Fix
-
-- **cf-solve comment accuracy.** The docstring on
-  ``_cf_solve_host_state`` described a three-state ``None``/True/
-  False layout that the code never used (the actual scheme is just
-  True/False). No behaviour change — the comment now matches the
-  code so future readers aren't chasing a ghost semantic.
-
-## 1.23.29 — 2026-04-23
-
-### Feature
-
-- **Playwright-backed Cloudflare-challenge fallback.** ``--cf-solve``
-  opts the scraper into a real-browser fallback for stubborn HTTP
-  403s. When the built-in retry path (browser rotation + client-
-  hint injection) is still hitting the challenge on the second-to-
-  last attempt, a headless Chromium launches via Playwright, waits
-  for the challenge to clear, and hands the solved cookies +
-  UA back for injection into the curl_cffi session. Solved cookies
-  are persisted on disk for 24h so later runs reuse them without
-  re-launching the browser. Per-host dedup keeps concurrent
-  workers from stampeding the solver.
-
-  Opt-in because Playwright ships a ~300MB browser binary:
-  ``pip install 'ffn-dl[cf-solve]'`` then ``playwright install
-  chromium``. ``[all]`` does **not** pull it in. Failures fall back
-  to the normal 403 retries — solver unavailability, timeouts, or
-  human-only captchas never crash the fetch.
-
-### Tests
-
-- 19 new tests for cf-solve: cookie cache round-trip, TTL expiry,
-  hostname sanitisation, solver invocation + ImportError
-  handling + empty-cookie guard, session-injection cookie/UA
-  plumbing, malformed-cookie skip, scraper-level host extraction,
-  on-disk seeding, per-host solver dedup, opt-in gating, and an
-  end-to-end ``_fetch`` integration that drives 403→solver→200 and
-  verifies the final body is returned from the 200 response.
-  Full suite: 953 green.
-
-## 1.23.28 — 2026-04-23
-
-### Feature
+- **Full-text library search.** ``--populate-search DIR`` builds a
+  SQLite FTS5 index of every indexed story's chapter bodies;
+  ``--library-search QUERY`` queries it with full FTS5 syntax
+  (prefix wildcards, NEAR, boolean operators). BM25-ranked,
+  cross-library by default, scopeable via ``--library-dir``.
+  Metadata-only search (``--library-find``) still lives alongside
+  for the "I remember the title" cases. Subsequent
+  ``--update-library`` runs keep the index warm on touched
+  stories; direct-URL downloads land in the index on the next
+  ``--populate-search`` sweep.
 
 - **Cross-site mirror detection.** ``--find-mirrors [DIR]`` reports
-  suspected mirror pairs — the same story posted to FFN and AO3,
-  Literotica and StoriesOnline, etc. — that currently sit in the
-  library as separate tracked works. Three signals contribute:
-  normalised title match (Jaccard ≥ 0.85), normalised author
-  equality, and first-chapter word overlap (Jaccard ≥ 0.6).
-  Flagging requires ≥2 signals so common titles alone don't cause
-  false positives. Read-only — never deletes; the caller decides
-  what to act on. Pass a directory to scope the sweep, or omit
-  it to compare across every indexed library. ``--mirrors-metadata-
-  only`` skips the file-parsing first-chapter pass for fast
-  metadata sweeps. Exits 2 when candidates are found so shell
-  callers can branch.
+  suspected duplicate pairs — the same story posted to FFN and
+  AO3, Literotica and StoriesOnline, etc. Three signals (normalised
+  title match, normalised author match, first-chapter word
+  overlap) and a ≥2-of-3 rule keep common titles from triggering
+  false positives. Read-only; never deletes. Handles CJK /
+  Cyrillic / accented titles as first-class rather than falling
+  through the ASCII filter.
+
+- **Playwright-backed Cloudflare-challenge fallback.** Opt in with
+  ``--cf-solve``: on a stubborn 403 the scraper launches a headless
+  Chromium via Playwright, waits for the challenge to clear, and
+  injects the solved cookies into the curl_cffi session. Cookies
+  are persisted for 24 h under ``~/.cache/ffn-dl/cf-cookies/``
+  (chmod 0600) so later runs reuse them without re-launching the
+  browser. Opt-in because Playwright ships a ~400 MB browser
+  binary.
+
+- **In-app installer for optional features.** **Edit → Optional
+  Features...** lists every optional PyPI extra (``epub``,
+  ``audio``, ``clipboard``, ``cf-solve``) with its current status
+  and an Install / Reinstall button. Frozen builds pip-install
+  into a portable ``deps/`` folder alongside ``ffn-dl`` so "delete
+  the folder" really is a clean uninstall; ``cf-solve`` chains
+  ``playwright install chromium`` automatically. Pip output
+  streams into the dialog log pane.
+
+- **macOS and Linux portable binaries.** CI now builds an Apple-
+  Silicon tarball (``ffn-dl-macos-arm64.tar.gz``) on macos-latest
+  and an x86_64 Linux tarball (``ffn-dl-linux-x86_64.tar.gz``) on
+  ubuntu-latest, both with static ``ffmpeg`` / ``ffprobe``
+  bundled. GUI stays accessible on each platform — wxPython wraps
+  native Cocoa on macOS (VoiceOver reads the widget tree) and
+  GTK3 on Linux (Orca reads via at-spi2).
+
+- **Silent-edit detection.** Authors quietly revise chapters
+  without bumping the chapter count; count-based update checks
+  miss those drifts. ``--populate-hashes DIR`` seeds per-chapter
+  SHA-256 baselines; ``--scan-edits DIR`` probes upstream and
+  reports content drift separately from count changes.
+  ``--update-library`` refreshes baselines on every successful
+  download so silent-edit detection stays current.
+
+- **Stale-complete probe gate.** ``--skip-stale-complete DAYS``
+  skips stories that are both marked Complete and have a file
+  mtime older than the threshold. Gentler than ``--skip-complete``
+  — a fic completed yesterday is still probed (the author may
+  add an epilogue), but one untouched for a year stops costing an
+  HTTP probe each run. ``--force-recheck`` overrides; pending
+  resumes (``remote_chapter_count > local``) bypass.
+
+### Changes
+
+- **Auto-sort cleans category strings before picking a folder.**
+  FFN's ``Books > Harry Potter`` breadcrumb now lands in
+  ``Harry Potter/``, not ``Books _ Harry Potter/``. AO3 crossovers
+  joined with `` / `` split into distinct fandoms and route to
+  the misc bucket instead of ``Harry Potter _ Naruto/``. Single-
+  fandom strings with none of those separators pass through
+  untouched.
+
+- **Royal Road downloads go to ``Original Works/``, not Misc.**
+  RR's catalogue is entirely original fiction, so "no fandom" on
+  an RR story means the work is original, not unclassifiable.
+  Configurable via the ``library_original_folder`` pref
+  (default: ``Original Works``); an explicit category on an RR
+  story still wins.
+
+- **Portable Playwright browser path on frozen Windows.**
+  ``PLAYWRIGHT_BROWSERS_PATH`` is pinned inside the portable
+  folder so the Chromium binary lands next to the .exe. "Delete
+  the ffn-dl folder" used to leave the browser stranded under
+  ``%LOCALAPPDATA%\\ms-playwright``. Scoped to frozen builds so
+  pip-installed users' existing ``playwright install`` layout is
+  respected.
+
+### Fixes
+
+- **cf-solve cookie cache propagates across worker threads.**
+  Under concurrent library updates, workers that hit their first
+  403 before the solving worker persisted cookies used to be
+  short-circuited and exhaust their retry budgets solo. The seed
+  path now re-reads the disk cache on every 403, so a solve by
+  worker A is immediately available to workers B..N on their next
+  retry.
+
+- **cf-solve cookie file is chmod 0600** on POSIX so a session
+  token another local user could replay doesn't sit at the
+  default umask. Windows ignores POSIX mode bits, no-op there.
+
+- **Clearer error when SQLite lacks FTS5.** Stripped-down SQLite
+  builds surface an opaque ``no such module: fts5``;
+  ``--populate-search`` now raises a RuntimeError that names the
+  cause and points at the fix.
+
+### Migration
+
+- Auto-sort layout for FFN and Royal Road downloads has changed
+  (see the two entries under Changes). Upgrading users with an
+  existing library can migrate with
+  ``ffn-dl --reorganize ~/Fanfic --apply`` — the dry-run
+  (omit ``--apply``) prints proposed moves first.
 
 ### Tests
 
-- 14 new tests for mirror detection: normalisation (case, accent,
-  punctuation, apostrophe-collapse), Jaccard edge cases, exact
-  title+author across sites, same-site pairs not flagged, single-
-  signal pairs not flagged, punctuation drift still catches a
-  real mirror, metadata-only mode, drabble-length fallback to
-  metadata signals, summary rendering, empty libraries, and
-  stable ordering by signal strength. Full suite: 934 green.
-
-## 1.23.27 — 2026-04-23
-
-### Feature
-
-- **Full-text library search.** ``--library-find`` only walks
-  metadata (title, author, fandom, URL), so "which fic had that
-  scene at the orphanage?" was unanswerable. Two new flags close
-  that gap:
-
-  - ``--populate-search DIR`` re-parses every story in DIR's
-    library and builds a SQLite FTS5 index of the chapter bodies.
-    The DB lives next to ``library-index.json`` in the portable
-    root. Safe to re-run — each root is wiped and rebuilt cleanly
-    so stale rows from deleted stories don't linger.
-  - ``--library-search QUERY`` queries the index. SQLite FTS5
-    syntax passes through verbatim: bare terms are AND-joined,
-    prefix wildcards (``dragon*``), ``NEAR(a b)``, and boolean
-    operators all work. ``--library-search-limit N`` caps the hit
-    count (default 50, BM25-ranked). ``--library-dir`` scopes the
-    search to one root, same as ``--library-find``.
-
-  Subsequent ``--update-library`` runs auto-refresh affected
-  entries so the first bootstrap is the only expensive step —
-  downloads keep the index warm without an explicit rebuild.
-
-### Tests
-
-- 15 new tests for the FTS5 surface: tag stripping + whitespace
-  normalisation, per-story upsert cleanliness (rewrite doesn't
-  leak old text), root-scoped filter, empty-query and invalid-
-  syntax handling, stats rollup, and four bootstrap cases
-  (full library scan, unsupported formats, missing files, and
-  re-running cleanly). Full suite: 920 green.
-
-## 1.23.26 — 2026-04-23
-
-### Feature
-
-- **Stale-complete probe gate.** ``--update-library
-  --skip-stale-complete DAYS`` skips stories that are both marked
-  Complete and have a file mtime older than the threshold, cutting
-  the wasted HTTP probes for fics the author finished years ago.
-  Unlike ``--skip-complete`` it leaves recently-completed fics in
-  the queue — an author can still mark a story Complete today and
-  publish an epilogue tomorrow. ``--force-recheck`` overrides the
-  gate, and a pending-resume entry (``remote_chapter_count >
-  local``) bypasses it so an owed download isn't delayed another
-  cycle.
-
-### Tests
-
-- 5 new tests for the stale-complete gate: old Complete skipped,
-  freshly-touched Complete kept, old In-Progress kept, pending-
-  resume shortcut still fires when gated, and the gate stays off
-  by default. Full suite: 905 green.
+- +114 tests across the session: FTS5 search primitives, mirror-
+  detection signals and Unicode fallbacks, cf-solve round-trip +
+  concurrency + permissions, optional-features installer, auto-
+  sort category parsing, stale-complete gate, silent-edit
+  detection. Full suite: 981 green.
 
 ## 1.23.25 — 2026-04-23
 

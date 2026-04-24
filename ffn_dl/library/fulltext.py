@@ -51,6 +51,18 @@ SCHEMA_VERSION = 1
 layout ever changes incompatibly so :meth:`FullTextIndex.load` can
 decide between migrate and rebuild."""
 
+_CONTENT_COLUMN_INDEX = 7
+"""Column index of the ``content`` column passed to FTS5's
+``snippet()`` function. Must match the column order in the
+``CREATE VIRTUAL TABLE`` statement below — if columns are reordered
+or inserted, this constant has to move with them."""
+
+_SNIPPET_TOKEN_BUDGET = 16
+"""How many tokens of context ``snippet()`` returns around the
+match. 16 is wide enough to show the matched phrase in a sentence
+fragment the user can orient themselves by, narrow enough to fit
+one hit per CLI line without wrapping on an 80-column terminal."""
+
 
 _WS_RE = re.compile(r"\s+")
 
@@ -289,7 +301,9 @@ class FullTextIndex:
             return []
         sql = (
             "SELECT root, url, relpath, title, author, chapter_number, "
-            "       chapter_title, snippet(chapters, 7, '[', ']', '…', 16) "
+            "       chapter_title, "
+            f"       snippet(chapters, {_CONTENT_COLUMN_INDEX}, "
+            f"               '[', ']', '…', {_SNIPPET_TOKEN_BUDGET}) "
             "FROM chapters "
             "WHERE chapters MATCH ? "
         )

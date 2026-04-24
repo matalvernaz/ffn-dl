@@ -308,7 +308,7 @@ def _handle_merge_parts(
     return True
 
 
-def _apply_library_autosort(args) -> None:
+def _apply_library_autosort(args: argparse.Namespace) -> None:
     """If no explicit --output was passed and a library is configured,
     route fresh downloads into it. Sets args.output to the library
     root and stashes the template + misc folder on args so
@@ -351,7 +351,9 @@ def _apply_library_autosort(args) -> None:
     )
 
 
-def _library_subdir_for(story, args) -> Path | None:
+def _library_subdir_for(
+    story: Story, args: argparse.Namespace,
+) -> Path | None:
     """Compute the library-relative directory for a just-scraped story.
 
     Returns None when auto-sort isn't enabled on these args (caller
@@ -1673,6 +1675,15 @@ def _handle_library_find(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
+_FIND_MIRRORS_ALL_SENTINEL = "ALL"
+"""Argparse ``const=`` value when ``--find-mirrors`` is given without
+an argument. Any string would work; ``"ALL"`` is chosen as a visible
+self-documenting marker so a CLI invocation logged somewhere is
+readable without having to reach for the source. Users who happen
+to have a directory literally named ``ALL`` in the current working
+folder can disambiguate by passing ``./ALL``."""
+
+
 def _handle_find_mirrors(args: argparse.Namespace) -> None:
     """Report suspected cross-site mirror pairs."""
     from .library import find_mirrors
@@ -1681,7 +1692,7 @@ def _handle_find_mirrors(args: argparse.Namespace) -> None:
 
     idx = LibraryIndex.load()
     roots: list[Path] | None
-    if args.find_mirrors and args.find_mirrors != "ALL":
+    if args.find_mirrors and args.find_mirrors != _FIND_MIRRORS_ALL_SENTINEL:
         root = Path(args.find_mirrors)
         if not root.is_dir():
             print(f"Error: {root} is not a directory.", file=sys.stderr)
@@ -1951,7 +1962,7 @@ def _handle_restore_index(args: argparse.Namespace) -> None:
 
 
 def _refresh_fulltext_for(
-    index,
+    index: "LibraryIndex",
     root: Path,
     url: str,
     path: Path,
@@ -2463,7 +2474,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--find-mirrors",
         nargs="?",
-        const="ALL",
+        const=_FIND_MIRRORS_ALL_SENTINEL,
         default=None,
         metavar="DIR",
         help=(
