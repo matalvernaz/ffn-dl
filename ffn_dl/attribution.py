@@ -1534,6 +1534,7 @@ def probe_llm_endpoint(
     import urllib.request
 
     base = _llm_normalize_endpoint(provider, endpoint)
+    logger.info("LLM probe: provider=%s endpoint=%s", provider, base or "(blank)")
     if not base:
         return LLMProbeResult(
             ok=False,
@@ -1574,6 +1575,9 @@ def probe_llm_endpoint(
             body = resp.read().decode("utf-8", errors="replace")
             status = resp.status
     except urllib.error.HTTPError as exc:
+        logger.warning(
+            "LLM probe: HTTP %s from %s (%s)", exc.code, provider, exc.reason,
+        )
         if exc.code in (401, 403):
             return LLMProbeResult(
                 ok=False,
@@ -1589,6 +1593,9 @@ def probe_llm_endpoint(
             detail=f"Server replied HTTP {exc.code}: {exc.reason}",
         )
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        logger.warning(
+            "LLM probe: %s endpoint unreachable: %s", provider, exc,
+        )
         if provider == "ollama":
             hint = (
                 " — is the Ollama daemon running? Use the Install "
@@ -1642,6 +1649,10 @@ def probe_llm_endpoint(
                 else "Check the provider dashboard for available models."
             )
         )
+    logger.info(
+        "LLM probe: ok provider=%s status=%s models=%d",
+        provider, status, len(model_names),
+    )
     return LLMProbeResult(
         ok=True,
         status=status,

@@ -1,6 +1,7 @@
 """Export a Story to EPUB, HTML, or plain text."""
 
 import io
+import logging
 import re
 from datetime import datetime, timezone
 from html import escape
@@ -12,7 +13,24 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 from .atomic import atomic_path, atomic_write_text
 from .models import Story
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_TEMPLATE = "{title} - {author}"
+
+
+def _emit(progress: Callable[[str], None] | None, line: str) -> None:
+    """Send a status line both to the GUI / CLI ``progress`` callback
+    and to the file logger.
+
+    Without this mirror, anything the user sees in the GUI status pane
+    (cache hits, per-chapter LLM calls, circuit-breaker trips, pull
+    progress) is invisible to a postmortem of ``ffn-dl.log``. Routing
+    through one helper keeps the two streams in sync — the on-screen
+    text and the on-disk log say the same thing in the same order.
+    """
+    if progress:
+        progress(line)
+    logger.info(line.lstrip())
 
 
 def _safe_filename(name):
@@ -226,11 +244,20 @@ def _prepare_chapter_html_with_llm_fallback(
             False,
         )
     except LLMUnavailable as exc:
-        if progress:
-            progress(
-                f"  [llm-an] endpoint unreachable ({exc}); "
-                "skipping LLM for remaining chapters"
-            )
+        # Circuit breaker fires here. Log loud (warning, not info) so
+        # a "why didn't my A/N strip work?" postmortem on the file
+        # log surfaces this in a single grep, even when the user is
+        # running with the default INFO log level.
+        logger.warning(
+            "LLM A/N: endpoint unreachable (%s); disabled for remaining "
+            "chapters in this run",
+            exc,
+        )
+        _emit(
+            progress,
+            f"  [llm-an] endpoint unreachable ({exc}); "
+            "skipping LLM for remaining chapters",
+        )
         return (
             _prepare_chapter_html(
                 html, hr_as_stars, strip_notes,
@@ -1120,14 +1147,21 @@ def strip_an_via_llm(
 
     cached = cache.get(cache_key)
     flagged: set[int]
+    # Track whether we already emitted a verification-round summary.
+    # The verification message ("kept N/M flags" / "dropped every
+    # flag") IS the outcome line for that path, so we don't follow
+    # it with a redundant "stripped X paragraphs" message below.
+    outcome_already_logged = False
+
     if isinstance(cached, list):
         flagged = {int(i) for i in cached if isinstance(i, int)}
-        if progress:
-            progress(f"  [llm-an] {chapter_label}: cache hit")
+        _emit(progress, f"  [llm-an] {chapter_label}: cache hit")
     else:
         from . import attribution
-        if progress:
-            progress(f"  [llm-an] {chapter_label}: classifying via {provider}/{model}")
+        _emit(
+            progress,
+            f"  [llm-an] {chapter_label}: classifying via {provider}/{model}",
+        )
         first = attribution.classify_authors_notes_via_llm(
             paragraph_texts, llm_config=llm_config,
         )
@@ -1137,29 +1171,50 @@ def strip_an_via_llm(
         # paragraph is unusually meta). Verify before acting.
         ratio = len(first) / len(paragraph_texts) if paragraph_texts else 0.0
         if first and ratio > _LLM_AN_RUNAWAY_THRESHOLD:
-            if progress:
-                progress(
-                    f"  [llm-an] {chapter_label}: first pass flagged "
-                    f"{len(first)}/{len(paragraph_texts)} paragraphs "
-                    f"({ratio:.0%}); running verification round"
-                )
+            _emit(
+                progress,
+                f"  [llm-an] {chapter_label}: first pass flagged "
+                f"{len(first)}/{len(paragraph_texts)} paragraphs "
+                f"({ratio:.0%}); running verification round",
+            )
             flagged = _llm_an_verify(
                 paragraph_texts, first, llm_config=llm_config,
             )
-            if not flagged and progress:
-                progress(
+            if not flagged:
+                _emit(
+                    progress,
                     f"  [llm-an] {chapter_label}: verification dropped "
-                    "every flag — keeping chapter intact"
+                    "every flag — keeping chapter intact",
                 )
-            elif flagged and progress:
-                progress(
+            else:
+                _emit(
+                    progress,
                     f"  [llm-an] {chapter_label}: verification kept "
-                    f"{len(flagged)}/{len(first)} flag(s)"
+                    f"{len(flagged)}/{len(first)} flag(s)",
                 )
+            outcome_already_logged = True
         else:
             flagged = first
         cache[cache_key] = sorted(flagged)
         _llm_an_save_cache(cache_path, cache)
+
+    # Always emit the outcome so the user sees what the LLM actually
+    # decided per chapter — the bare "classifying via …" line leaves
+    # them wondering whether anything got stripped or the call was a
+    # no-op. Skip when the verification path already said it.
+    if not outcome_already_logged:
+        if flagged:
+            _emit(
+                progress,
+                f"  [llm-an] {chapter_label}: stripped "
+                f"{len(flagged)}/{len(paragraph_texts)} paragraph(s) "
+                "as A/N",
+            )
+        else:
+            _emit(
+                progress,
+                f"  [llm-an] {chapter_label}: no A/N paragraphs found",
+            )
 
     if not flagged:
         return html

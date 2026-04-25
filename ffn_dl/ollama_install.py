@@ -19,10 +19,13 @@ graceful "not supported here, use the web installer" path because
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 import sys
-from typing import Callable, Iterable
+from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 OLLAMA_DOWNLOAD_URL = "https://ollama.com/download"
 """Browser-fallback URL when ``winget`` isn't available — exposed so
@@ -81,9 +84,16 @@ def install_ollama_via_winget(
     success — a user who already has Ollama and clicks Install
     shouldn't see a red error.
     """
-    log = log_callback or (lambda _line: None)
+    # Send every line to the user-facing callback AND the file logger
+    # so a "what happened during install?" debug pass can read the
+    # whole transcript out of ffn-dl.log without the GUI being open.
+    def log(line: str) -> None:
+        if log_callback:
+            log_callback(line)
+        logger.info("ollama-install: %s", line)
 
     if not winget_supported():
+        logger.info("ollama-install: winget unsupported on this platform")
         log(
             "winget not found. Open "
             f"{OLLAMA_DOWNLOAD_URL} and run the installer manually."
@@ -105,13 +115,22 @@ def install_ollama_via_winget(
     except FileNotFoundError:
         # Race: winget vanished between shutil.which and Popen
         # (uninstalled mid-flight). Treat the same as unsupported.
+        logger.warning(
+            "ollama-install: winget Popen failed with FileNotFoundError "
+            "(uninstalled mid-flight?)"
+        )
         log(
             "winget vanished from PATH. Open "
             f"{OLLAMA_DOWNLOAD_URL} and run the installer manually."
         )
         return False
 
-    return _consume_winget_output(proc, log)
+    ok = _consume_winget_output(proc, log)
+    logger.info(
+        "ollama-install: finished ok=%s exit_code=%s",
+        ok, proc.returncode,
+    )
+    return ok
 
 
 def _consume_winget_output(
@@ -204,7 +223,10 @@ def pull_ollama_model(
     import urllib.error
     import urllib.request
 
-    log = progress_callback or (lambda _line: None)
+    def log(line: str) -> None:
+        if progress_callback:
+            progress_callback(line)
+        logger.info("ollama-pull: %s", line)
 
     base = (endpoint or "").strip().rstrip("/") or "http://localhost:11434"
     url = f"{base}/api/pull"
@@ -216,6 +238,7 @@ def pull_ollama_model(
         method="POST",
     )
 
+    logger.info("ollama-pull: model=%s endpoint=%s", model, base)
     log(f"Pulling {model} from {base}...")
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)
@@ -225,16 +248,23 @@ def pull_ollama_model(
             detail = exc.read().decode("utf-8", errors="replace")[:500]
         except Exception:
             pass
+        logger.warning(
+            "ollama-pull: HTTP %s from %s — %s",
+            exc.code, url, detail or exc.reason,
+        )
         log(
             f"  Pull rejected (HTTP {exc.code}): "
             f"{detail or exc.reason}"
         )
         return False
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        logger.warning("ollama-pull: endpoint unreachable: %s", exc)
         log(f"  Endpoint unreachable: {exc}. Start Ollama and try again.")
         return False
 
-    return _consume_ollama_pull_stream(resp, log)
+    ok = _consume_ollama_pull_stream(resp, log)
+    logger.info("ollama-pull: finished ok=%s model=%s", ok, model)
+    return ok
 
 
 def _consume_ollama_pull_stream(

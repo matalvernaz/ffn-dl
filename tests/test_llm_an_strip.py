@@ -133,6 +133,116 @@ class TestStripAnViaLlmSinglePass:
         # Only the first-pass call; no verification round.
         assert len(calls) == 1
 
+    def test_emits_outcome_when_paragraphs_stripped(
+        self, tmp_path, monkeypatch,
+    ):
+        """User-visible "stripped X/Y paragraph(s) as A/N" message —
+        without it, the GUI status pane only shows "classifying via …"
+        and the user can't tell whether anything actually happened."""
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        html = (
+            "<p>Story paragraph one.</p>"
+            "<p>Story paragraph two.</p>"
+            "<p>Story paragraph three.</p>"
+            "<p>A/N: catch you next chapter</p>"
+        )
+        _stub_llm(monkeypatch, [
+            json.dumps({"1": False, "2": False, "3": False, "4": True}),
+        ])
+
+        captured: list[str] = []
+        exporters.strip_an_via_llm(
+            html, llm_config=_llm_config(),
+            site_name="ffn", story_id=1, chapter_number=7,
+            progress=captured.append,
+        )
+        outcome = [l for l in captured if "stripped" in l]
+        assert outcome, captured
+        # Format pin: "stripped 1/4 paragraph(s) as A/N"
+        assert "1/4" in outcome[0]
+        assert "as A/N" in outcome[0]
+
+    def test_emits_outcome_when_nothing_flagged(
+        self, tmp_path, monkeypatch,
+    ):
+        """Symmetric: a chapter with zero flags must say "no A/N
+        paragraphs found" so the user knows the pass ran and decided
+        nothing was a note — distinct from "ran but errored"."""
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        html = (
+            "<p>Para one.</p>"
+            "<p>Para two.</p>"
+            "<p>Para three.</p>"
+            "<p>Para four.</p>"
+        )
+        _stub_llm(monkeypatch, [
+            json.dumps({"1": False, "2": False, "3": False, "4": False}),
+        ])
+
+        captured: list[str] = []
+        exporters.strip_an_via_llm(
+            html, llm_config=_llm_config(),
+            site_name="ffn", story_id=1, chapter_number=2,
+            progress=captured.append,
+        )
+        assert any("no A/N paragraphs found" in l for l in captured), captured
+
+    def test_outcome_emitted_on_cache_hit_too(
+        self, tmp_path, monkeypatch,
+    ):
+        """Even a cache hit must report the per-chapter outcome — a
+        re-export that's all cache-hits shouldn't go silent."""
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        html = (
+            "<p>Para one.</p>"
+            "<p>Para two.</p>"
+            "<p>Para three.</p>"
+            "<p>Para four.</p>"
+        )
+        # Prime the cache.
+        _stub_llm(monkeypatch, [
+            json.dumps({"1": False, "2": False, "3": False, "4": True}),
+        ])
+        exporters.strip_an_via_llm(
+            html, llm_config=_llm_config(),
+            site_name="ffn", story_id=99, chapter_number=3,
+        )
+        # Second call: cache hit, no LLM round-trip.
+        _stub_llm(monkeypatch, [])  # any call would IndexError
+        captured: list[str] = []
+        exporters.strip_an_via_llm(
+            html, llm_config=_llm_config(),
+            site_name="ffn", story_id=99, chapter_number=3,
+            progress=captured.append,
+        )
+        # Both the "cache hit" line AND the outcome line must appear.
+        assert any("cache hit" in l for l in captured), captured
+        assert any("stripped" in l for l in captured), captured
+
+    def test_progress_calls_mirror_to_file_logger(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """Every line the user sees in the GUI status pane is also
+        written to the file logger — without this, a postmortem of
+        ffn-dl.log can't tell what the LLM A/N pass actually did."""
+        import logging as _logging
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        html = (
+            "<p>One.</p><p>Two.</p><p>Three.</p>"
+            "<p>A/N: see you</p>"
+        )
+        _stub_llm(monkeypatch, [
+            json.dumps({"1": False, "2": False, "3": False, "4": True}),
+        ])
+        with caplog.at_level(_logging.INFO, logger="ffn_dl.exporters"):
+            exporters.strip_an_via_llm(
+                html, llm_config=_llm_config(),
+                site_name="ffn", story_id=5, chapter_number=4,
+            )
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "classifying via" in joined
+        assert "stripped" in joined
+
 
 class TestStripAnViaLlmCache:
     def test_cache_miss_then_hit_skips_second_call(self, tmp_path, monkeypatch):
