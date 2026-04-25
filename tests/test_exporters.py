@@ -201,6 +201,157 @@ class TestStructuralNoteStripping:
         assert self._strip(html).count("<p>") == 2
 
 
+class TestNewLabelStripping:
+    """Prefix-pass labels added in 2.2.4 to plug the leaks the regex
+    used to miss in real FFN files (Disclaimer, Quick Note,
+    Announcement, Beta'd by). Each label requires a separator so a
+    sentence starting with the literal word doesn't get swept."""
+
+    def _strip(self, html):
+        from ffn_dl.exporters import strip_note_paragraphs
+        return strip_note_paragraphs(html)
+
+    def test_strips_disclaimer_label(self):
+        html = (
+            "<p>Disclaimer: I do not own Naruto.</p>"
+            "<p>The mission began at dawn.</p>"
+        )
+        out = self._strip(html)
+        assert "I do not own" not in out
+        assert "mission began at dawn" in out
+
+    def test_strips_quick_note_label(self):
+        for label in ("Quick Note: edit later", "Quick Notes: read this"):
+            html = f"<p>{label}</p><p>Real prose continues.</p>"
+            out = self._strip(html)
+            assert label not in out, f"should strip: {label}"
+            assert "Real prose continues." in out
+
+    def test_strips_announcement_label(self):
+        html = (
+            "<p>Announcement: hiatus until June.</p>"
+            "<p>The lake reflected the morning sun.</p>"
+        )
+        out = self._strip(html)
+        assert "Announcement" not in out
+        assert "lake reflected" in out
+
+    def test_strips_beta_credit(self):
+        html = (
+            "<p>Beta'd by HelpfulFriend.</p>"
+            "<p>The day continued normally.</p>"
+        )
+        out = self._strip(html)
+        assert "HelpfulFriend" not in out
+        assert "day continued" in out
+
+    def test_keeps_word_disclaimer_in_prose(self):
+        # Without the colon/dash separator it's just a sentence — the
+        # regex must NOT eat narrative text that mentions the word.
+        html = (
+            "<p>The disclaimer printed on the box was unreadable.</p>"
+            "<p>She squinted at it for a moment.</p>"
+        )
+        assert self._strip(html).count("<p>") == 2
+
+    def test_keeps_quick_note_in_prose(self):
+        html = (
+            "<p>He took a quick note in his journal before moving on.</p>"
+        )
+        assert self._strip(html).count("<p>") == 1
+
+
+class TestStructuralRelaxedPreDivider:
+    """Pass 2b: pre-divider single-block disclaimer drop (added 2.2.4).
+    The dominant FFN shape ``<p><strong>Disclaimer: ...</strong></p>
+    <hr>story prose`` doesn't satisfy the banner-gated top pass
+    because the post-divider paragraph is plain prose. The relaxed
+    pass takes ≤3 fully-bold paragraphs containing a hard note
+    keyword and drops them without needing a banner."""
+
+    def _strip(self, html):
+        from ffn_dl.exporters import strip_note_paragraphs
+        return strip_note_paragraphs(html)
+
+    def test_strips_bold_disclaimer_before_divider(self):
+        # The True Potential.html shape that prompted this rule.
+        html = (
+            "<p><strong>Disclaimer: I do not own Naruto.</strong></p>"
+            '<div class="scenebreak">* * *</div>'
+            "<p><em>The Sannin was about to check on Aō.</em></p>"
+            "<p>He scanned the air and saw a crow.</p>"
+        )
+        out = self._strip(html)
+        assert "Disclaimer" not in out
+        assert "I do not own" not in out
+        assert "Sannin was about to" in out
+
+    def test_strips_two_paragraph_bold_disclaimer(self):
+        # Some authors split disclaimer + plug across two bold
+        # paragraphs. Cap is 3, so 2 still qualifies.
+        html = (
+            "<p><strong>I don't own Worm.</strong></p>"
+            "<p><strong>Support me on Patreon for early chapters.</strong></p>"
+            "<hr/>"
+            "<p>Taylor walked home in the rain.</p>"
+        )
+        out = self._strip(html)
+        assert "Patreon" not in out
+        assert "Worm" not in out
+        assert "Taylor walked home" in out
+
+    def test_does_not_strip_dramatic_bold_line_without_keyword(self):
+        # A bolded narrative beat before a flashback divider must
+        # survive — no hard keyword, no drop.
+        html = (
+            "<p><strong>And then the world ended.</strong></p>"
+            "<hr/>"
+            "<p>Three weeks earlier.</p>"
+            "<p>The day had started ordinarily enough.</p>"
+        )
+        out = self._strip(html)
+        assert "And then the world ended." in out
+        assert "Three weeks earlier" in out
+
+    def test_does_not_strip_unbolded_disclaimer_block_without_banner(self):
+        # Plain-text "Disclaimer: ..." with no bold and no banner is
+        # still caught by the prefix pass for that line, but the
+        # surrounding prose stays.
+        html = (
+            "<p>Disclaimer: nothing belongs to me.</p>"
+            "<hr/>"
+            "<p>Story starts here.</p>"
+        )
+        out = self._strip(html)
+        # Disclaimer label removed by prefix pass.
+        assert "nothing belongs to me" not in out
+        # But the divider and story stay because Pass 2b requires
+        # all-bold pre-block.
+        assert "Story starts here" in out
+
+    def test_does_not_strip_long_pre_divider_block(self):
+        # 5-paragraph pre-block exceeds the ≤3 cap — even fully
+        # bolded with a keyword, this is too much to assume is A/N.
+        # Real authors don't write 5-paragraph disclaimers.
+        html = (
+            "<p><strong>Disclaimer.</strong></p>"
+            "<p><strong>Bold para 2.</strong></p>"
+            "<p><strong>Bold para 3.</strong></p>"
+            "<p><strong>Bold para 4.</strong></p>"
+            "<p><strong>Bold para 5.</strong></p>"
+            "<hr/>"
+            "<p>Story.</p>"
+        )
+        out = self._strip(html)
+        # The single-paragraph "Disclaimer." is still caught by the
+        # prefix pass (Pass 1) — it's a labelled paragraph by itself.
+        # The other four bolded paragraphs survive the structural
+        # pass because the block is too long to safely assume A/N.
+        assert "Bold para 2" in out
+        assert "Bold para 5" in out
+        assert "Story." in out
+
+
 class TestDividerAsStars:
     """Text-based dividers (``-x-x-x-``, long ``***`` runs) get the same
     ``* * *`` visualisation as real ``<hr>`` tags when ``hr_as_stars``

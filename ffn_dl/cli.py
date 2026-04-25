@@ -120,6 +120,61 @@ def _llm_config_from_args(args: argparse.Namespace) -> dict | None:
     }
 
 
+def _llm_strip_notes_config(args: argparse.Namespace) -> dict | None:
+    """Resolve the LLM config used by ``--llm-strip-notes`` exports.
+
+    Mirrors :func:`_llm_config_from_args` but gates on
+    ``args.llm_strip_notes`` (a separate user-facing toggle from the
+    audiobook attribution backend) so a user can run an HTML/EPUB
+    export with the LLM A/N backstop on without having opted in to
+    the LLM-backed audiobook narrator. Reuses the same prefs/env
+    plumbing so credentials / provider choice / model are configured
+    once and shared between the two features.
+    """
+    if not getattr(args, "llm_strip_notes", False):
+        return None
+
+    from . import prefs as _prefs_mod
+
+    cli_prefs = _prefs_mod.Prefs()
+
+    provider = (
+        getattr(args, "llm_provider", None)
+        or cli_prefs.get(_prefs_mod.KEY_LLM_PROVIDER)
+        or "ollama"
+    )
+    model = (
+        getattr(args, "llm_model", None)
+        or cli_prefs.get(_prefs_mod.KEY_LLM_MODEL)
+        or ""
+    )
+    endpoint = (
+        getattr(args, "llm_endpoint", None)
+        or cli_prefs.get(_prefs_mod.KEY_LLM_ENDPOINT)
+        or ""
+    )
+
+    api_key = getattr(args, "llm_api_key", None) or ""
+    if not api_key:
+        env_for_provider = {
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "openai-compatible": "OPENROUTER_API_KEY",
+        }
+        env_var = env_for_provider.get(provider)
+        if env_var:
+            api_key = os.environ.get(env_var, "")
+    if not api_key:
+        api_key = cli_prefs.get(_prefs_mod.KEY_LLM_API_KEY) or ""
+
+    return {
+        "provider": provider,
+        "model": model,
+        "api_key": api_key,
+        "endpoint": endpoint,
+    }
+
+
 def _scrape_author_stories(
     url: str, args: argparse.Namespace,
 ) -> tuple[str, list[str]]:
@@ -281,6 +336,8 @@ def _handle_merge_series(
                 merged, str(output_dir), template=args.name,
                 hr_as_stars=args.hr_as_stars,
                 strip_notes=args.strip_notes,
+                llm_config=_llm_strip_notes_config(args),
+                progress=print,
             )
         print(f"  Saved: {path}")
     return all_ok
@@ -376,6 +433,8 @@ def _handle_merge_parts(
             merged, str(output_dir), template=args.name,
             hr_as_stars=args.hr_as_stars,
             strip_notes=args.strip_notes,
+            llm_config=_llm_strip_notes_config(args),
+            progress=print,
         )
     print(f"  Saved: {path}")
     return True
@@ -735,6 +794,8 @@ def _download_one(
                 template=args.name,
                 hr_as_stars=args.hr_as_stars,
                 strip_notes=args.strip_notes,
+                llm_config=_llm_strip_notes_config(args),
+                progress=status,
             )
 
         # Filename preservation on update: if the user's existing
@@ -3211,6 +3272,20 @@ def _build_parser() -> argparse.ArgumentParser:
             "Applies to every output format including audio. Heuristic — "
             "catches the common FFN pattern; AO3's structured notes are "
             "already excluded at scrape time."
+        ),
+    )
+    parser.add_argument(
+        "--llm-strip-notes",
+        action="store_true",
+        help=(
+            "Pair with --strip-notes to send each top-level paragraph the "
+            "regex pass kept through the configured LLM (--llm-provider / "
+            "--llm-model / --llm-api-key, or the GUI's LLM prefs) for a "
+            "second-pass A/N decision. Catches outros that don't trip the "
+            "regex's keyword gate and shout-outs buried mid-chapter. "
+            "Costs one LLM call per chapter — local Ollama is free but "
+            "slow, OpenAI/Anthropic charge per token. Off by default. "
+            "Results are cached per story so re-exports don't re-spend."
         ),
     )
     parser.add_argument(

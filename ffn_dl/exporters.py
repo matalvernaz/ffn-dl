@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
+from typing import Callable
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
@@ -153,10 +154,37 @@ def html_to_text(html: str) -> str:
 # ── Exporters ─────────────────────────────────────────────────────
 
 
-def _prepare_chapter_html(html: str, hr_as_stars: bool, strip_notes: bool) -> str:
-    """Apply optional chapter-level transformations in the right order."""
+def _prepare_chapter_html(
+    html: str,
+    hr_as_stars: bool,
+    strip_notes: bool,
+    *,
+    llm_config: dict | None = None,
+    site_name: str | None = None,
+    story_id=None,
+    chapter_number: int | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> str:
+    """Apply optional chapter-level transformations in the right order.
+
+    ``llm_config`` enables a second-pass A/N strip via
+    :func:`strip_an_via_llm`. Only runs when ``strip_notes`` is also
+    on — the LLM is a backstop for cases the regex misses, not a
+    replacement for it. ``site_name`` / ``story_id`` /
+    ``chapter_number`` are forwarded into the LLM helper's per-story
+    disk cache so re-exports don't re-spend tokens.
+    """
     if strip_notes:
         html = strip_note_paragraphs(html)
+        if llm_config:
+            html = strip_an_via_llm(
+                html,
+                llm_config=llm_config,
+                site_name=site_name,
+                story_id=story_id,
+                chapter_number=chapter_number,
+                progress=progress,
+            )
     if hr_as_stars:
         html = _apply_hr_as_stars(html)
     return html
@@ -168,9 +196,13 @@ def export_txt(
     template: str = DEFAULT_TEMPLATE,
     hr_as_stars: bool = False,  # accepted for signature parity; TXT always renders hr as "* * *"
     strip_notes: bool = False,
+    llm_config: dict | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> Path:
     filename = format_filename(story, template) + ".txt"
     path = Path(output_dir) / filename
+
+    site_name, _publisher = _site_info(story.url)
 
     # Assemble in memory and hand the finished payload to the atomic
     # writer so a crash mid-export can't leave a half-written file in
@@ -182,7 +214,18 @@ def export_txt(
     buf.write("=" * 60 + "\n")
     for ch in story.chapters:
         buf.write(f"\n\n--- {ch.title} ---\n\n")
-        html = strip_note_paragraphs(ch.html) if strip_notes else ch.html
+        html = ch.html
+        if strip_notes:
+            html = strip_note_paragraphs(html)
+            if llm_config:
+                html = strip_an_via_llm(
+                    html,
+                    llm_config=llm_config,
+                    site_name=site_name,
+                    story_id=story.id,
+                    chapter_number=ch.number,
+                    progress=progress,
+                )
         buf.write(html_to_text(html))
     atomic_write_text(path, buf.getvalue())
     return path
@@ -194,9 +237,13 @@ def export_html(
     template: str = DEFAULT_TEMPLATE,
     hr_as_stars: bool = False,
     strip_notes: bool = False,
+    llm_config: dict | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> Path:
     filename = format_filename(story, template) + ".html"
     path = Path(output_dir) / filename
+
+    site_name, _publisher = _site_info(story.url)
 
     title_esc = escape(story.title)
     author_esc = escape(story.author)
@@ -256,7 +303,14 @@ def export_html(
     for i, ch in enumerate(story.chapters, 1):
         ch_title = escape(ch.title)
         buf.write(f'<div class="chapter" id="chapter-{i}"><h2>{ch_title}</h2>\n')
-        chapter_html = _prepare_chapter_html(ch.html, hr_as_stars, strip_notes)
+        chapter_html = _prepare_chapter_html(
+            ch.html, hr_as_stars, strip_notes,
+            llm_config=llm_config,
+            site_name=site_name,
+            story_id=story.id,
+            chapter_number=ch.number,
+            progress=progress,
+        )
         buf.write(chapter_html)
         buf.write("\n</div><hr>\n")
 
@@ -479,6 +533,11 @@ def _apply_hr_as_stars(html: str) -> str:
 # Phrases that start an author's note paragraph on FFN (where notes are
 # mingled with story text in the #storytext container). Kept conservative
 # so we don't strip in-story prose that happens to start with "Note".
+#
+# Each label is required to be followed by a separator (colon / dash /
+# end-of-strong-tag-style boundary) — that's what keeps a story sentence
+# starting with the literal word "Disclaimer" or "Quick Note" out of the
+# strip set: only the labelled-paragraph form qualifies.
 _AN_MARKER_RE = re.compile(
     r"""^\s*
         [\[\(]?\s*                             # optional opening bracket
@@ -488,6 +547,15 @@ _AN_MARKER_RE = re.compile(
             | an(?=\s*[:\-—–])                 # "AN" when followed by a separator
             | author[’'`´]?s?\s+note            # Author's Note / Author Note
             | author[’'`´]?s?\s+n\.?            # Author's N. (rare)
+            | disclaimer(?=\s*[:\-—–])         # "Disclaimer:" — extremely common
+                                                # FFN chapter prefix that the
+                                                # structural passes used to miss
+                                                # because the post-divider para
+                                                # was prose, not a Chapter banner.
+            | quick\s+notes?(?=\s*[:\-—–])     # "Quick Note:" / "Quick Notes:"
+            | announcement(?=\s*[:\-—–])       # "Announcement:"
+            | beta[’'`´]?d?\s+by               # "Beta'd by Name" / "Betaed by"
+            | beta(?=\s*[:\-—–])               # "Beta:"
         )
         [\s:\-—–)\]\.]*                        # trailing punctuation
     """,
@@ -549,7 +617,58 @@ _NOTE_KEYWORDS = (
     "author's note", "author note", "a/n",  # belt-and-braces: the
     # prefix pass catches these when they *start* the paragraph, this
     # list catches them when they're buried mid-paragraph.
+    # Ownership disclaimers — virtually always part of an A/N block,
+    # the wording is a near-template across fandom.
+    "disclaimer",
+    "i do not own", "i don't own", "i own nothing",
+    "all rights belong", "rights belong to",
+    "credit goes to", "credit to the author",
+    # Beta/proofreader credits.
+    "beta'd by", "beta-d by", "betaed by",
+    "thank you to my beta", "thanks to my beta",
 )
+
+
+# Subset of ``_NOTE_KEYWORDS`` that's so strongly indicative of an
+# author's note that the structural pass treats it as a *hard* signal —
+# enough to drop a pre-divider all-bold block on its own without
+# requiring a Chapter-banner paragraph after the divider. Keep this
+# list ruthlessly tight: anything that can plausibly appear in narrative
+# prose belongs in the soft list above, not here. (For example
+# ``thanks for reading`` is real-prose-plausible — a character
+# thanking another in-world; ``patreon`` and ``i do not own`` are not.)
+_HARD_NOTE_KEYWORDS = (
+    "patreon",
+    "pat re on",
+    "ko-fi", "kofi",
+    "disclaimer",
+    "i do not own", "i don't own", "i own nothing",
+    "beta'd by", "beta-d by", "betaed by",
+    "leave a review",
+    "please review",
+    "please favorite", "please favourite",
+    "author's note", "author note", "a/n",
+)
+
+
+def _block_has_hard_note_keyword(items):
+    """Stricter sibling of :func:`_block_has_note_keyword`. Returns True
+    when any paragraph contains a phrase from ``_HARD_NOTE_KEYWORDS``.
+
+    Used by the relaxed pre-divider pass: a single all-bold pre-divider
+    block with a hard signal is enough to drop the block without the
+    usual post-divider banner requirement, because the combination of
+    "fully bold" + "patreon/disclaimer/I do not own" is virtually never
+    real prose.
+    """
+    for kind, node in items:
+        text = node.get_text(" ", strip=True) if kind == "tag" else str(node)
+        if not text:
+            continue
+        lower = text.lower()
+        if any(kw in lower for kw in _HARD_NOTE_KEYWORDS):
+            return True
+    return False
 
 
 def _block_has_note_keyword(items):
@@ -677,7 +796,7 @@ def strip_note_paragraphs(html: str) -> str:
 
     top_drop_end = -1  # last index the top pass consumed (-1 = untouched)
 
-    # Pass 2: top structural — needs divider + banner + note signal.
+    # Pass 2a: top structural — divider + Chapter banner + note signal.
     if divider_indexes:
         first = divider_indexes[0]
         banner_idx = None
@@ -696,6 +815,34 @@ def strip_note_paragraphs(html: str) -> str:
                 for item in top_level[: banner_idx + 1]:
                     _drop(item)
                 top_drop_end = banner_idx
+
+    # Pass 2b: top structural relaxed — divider + small all-bold pre-
+    # block + hard note keyword, with no banner requirement after the
+    # divider. Triggered by FFN's overwhelmingly common "<p><strong>
+    # Disclaimer: I don't own X</strong></p><hr>story prose" shape,
+    # which the banner-gated pass refuses because the post-divider
+    # paragraph is plain story content, not a "Chapter N" line. Three
+    # corroborating signals (≤3-paragraph pre-block + fully bold +
+    # hard keyword) keep this from misfiring on a dramatic bold line
+    # before a flashback divider.
+    if divider_indexes and top_drop_end < 0:
+        first = divider_indexes[0]
+        pre = top_level[:first]
+        # The cap stops us from swallowing several paragraphs of
+        # story prose if a dramatic narrative beat happens to be
+        # bolded — real disclaimers are 1–2 paragraphs at most.
+        _MAX_PRE_DIVIDER_PARAGRAPHS = 3
+        if (
+            pre
+            and len(pre) <= _MAX_PRE_DIVIDER_PARAGRAPHS
+            and _block_is_all_bold(pre)
+            and _block_has_hard_note_keyword(pre)
+        ):
+            # Drop the pre-block and the divider itself so the chapter
+            # opens cleanly on the first prose paragraph.
+            for item in top_level[: first + 1]:
+                _drop(item)
+            top_drop_end = first
 
     # Pass 3: bottom structural — needs divider + post-block note keyword.
     if divider_indexes:
@@ -717,12 +864,270 @@ def strip_note_paragraphs(html: str) -> str:
     return str(soup)
 
 
+# ── LLM author's-note backstop (HTML pipeline) ────────────────────
+
+
+# Threshold above which the LLM's flag set looks like a hallucination
+# rather than an honest A/N pass — most chapters are >80% prose, so a
+# classifier saying "drop more than two-fifths of this chapter" is
+# almost always wrong about a chunk of it.
+_LLM_AN_RUNAWAY_THRESHOLD = 0.40
+
+# Re-classify cap during the verification round. Anything that survives
+# this stricter pass is what we actually drop. Tighter than the first
+# pass because the verification prompt asks for high confidence only.
+_LLM_AN_VERIFY_THRESHOLD = 0.40
+
+# Don't bother classifying chapters with too few paragraphs — there's
+# nothing for a backstop to catch and the round-trip is pure latency.
+_LLM_AN_MIN_PARAGRAPHS = 4
+
+
+def _llm_an_cache_path(site_name: str, story_id) -> Path | None:
+    """Return the on-disk cache file for LLM A/N classifications, or
+    None if the cache directory can't be created."""
+    try:
+        from .scraper import _default_cache_dir
+    except ImportError:  # pragma: no cover — defensive
+        return None
+    try:
+        base = _default_cache_dir() / "llm_an"
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(story_id))
+    return base / f"{site_name}_{safe_id}.json"
+
+
+def _llm_an_cache_key(paragraphs: list[str], model: str) -> str:
+    """Stable cache key for a chapter's paragraph list under a given
+    model. Hashes the joined text so re-classifying re-runs only when
+    the chapter content actually changes (the regex pre-pass is
+    deterministic, so its output is stable for stable inputs)."""
+    import hashlib
+
+    h = hashlib.sha1(usedforsecurity=False)
+    for p in paragraphs:
+        h.update(p.encode("utf-8", errors="replace"))
+        h.update(b"\x1e")  # record separator so neighbouring paras don't blur
+    h.update(b"\x1d")
+    h.update((model or "").encode("utf-8", errors="replace"))
+    return h.hexdigest()
+
+
+def _llm_an_load_cache(path: Path | None) -> dict:
+    if path is None or not path.exists():
+        return {}
+    try:
+        import json
+        return json.loads(path.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _llm_an_save_cache(path: Path | None, data: dict) -> None:
+    if path is None:
+        return
+    try:
+        import json
+        path.write_text(
+            json.dumps(data, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+_LLM_AN_VERIFY_PROMPT = (
+    "You are an editor preparing fanfiction for clean reading. The "
+    "user wants the actual story text, not author commentary. Earlier "
+    "you flagged the paragraphs below as author's notes — but the "
+    "flag rate was high enough that we want a second look before "
+    "dropping that much content. Re-classify each numbered paragraph "
+    "with HIGH CONFIDENCE only: mark `true` only if the paragraph "
+    "is unambiguously author commentary (disclaimer / Patreon plug / "
+    "thanks for reviews / update schedule / response to reader / "
+    "translator note). When in doubt, mark `false` and let the "
+    "paragraph stay in the story. Respond with ONLY a JSON object "
+    'whose keys are paragraph numbers (as strings) and values are '
+    'booleans. Example: {"1": true, "2": false}.'
+)
+
+
+def _llm_an_verify(
+    paragraphs: list[str],
+    flagged: set[int],
+    *,
+    llm_config: dict,
+) -> set[int]:
+    """Send the flagged subset back to the LLM with a stricter prompt.
+
+    Used when the first-pass flag rate exceeds
+    ``_LLM_AN_RUNAWAY_THRESHOLD`` — rather than discarding every flag
+    on the assumption that the model misread the chapter, we ask it
+    to re-decide on just the suspect paragraphs with explicit
+    "high confidence only" instructions. The intersection wins:
+    a paragraph has to fail both passes to be dropped.
+
+    Falls back to ``set()`` (i.e., drop nothing) on any transport or
+    parse failure, mirroring the regex-only behaviour that's the
+    contract for a misconfigured backend.
+    """
+    if not flagged or not llm_config:
+        return set()
+    from . import attribution
+
+    subset_indices = sorted(flagged)
+    subset = [paragraphs[i] for i in subset_indices]
+
+    # Re-use the existing classifier infrastructure for the round-trip
+    # but with the stricter system prompt. The classifier accepts a
+    # custom system prompt via the prompt_override hook so we don't
+    # have to duplicate the JSON-parse / endpoint plumbing.
+    second_flagged = attribution.classify_authors_notes_via_llm(
+        subset,
+        llm_config=llm_config,
+        system_prompt_override=_LLM_AN_VERIFY_PROMPT,
+    )
+    # Map second-pass indices (which are 0-based on ``subset``) back
+    # onto the original chapter-paragraph indices.
+    return {subset_indices[i] for i in second_flagged}
+
+
+def strip_an_via_llm(
+    html: str,
+    *,
+    llm_config: dict | None,
+    site_name: str | None = None,
+    story_id=None,
+    chapter_number: int | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> str:
+    """Drop paragraph-level author's notes the regex pass missed.
+
+    Runs after :func:`strip_note_paragraphs` so the cheap regex catches
+    the easy 80% (explicit ``A/N:`` labels, structural pre/post-divider
+    blocks) without burning LLM tokens. The LLM picks up the disguised
+    cases — outros without keyword hits, mid-chapter shout-outs, the
+    author posting a "edit: thanks for the corrections!" without any
+    of the structural cues we look for.
+
+    Behaviour:
+
+    * No-op when ``llm_config`` is None or empty.
+    * No-op for chapters with fewer than ``_LLM_AN_MIN_PARAGRAPHS``
+      top-level paragraphs.
+    * Two-round verification when the first pass flags more than
+      ``_LLM_AN_RUNAWAY_THRESHOLD`` of the chapter — the second
+      round uses a stricter "high confidence only" prompt and only
+      paragraphs surviving both rounds get dropped. This is the
+      "extra verification before declaring the chapter worthless"
+      gate.
+    * Per-story disk cache keyed by chapter content hash + model
+      name. Re-exporting the same story doesn't re-spend tokens on
+      unchanged chapters; bumping the model invalidates the cache
+      naturally since the model name is part of the key.
+
+    Network and parse failures degrade silently to "no change" — the
+    LLM is purely additive on top of the regex, never load-bearing.
+    """
+    if not html or not llm_config:
+        return html
+    provider = llm_config.get("provider", "")
+    model = llm_config.get("model", "")
+    if not provider or not model:
+        return html
+
+    soup = BeautifulSoup(html, "html.parser")
+    paragraph_tags: list = []
+    paragraph_texts: list[str] = []
+    for ch in list(soup.children):
+        if not isinstance(ch, Tag):
+            continue
+        if ch.name not in {"p", "blockquote", "div"}:
+            continue
+        text = ch.get_text(" ", strip=True)
+        if not text:
+            continue
+        paragraph_tags.append(ch)
+        paragraph_texts.append(text)
+
+    if len(paragraph_texts) < _LLM_AN_MIN_PARAGRAPHS:
+        return html
+
+    cache_path = (
+        _llm_an_cache_path(site_name, story_id)
+        if site_name and story_id is not None
+        else None
+    )
+    cache = _llm_an_load_cache(cache_path)
+    cache_key = _llm_an_cache_key(paragraph_texts, model)
+    chapter_label = (
+        f"chapter {chapter_number}" if chapter_number is not None else "chapter"
+    )
+
+    cached = cache.get(cache_key)
+    flagged: set[int]
+    if isinstance(cached, list):
+        flagged = {int(i) for i in cached if isinstance(i, int)}
+        if progress:
+            progress(f"  [llm-an] {chapter_label}: cache hit")
+    else:
+        from . import attribution
+        if progress:
+            progress(f"  [llm-an] {chapter_label}: classifying via {provider}/{model}")
+        first = attribution.classify_authors_notes_via_llm(
+            paragraph_texts, llm_config=llm_config,
+        )
+        # Runaway guard: too many flags on a single chapter is the
+        # classifier's failure mode (occasional models read a long
+        # chapter as one giant author's note when the opening
+        # paragraph is unusually meta). Verify before acting.
+        ratio = len(first) / len(paragraph_texts) if paragraph_texts else 0.0
+        if first and ratio > _LLM_AN_RUNAWAY_THRESHOLD:
+            if progress:
+                progress(
+                    f"  [llm-an] {chapter_label}: first pass flagged "
+                    f"{len(first)}/{len(paragraph_texts)} paragraphs "
+                    f"({ratio:.0%}); running verification round"
+                )
+            flagged = _llm_an_verify(
+                paragraph_texts, first, llm_config=llm_config,
+            )
+            if not flagged and progress:
+                progress(
+                    f"  [llm-an] {chapter_label}: verification dropped "
+                    "every flag — keeping chapter intact"
+                )
+            elif flagged and progress:
+                progress(
+                    f"  [llm-an] {chapter_label}: verification kept "
+                    f"{len(flagged)}/{len(first)} flag(s)"
+                )
+        else:
+            flagged = first
+        cache[cache_key] = sorted(flagged)
+        _llm_an_save_cache(cache_path, cache)
+
+    if not flagged:
+        return html
+
+    # Drop in original order using the captured tag references.
+    for idx in sorted(flagged):
+        if 0 <= idx < len(paragraph_tags):
+            paragraph_tags[idx].decompose()
+
+    return str(soup)
+
+
 def export_epub(
     story: Story,
     output_dir: str = ".",
     template: str = DEFAULT_TEMPLATE,
     hr_as_stars: bool = False,
     strip_notes: bool = False,
+    llm_config: dict | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> Path:
     try:
         from ebooklib import epub
@@ -843,7 +1248,14 @@ def export_epub(
             lang="en",
         )
         heading = escape(ch.title)
-        chapter_html = _prepare_chapter_html(ch.html, hr_as_stars, strip_notes)
+        chapter_html = _prepare_chapter_html(
+            ch.html, hr_as_stars, strip_notes,
+            llm_config=llm_config,
+            site_name=site_prefix,
+            story_id=story.id,
+            chapter_number=ch.number,
+            progress=progress,
+        )
         ec.content = f"<h2>{heading}</h2>\n{chapter_html}".encode("utf-8")
         ec.add_item(css)
         book.add_item(ec)

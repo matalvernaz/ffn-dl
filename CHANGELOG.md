@@ -1,5 +1,56 @@
 # Changelog
 
+## 2.2.4 — 2026-04-25
+
+### Add
+
+- **LLM author's-note backstop on the export pipeline.** The
+  audiobook path has had a ``classify_authors_notes_via_llm``
+  backstop since the multi-provider rewrite; HTML / EPUB / TXT
+  exports were still regex-only and missing the disguised cases.
+  New ``--llm-strip-notes`` flag (CLI) and *Use LLM to catch
+  missed A/N* checkbox (GUI) feed every regex-surviving paragraph
+  through the configured LLM (Ollama / OpenAI / Anthropic /
+  openai-compatible) for a second-pass decision. Off by default;
+  reuses the same provider/model/api-key prefs the audiobook
+  attribution backend reads. One round-trip per chapter; results
+  cached to ``~/.cache/ffn-dl/llm_an/<site>_<story>.json`` keyed
+  by chapter content hash + model so re-exports don't re-spend
+  tokens.
+
+- **Two-round verification on the LLM strip.** When the first pass
+  flags more than 40% of a chapter the helper now sends just the
+  flagged paragraphs back with a stricter "high confidence only"
+  prompt — the chapter has to lose a paragraph in *both* rounds
+  to drop it. Stops the classifier from declaring a chapter
+  worthless on a single judgement when an unusually meta opening
+  paragraph fooled it into reading the whole chapter as one giant
+  author's note.
+
+### Fix
+
+- **Common FFN A/N shapes the regex used to leak.** Looking at a
+  Naruto fic where 141 chapters had a bolded *Disclaimer:*
+  paragraph followed by a scene-break, none of which were being
+  stripped: the prefix pass now also matches *Disclaimer:*,
+  *Quick Note(s):*, *Announcement:*, and *Beta'd by* — labels
+  followed by a colon/dash, kept conservative so a story
+  sentence containing the word doesn't get swept. The ownership
+  / Patreon keyword list grew (*"i do not own"*, *"i don't own"*,
+  *"all rights belong"*, beta credits) so the structural pass
+  has more two-signal evidence to gate on.
+
+- **Pre-divider all-bold disclaimer block now drops.** The top
+  structural pass used to require a *Chapter N* banner after the
+  divider, which is missing from the FFN shape
+  ``<p><strong>Disclaimer: ...</strong></p><hr>story prose``.
+  New Pass 2b: a ≤3-paragraph fully-bold pre-divider block that
+  contains a hard note keyword (Patreon, ko-fi, *"I do not own"*,
+  Disclaimer, beta credits, *"please review"*) drops without
+  needing a banner. Three corroborating signals (length cap +
+  fully bold + hard keyword) keep dramatic bold lines before
+  flashback dividers safe.
+
 ## 2.2.3 — 2026-04-25
 
 ### Fix

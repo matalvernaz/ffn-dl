@@ -371,6 +371,7 @@ def default_refresh_args(
     from ..exporters import DEFAULT_TEMPLATE
     from ..prefs import (
         KEY_HR_AS_STARS,
+        KEY_LLM_STRIP_NOTES,
         KEY_NAME_TEMPLATE,
         KEY_STRIP_NOTES,
         Prefs,
@@ -401,6 +402,7 @@ def default_refresh_args(
         name=prefs.get(KEY_NAME_TEMPLATE) or DEFAULT_TEMPLATE,
         hr_as_stars=prefs.get_bool(KEY_HR_AS_STARS),
         strip_notes=prefs.get_bool(KEY_STRIP_NOTES),
+        llm_strip_notes=prefs.get_bool(KEY_LLM_STRIP_NOTES),
         # Library updates never re-generate audiobooks, but the audio
         # branch still reads these — set plausible defaults so a
         # future code path that does hit them doesn't crash.

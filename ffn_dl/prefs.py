@@ -15,6 +15,11 @@ KEY_CHECK_UPDATES = "check_updates"
 KEY_SKIPPED_VERSION = "skipped_update_version"
 KEY_HR_AS_STARS = "hr_as_stars"
 KEY_STRIP_NOTES = "strip_notes"
+# Pair with KEY_STRIP_NOTES: when on, ``strip_an_via_llm`` runs after
+# the regex pass to catch author's notes that the heuristic missed.
+# Off by default; the LLM round-trip costs latency (and tokens on
+# paid providers).
+KEY_LLM_STRIP_NOTES = "llm_strip_notes"
 KEY_SPEECH_RATE = "speech_rate"
 KEY_ATTRIBUTION_BACKEND = "attribution_backend"
 KEY_ATTRIBUTION_MODEL_SIZE = "attribution_model_size"
@@ -98,6 +103,7 @@ DEFAULTS = {
     KEY_CHECK_UPDATES: True,
     KEY_HR_AS_STARS: False,
     KEY_STRIP_NOTES: False,
+    KEY_LLM_STRIP_NOTES: False,
     KEY_SPEECH_RATE: "0",
     KEY_ATTRIBUTION_BACKEND: "builtin",
     KEY_ATTRIBUTION_MODEL_SIZE: "",

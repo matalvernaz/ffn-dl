@@ -179,7 +179,24 @@ class MainFrame(wx.Frame):
             root, label="Strip &author's notes (A/N paragraphs)"
         )
         self.strip_notes_ctrl.SetName("Strip author's notes")
-        opts2.Add(self.strip_notes_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
+        opts2.Add(self.strip_notes_ctrl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
+
+        # LLM backstop: paired with the regex strip. Enabled
+        # independently of the audiobook attribution backend so a
+        # user can run a paid-API LLM on HTML/EPUB exports without
+        # inheriting the audiobook narrator path.
+        self.llm_strip_notes_ctrl = wx.CheckBox(
+            root, label="Use &LLM to catch missed A/N (slower)"
+        )
+        self.llm_strip_notes_ctrl.SetName("Use LLM to catch missed author's notes")
+        self.llm_strip_notes_ctrl.SetToolTip(
+            "Run the configured LLM (set in Preferences → LLM) over each "
+            "chapter after the regex pass. Catches notes the regex misses "
+            "but adds one round-trip per chapter — local Ollama is free "
+            "but slow, paid APIs charge per token. Results are cached "
+            "per story so re-exports don't re-spend."
+        )
+        opts2.Add(self.llm_strip_notes_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
         root_sizer.Add(opts2, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
 
         # ── Audiobook settings (visible only when Format = audio) ────
@@ -934,6 +951,9 @@ class MainFrame(wx.Frame):
 
         self.hr_stars_ctrl.SetValue(self.prefs.get_bool(_p.KEY_HR_AS_STARS))
         self.strip_notes_ctrl.SetValue(self.prefs.get_bool(_p.KEY_STRIP_NOTES))
+        self.llm_strip_notes_ctrl.SetValue(
+            self.prefs.get_bool(_p.KEY_LLM_STRIP_NOTES)
+        )
 
         try:
             rate = int(self.prefs.get(_p.KEY_SPEECH_RATE) or 0)
@@ -980,6 +1000,9 @@ class MainFrame(wx.Frame):
         self.prefs.set(_p.KEY_OUTPUT_DIR, self.output_ctrl.GetValue())
         self.prefs.set_bool(_p.KEY_HR_AS_STARS, self.hr_stars_ctrl.GetValue())
         self.prefs.set_bool(_p.KEY_STRIP_NOTES, self.strip_notes_ctrl.GetValue())
+        self.prefs.set_bool(
+            _p.KEY_LLM_STRIP_NOTES, self.llm_strip_notes_ctrl.GetValue(),
+        )
         self.prefs.set(_p.KEY_SPEECH_RATE, self.speech_rate_ctrl.GetValue())
         self.prefs.set(_p.KEY_ATTRIBUTION_BACKEND, self._selected_attribution_backend())
         self.prefs.set(_p.KEY_ATTRIBUTION_MODEL_SIZE, self._selected_size() or "")
@@ -1841,6 +1864,16 @@ class MainFrame(wx.Frame):
         template = self.name_ctrl.GetValue()
         hr_as_stars = self.hr_stars_ctrl.GetValue()
         strip_notes = self.strip_notes_ctrl.GetValue()
+        llm_strip_notes = (
+            strip_notes and self.llm_strip_notes_ctrl.GetValue()
+        )
+        # Reuse the same LLM config the audiobook attribution path
+        # uses — _llm_config_for_render reads provider/model/api-key
+        # from prefs. The LLM A/N strip is a separate user-facing
+        # toggle but the credentials come from the same place.
+        an_llm_config = (
+            self._llm_config_for_render() if llm_strip_notes else None
+        )
 
         if fmt == "audio":
             from .tts import generate_audiobook
@@ -1875,9 +1908,16 @@ class MainFrame(wx.Frame):
 
         from .exporters import EXPORTERS
         exporter = EXPORTERS[fmt]
+        if an_llm_config:
+            self._log(
+                f"  LLM A/N strip: {an_llm_config['provider']}/"
+                f"{an_llm_config['model']} (one call per chapter)"
+            )
         return exporter(
             story, output_dir, template=template,
             hr_as_stars=hr_as_stars, strip_notes=strip_notes,
+            llm_config=an_llm_config,
+            progress=self._log,
         )
 
     def _run_download(
@@ -2309,6 +2349,9 @@ class MainFrame(wx.Frame):
 
         self.hr_stars_ctrl.SetValue(self.prefs.get_bool(_p.KEY_HR_AS_STARS))
         self.strip_notes_ctrl.SetValue(self.prefs.get_bool(_p.KEY_STRIP_NOTES))
+        self.llm_strip_notes_ctrl.SetValue(
+            self.prefs.get_bool(_p.KEY_LLM_STRIP_NOTES)
+        )
 
         try:
             rate = int(self.prefs.get(_p.KEY_SPEECH_RATE) or "0")

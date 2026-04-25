@@ -1791,6 +1791,7 @@ _AN_SYSTEM_PROMPT = (
 
 def classify_authors_notes_via_llm(
     paragraphs: list[str], *, llm_config: dict,
+    system_prompt_override: str | None = None,
 ) -> set[int]:
     """Ask the LLM to flag which paragraphs are author's notes.
 
@@ -1798,7 +1799,15 @@ def classify_authors_notes_via_llm(
     dict ``generate_audiobook`` accepts. Failure modes (transport
     error, parse failure, missing config) return an empty set so the
     regex pre-pass is the only A/N filter applied — i.e. the LLM
-    backstop is purely additive."""
+    backstop is purely additive.
+
+    ``system_prompt_override`` lets callers swap the default
+    audiobook-flavoured prompt for a stricter one — used by the
+    HTML-pipeline verification round, which re-asks the model with
+    "high confidence only" framing when the first pass flagged so
+    much of a chapter that we suspect a hallucination. ``None``
+    falls back to ``_AN_SYSTEM_PROMPT``.
+    """
     if not paragraphs or not llm_config:
         return set()
 
@@ -1827,7 +1836,7 @@ def classify_authors_notes_via_llm(
             provider=provider, model=model,
             api_key=llm_config.get("api_key"),
             endpoint=endpoint,
-            system_prompt=_AN_SYSTEM_PROMPT,
+            system_prompt=system_prompt_override or _AN_SYSTEM_PROMPT,
             user_prompt=user_prompt,
         )
     except Exception as exc:  # noqa: BLE001 — additive, never fail
