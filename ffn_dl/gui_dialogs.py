@@ -1207,7 +1207,13 @@ class LlmSettingsDialog(wx.Dialog):
             "gpt-4-turbo",
         ],
         "anthropic": [
-            "claude-haiku-4-5",
+            # Claude 4.x ID conventions are inconsistent: Opus 4.7 and
+            # Sonnet 4.6 use unversioned IDs that resolve to the
+            # current dated build, but Haiku 4.5's canonical ID still
+            # carries the date suffix. Picking the wrong shape gets a
+            # 404 from /v1/messages — use what the API actually
+            # accepts for each tier.
+            "claude-haiku-4-5-20251001",
             "claude-sonnet-4-6",
             "claude-opus-4-7",
         ],
