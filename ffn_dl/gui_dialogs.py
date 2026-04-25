@@ -163,35 +163,48 @@ class VoicePreviewDialog(wx.Dialog):
         if idx < 0:
             return
         entry = self._voices[idx]
-        from .tts import FEMALE_VOICES, MALE_VOICES, NEUTRAL_VOICES
+        from . import tts_providers
 
-        if entry["gender"] == "female":
-            candidates = FEMALE_VOICES
-        elif entry["gender"] == "male":
-            candidates = MALE_VOICES
-        else:
-            candidates = NEUTRAL_VOICES
+        target_gender = entry["gender"].lower()
+        catalog = tts_providers.all_voices()
+        candidates = [
+            v for v in catalog
+            if (target_gender in ("male", "female")
+                and v.gender.lower() == target_gender)
+            or target_gender not in ("male", "female")
+        ]
+        if not candidates:
+            candidates = catalog
+        # Display label (provider · locale · name) keeps the dialog
+        # readable with both edge and piper voices side-by-side, while
+        # the voice id we save is the namespaced form.
+        labels = [
+            f"{v.provider} · {v.locale} · {v.display}" for v in candidates
+        ]
+        ids = [v.id for v in candidates]
 
         dlg = wx.SingleChoiceDialog(
             self,
             f"Pick a voice for {entry['name']}:",
             "Change voice",
-            candidates,
+            labels,
         )
         try:
-            current = candidates.index(entry["voice"])
+            current = ids.index(entry["voice"])
             dlg.SetSelection(current)
         except ValueError:
             pass
         if dlg.ShowModal() == wx.ID_OK:
-            new_voice = dlg.GetStringSelection()
-            if new_voice and new_voice != entry["voice"]:
-                entry["voice"] = new_voice
-                self._mapper.mapping[entry["name"]] = new_voice
-                self._mapper.save()
-                self._refresh_rows()
-                self.list_ctrl.Focus(idx)
-                self.list_ctrl.Select(idx)
+            sel = dlg.GetSelection()
+            if 0 <= sel < len(ids):
+                new_voice = ids[sel]
+                if new_voice and new_voice != entry["voice"]:
+                    entry["voice"] = new_voice
+                    self._mapper.mapping[entry["name"]] = new_voice
+                    self._mapper.save()
+                    self._refresh_rows()
+                    self.list_ctrl.Focus(idx)
+                    self.list_ctrl.Select(idx)
         dlg.Destroy()
 
     def _on_close(self, event):

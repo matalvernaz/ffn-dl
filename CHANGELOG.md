@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.2.1 — 2026-04-25
+
+### Fix
+
+- **Voice assignment was silently capped at the top 15 speakers.**
+  ``generate_audiobook`` iterated ``characters[:15]`` when calling
+  ``mapper.assign``, so any character ranked 16th or beyond by
+  dialogue count fell through ``mapper.get`` to the narrator voice
+  during synthesis — multi-character ensemble fics ended up with
+  every minor speaker reading in the narrator's voice. The slice was
+  load-bearing only for log noise. Assignment now covers every
+  speaker; status-pane logging stays capped at 15 with a "... and N
+  more" tail.
+
+- **Voice-preview "Change Voice..." dialog couldn't see the namespaced
+  voice ids and didn't show Piper voices.** The change-voice handler
+  in ``VoicePreviewDialog`` was still pulling candidates from the
+  legacy bare ``MALE_VOICES`` / ``FEMALE_VOICES`` constants, so a
+  user whose mapping was namespaced (post-2.2.0) saw no
+  current-selection highlight and couldn't pick from any non-edge
+  provider. The dialog now pulls candidates from the live provider
+  catalog (``tts_providers.all_voices``) filtered by the speaker's
+  detected gender, displays them as ``provider · locale · name`` for
+  readability, and round-trips the namespaced id on save.
+
+- **Removed a dead-code forward-type alias** in ``tts.py`` left over
+  from a refactor of ``_build_voice_pool``.
+
 ## 2.2.0 — 2026-04-25
 
 ### Add

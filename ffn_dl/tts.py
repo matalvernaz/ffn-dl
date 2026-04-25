@@ -1972,11 +1972,6 @@ def _build_voice_pool(
     return out
 
 
-# Forward type alias only used in the helper above; avoids a TYPE_CHECKING
-# block while keeping the annotation readable.
-VoiceInfo_t = "tts_providers.VoiceInfo"
-
-
 async def _generate_with_semaphore(
     sem, seg, voice, path, idx, ch_num, speech_rate=0, narrator_voice=None,
 ):
@@ -3037,12 +3032,24 @@ def generate_audiobook(
 
     logger.info("Detected %d speaking characters (merged from %d raw)",
                 len(characters), len(raw_char_counts))
-    for name in characters[:15]:
+    # Assign every speaker — earlier code limited this to the first 15
+    # which silently routed every 16-th-and-beyond character through
+    # the narrator voice (the unmapped fallback in mapper.get). Logging
+    # stays capped so a fic with 80 named speakers doesn't drown the
+    # status pane in voice-pick lines.
+    log_cap = 15
+    for idx, name in enumerate(characters):
         profile = profiles.get(name) or {}
         gender = profile.get("gender") or genders.get(name) or "neutral"
         voice = mapper.assign(name, gender)
         accent = accents.get(name) or profile.get("accent") or "any"
-        logger.info("  %s (%s, %s) → %s", name, gender, accent, voice)
+        if idx < log_cap:
+            logger.info("  %s (%s, %s) → %s", name, gender, accent, voice)
+    if len(characters) > log_cap:
+        logger.info(
+            "  ... and %d more (assigned, log truncated for brevity)",
+            len(characters) - log_cap,
+        )
 
     mapper.save()
 
