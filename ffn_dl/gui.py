@@ -190,13 +190,34 @@ class MainFrame(wx.Frame):
         )
         self.llm_strip_notes_ctrl.SetName("Use LLM to catch missed author's notes")
         self.llm_strip_notes_ctrl.SetToolTip(
-            "Run the configured LLM (set in Preferences → LLM) over each "
-            "chapter after the regex pass. Catches notes the regex misses "
-            "but adds one round-trip per chapter — local Ollama is free "
-            "but slow, paid APIs charge per token. Results are cached "
-            "per story so re-exports don't re-spend."
+            "Run the configured LLM over each chapter after the regex "
+            "pass. Catches notes the regex misses but adds one "
+            "round-trip per chapter — local Ollama is free but slow, "
+            "paid APIs charge per token. Results are cached per story "
+            "so re-exports don't re-spend. Click 'LLM settings…' to "
+            "pick the provider/model."
         )
         opts2.Add(self.llm_strip_notes_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        # Always-visible shortcut to the LLM settings dialog. The
+        # audio toolbar has its own copy that surfaces only when
+        # Format=audio + Attribution=LLM, but the A/N strip above
+        # works for every export format — the user has to be able
+        # to reach the dialog from HTML/EPUB/TXT mode too.
+        self.llm_settings_main_btn = wx.Button(
+            root, label="LLM settings&…", size=(120, -1),
+        )
+        self.llm_settings_main_btn.SetName("Open LLM settings")
+        self.llm_settings_main_btn.SetToolTip(
+            "Configure the LLM used by the A/N strip option to the "
+            "left (and by the audiobook attribution backend when "
+            "Format=audio + Attribution=LLM)."
+        )
+        self.llm_settings_main_btn.Bind(wx.EVT_BUTTON, self._on_llm_settings)
+        opts2.Add(
+            self.llm_settings_main_btn, 0,
+            wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8,
+        )
         root_sizer.Add(opts2, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
 
         # ── Audiobook settings (visible only when Format = audio) ────
