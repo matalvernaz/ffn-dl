@@ -98,13 +98,42 @@ def _final_segment(s: str) -> str:
     return s
 
 
+# FFN/FicLab crossover convention: a single string ending in
+# " Crossover" (case-insensitive) whose body is two or more fandoms
+# joined by " + ", e.g. ``"Harry Potter + High School DxD Crossover"``.
+# AO3 doesn't use this shape (it joins crossovers with " / "), and a
+# legitimate single-fandom name with " + " in it doesn't end in
+# " Crossover" — the combined check is specific enough that a false
+# positive would require a fandom literally named "X + Y Crossover".
+_CROSSOVER_SUFFIX_RE = re.compile(r"\s+crossover\s*$", re.IGNORECASE)
+
+
+def _split_compound_crossover(name: str) -> list[str] | None:
+    """Return the constituent fandoms of an ``"X + Y Crossover"``
+    string, or ``None`` if ``name`` isn't in that shape."""
+    match = _CROSSOVER_SUFFIX_RE.search(name)
+    if not match:
+        return None
+    body = name[: match.start()].strip()
+    parts = [p.strip() for p in body.split(" + ") if p.strip()]
+    if len(parts) < 2:
+        return None
+    return parts
+
+
 def _pick_fandom(fandoms: list[str], misc_folder: str) -> str:
     """One-fandom stories get their fandom; multi-fandom and
     no-fandom stories go into the misc bucket. Matches the decision
     Matt made — no primary-fandom-first-tag heuristic."""
-    if len(fandoms) == 1:
-        return fandoms[0]
-    return misc_folder
+    if len(fandoms) != 1:
+        return misc_folder
+    # A single-element list can still be a compound crossover —
+    # FicLab's ``extract_metadata`` path preserves the raw
+    # "X + Y Crossover" tag as one string rather than splitting it,
+    # so the routing decision has to catch that shape here too.
+    if _split_compound_crossover(fandoms[0]):
+        return misc_folder
+    return fandoms[0]
 
 
 def parse_category(category: str | None) -> list[str]:
@@ -117,7 +146,9 @@ def parse_category(category: str | None) -> list[str]:
       leading meta-category ("Books", "Anime/Manga", "Movies", etc.)
       is inherent to the site's browsing taxonomy, not part of the
       fandom name — the user's folder should be ``Harry Potter``,
-      not ``Books _ Harry Potter``.
+      not ``Books _ Harry Potter``. FFN crossovers extend the tail
+      with `` + ``: ``"Books > Harry Potter + Naruto Crossover"`` —
+      we split those on `` + `` so the result is multi-fandom.
     * **AO3** joins crossovers with `` / ``:
       ``"Harry Potter - J. K. Rowling / Naruto"``. Each ``/``-piece
       is a distinct fandom, so a crossover lands as multi-fandom
@@ -126,16 +157,24 @@ def parse_category(category: str | None) -> list[str]:
       no special separator. That goes through untouched.
 
     The ordering of the splits matters. We strip the FFN breadcrumb
-    first (take the last ``>``-delimited segment), then split the
-    result on `` / `` for AO3 crossovers, then split each piece on
-    commas as the legacy fallback. A string containing none of the
-    separators returns as a single-element list with its original
-    value — the "clean site" case Matt asked for.
+    first (take the last ``>``-delimited segment), then look for the
+    FFN crossover compound shape, then split the result on `` / ``
+    for AO3 crossovers, then split each piece on commas as the
+    legacy fallback. A string containing none of the separators
+    returns as a single-element list with its original value — the
+    "clean site" case Matt asked for.
     """
     if not category:
         return []
     # FFN breadcrumb: take only the tail after the last " > ".
     text = category.rsplit(" > ", 1)[-1].strip()
+    # FFN crossover compound — split the "X + Y Crossover" tail into
+    # per-fandom pieces so multi-fandom routing kicks in. Done before
+    # the " / " split because FFN never uses that separator and the
+    # crossover suffix is a stronger signal.
+    crossover_parts = _split_compound_crossover(text)
+    if crossover_parts:
+        return crossover_parts
     # AO3 crossover join — splits into N fandoms.
     pieces = [p.strip() for p in text.split(" / ")]
     # Legacy comma fallback, applied after " / " so an AO3 fandom

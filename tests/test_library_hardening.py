@@ -52,6 +52,40 @@ def test_rendered_path_is_always_relative():
     assert not path.is_absolute()
 
 
+# ── Template: compound crossovers from extract_metadata ──────────
+
+
+def test_render_routes_single_fandom_compound_crossover_to_misc():
+    """``extract_metadata`` (the FicLab path in particular) hands us
+    a single-element ``fandoms`` list with the raw "X + Y Crossover"
+    string from the file's tags. ``render`` must catch that shape
+    and route to the misc folder — otherwise reorganizing existing
+    files lands them in a folder literally named for the crossover
+    pair, which is the exact bug the FFN download path also had."""
+    md = FileMetadata(
+        title="T",
+        author="A",
+        fandoms=["Harry Potter + High School DxD Crossover"],
+        format="epub",
+    )
+    path = render(md)
+    assert path.parts[0] == "Misc"
+
+
+def test_render_compound_crossover_respects_misc_folder_override():
+    """The user's configured misc folder name flows through —
+    crossovers honour the same ``library_misc_folder`` pref that
+    no-fandom and AO3-crossover stories already use."""
+    md = FileMetadata(
+        title="T",
+        author="A",
+        fandoms=["Naruto + Bleach Crossover"],
+        format="epub",
+    )
+    path = render(md, misc_folder="Unsorted")
+    assert path.parts[0] == "Unsorted"
+
+
 # ── Template: Windows reserved names ─────────────────────────────
 
 

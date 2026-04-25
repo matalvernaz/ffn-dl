@@ -312,6 +312,42 @@ def test_library_subdir_combines_breadcrumb_and_ao3_join():
     assert subdir == Path("Misc")
 
 
+def test_library_subdir_splits_ffn_crossover_compound_to_misc():
+    """FFN crossovers arrive as ``"Books > X + Y Crossover"`` —
+    a single tail string with no ``/`` or ``,`` separator. The
+    parser must split on `` + `` and recognise the trailing
+    "Crossover" token so the story lands in Misc instead of a
+    folder literally named ``"Dresden Files + High School DxD
+    Crossover"``."""
+    subdir = _library_subdir_for(
+        _story("Books > Dresden Files + High School DxD Crossover"),
+        _autosort_args(),
+    )
+    assert subdir == Path("Misc")
+
+
+def test_library_subdir_splits_three_way_ffn_crossover_to_misc():
+    """FFN three-way crossovers extend the same convention with a
+    second `` + ``. The parser must accept arbitrary ``+``-counts."""
+    subdir = _library_subdir_for(
+        _story("Anime/Manga > Naruto + Bleach + One Piece Crossover"),
+        _autosort_args(),
+    )
+    assert subdir == Path("Misc")
+
+
+def test_library_subdir_preserves_fandom_with_plus_in_name():
+    """A fandom that legitimately has `` + `` in its name (no
+    trailing "Crossover" token) must NOT be treated as a crossover.
+    The compound check requires both signals — the suffix gates the
+    split."""
+    subdir = _library_subdir_for(
+        _story("Marvel + DC"),  # not a real fandom shape, but pins the gate
+        _autosort_args(),
+    )
+    assert subdir == Path("Marvel + DC")
+
+
 def test_library_subdir_royal_road_goes_to_original_works():
     """Royal Road is entirely original fiction — "no fandom" there
     is a feature, not missing metadata. The auto-sorter routes RR
