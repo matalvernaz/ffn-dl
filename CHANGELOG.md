@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.3 — 2026-04-24
+
+### Fix
+
+- **BookNLP attribution no longer leaks its temp directory.**
+  ``_refine_with_booknlp`` was creating a ``ffn-booknlp-*`` working
+  dir under ``/tmp`` (holding the full book text plus BookNLP's
+  ``.tokens`` / ``.entities`` / ``.quotes`` TSVs — tens of MB per
+  long fic) and never deleting it. Every audiobook build with the
+  BookNLP backend left one behind. Wrapped the body in
+  ``try/finally`` and ``shutil.rmtree`` on exit so the dir is
+  cleaned up even if BookNLP raises mid-process.
+
 ## 2.0.2 — 2026-04-24
 
 ### Fix

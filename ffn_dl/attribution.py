@@ -1132,6 +1132,7 @@ def _refine_with_booknlp(segments, full_text, model_size="small"):
     accuracy). BookNLP downloads model weights lazily on first use.
     """
     import csv
+    import shutil
     import tempfile
     from pathlib import Path
 
@@ -1151,90 +1152,93 @@ def _refine_with_booknlp(segments, full_text, model_size="small"):
     model = _get_booknlp_model(model_size)
 
     tmp = Path(tempfile.mkdtemp(prefix="ffn-booknlp-"))
-    infile = tmp / "book.txt"
-    infile.write_text(full_text, encoding="utf-8")
-    logger.info("BookNLP: processing %d chars (output dir %s)", len(full_text), tmp)
-    model.process(str(infile), str(tmp), "book")
-    logger.info("BookNLP: process() returned")
+    try:
+        infile = tmp / "book.txt"
+        infile.write_text(full_text, encoding="utf-8")
+        logger.info("BookNLP: processing %d chars (output dir %s)", len(full_text), tmp)
+        model.process(str(infile), str(tmp), "book")
+        logger.info("BookNLP: process() returned")
 
-    # Token offsets → character offsets
-    tokens_file = tmp / "book.tokens"
-    tok_char = {}  # token_id → start_char
-    if tokens_file.exists():
-        with open(tokens_file, encoding="utf-8") as f:
-            reader = csv.DictReader(f, delimiter="\t")
-            for row in reader:
-                try:
-                    tok_char[int(row["token_ID_within_document"])] = int(
-                        row.get("byte_onset") or row.get("start_token") or 0
-                    )
-                except (KeyError, ValueError):
-                    continue
+        # Token offsets → character offsets
+        tokens_file = tmp / "book.tokens"
+        tok_char = {}  # token_id → start_char
+        if tokens_file.exists():
+            with open(tokens_file, encoding="utf-8") as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                for row in reader:
+                    try:
+                        tok_char[int(row["token_ID_within_document"])] = int(
+                            row.get("byte_onset") or row.get("start_token") or 0
+                        )
+                    except (KeyError, ValueError):
+                        continue
 
-    # Entity names per coref ID — pick longest PROP mention per group.
-    entities_file = tmp / "book.entities"
-    canonical = {}  # coref_id → canonical name string
-    if entities_file.exists():
-        with open(entities_file, encoding="utf-8") as f:
-            reader = csv.DictReader(f, delimiter="\t")
-            for row in reader:
-                cat = row.get("cat", "")
-                if cat != "PROP":
-                    continue
-                try:
-                    cid = int(row["COREF"])
-                except (KeyError, ValueError):
-                    continue
-                text = (row.get("text") or "").strip()
-                if not text:
-                    continue
-                prev = canonical.get(cid)
-                if prev is None or len(text) > len(prev):
-                    canonical[cid] = text
+        # Entity names per coref ID — pick longest PROP mention per group.
+        entities_file = tmp / "book.entities"
+        canonical = {}  # coref_id → canonical name string
+        if entities_file.exists():
+            with open(entities_file, encoding="utf-8") as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                for row in reader:
+                    cat = row.get("cat", "")
+                    if cat != "PROP":
+                        continue
+                    try:
+                        cid = int(row["COREF"])
+                    except (KeyError, ValueError):
+                        continue
+                    text = (row.get("text") or "").strip()
+                    if not text:
+                        continue
+                    prev = canonical.get(cid)
+                    if prev is None or len(text) > len(prev):
+                        canonical[cid] = text
 
-    # Quotes: (start_token, end_token, mention_start, mention_end, text, mention_phrase, char_id)
-    quotes_file = tmp / "book.quotes"
-    quote_spans = []  # list of (start_char, end_char, speaker_name)
-    if quotes_file.exists():
-        with open(quotes_file, encoding="utf-8") as f:
-            reader = csv.DictReader(f, delimiter="\t")
-            for row in reader:
-                try:
-                    start_tok = int(row["quote_start"])
-                    end_tok = int(row["quote_end"])
-                    cid = int(row.get("char_id") or row.get("mention_speaker_id") or -1)
-                except (KeyError, ValueError):
-                    continue
-                if cid < 0:
-                    continue
-                name = canonical.get(cid)
-                if not name:
-                    continue
-                start = tok_char.get(start_tok)
-                end = tok_char.get(end_tok)
-                if start is None or end is None:
-                    continue
-                quote_spans.append((start, end, name))
+        # Quotes: (start_token, end_token, mention_start, mention_end, text, mention_phrase, char_id)
+        quotes_file = tmp / "book.quotes"
+        quote_spans = []  # list of (start_char, end_char, speaker_name)
+        if quotes_file.exists():
+            with open(quotes_file, encoding="utf-8") as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                for row in reader:
+                    try:
+                        start_tok = int(row["quote_start"])
+                        end_tok = int(row["quote_end"])
+                        cid = int(row.get("char_id") or row.get("mention_speaker_id") or -1)
+                    except (KeyError, ValueError):
+                        continue
+                    if cid < 0:
+                        continue
+                    name = canonical.get(cid)
+                    if not name:
+                        continue
+                    start = tok_char.get(start_tok)
+                    end = tok_char.get(end_tok)
+                    if start is None or end is None:
+                        continue
+                    quote_spans.append((start, end, name))
 
-    # Align to our segments by substring search; preserve order.
-    cursor = 0
-    quote_spans.sort()
-    qi = 0
-    for seg in segments:
-        if not seg.text:
-            continue
-        idx = full_text.find(seg.text, cursor)
-        if idx < 0:
-            idx = full_text.find(seg.text.strip('"\u201c\u201d'), cursor)
-        if idx < 0:
-            continue
-        cursor = idx + len(seg.text)
-        # Advance qi to the first span overlapping this segment
-        while qi < len(quote_spans) and quote_spans[qi][1] < idx:
-            qi += 1
-        if qi < len(quote_spans):
-            qstart, qend, name = quote_spans[qi]
-            if qstart <= idx < qend or idx <= qstart < cursor:
-                seg.speaker = name
+        # Align to our segments by substring search; preserve order.
+        cursor = 0
+        quote_spans.sort()
+        qi = 0
+        for seg in segments:
+            if not seg.text:
+                continue
+            idx = full_text.find(seg.text, cursor)
+            if idx < 0:
+                idx = full_text.find(seg.text.strip('"\u201c\u201d'), cursor)
+            if idx < 0:
+                continue
+            cursor = idx + len(seg.text)
+            # Advance qi to the first span overlapping this segment
+            while qi < len(quote_spans) and quote_spans[qi][1] < idx:
+                qi += 1
+            if qi < len(quote_spans):
+                qstart, qend, name = quote_spans[qi]
+                if qstart <= idx < qend or idx <= qstart < cursor:
+                    seg.speaker = name
 
-    return segments
+        return segments
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
