@@ -212,8 +212,9 @@ class LibraryFrame(wx.Frame):
             panel, label="&Force recheck (bypass TTL)",
         )
         self.force_recheck_chk.SetToolTip(
-            "Ignore the recent-check TTL and probe every indexed story "
-            "against upstream even if it was just checked."
+            "Ignore the recent-check TTL and the Complete/Abandoned "
+            "skip — probe every indexed story against upstream even "
+            "if it was just checked or marked finished."
         )
         btn_row.Add(
             self.force_recheck_chk, 0,
@@ -485,10 +486,11 @@ class LibraryFrame(wx.Frame):
                     recheck_interval_s=recheck_interval,
                     force_recheck=force,
                     refetch_all=refetch_all,
+                    skip_complete=not force,
                 )
                 probe_queue, skipped = build_refresh_queue(
                     root,
-                    skip_complete=False,
+                    skip_complete=not force,
                     recheck_interval_s=recheck_interval,
                     progress=self._post_status,
                 )

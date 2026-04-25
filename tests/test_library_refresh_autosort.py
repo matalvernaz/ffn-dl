@@ -807,7 +807,11 @@ def _age_file(path: Path, days: float) -> None:
 def test_stale_complete_skips_old_complete_story(tmp_path: Path):
     """A story marked Complete with an mtime older than the threshold
     should be skipped. The skip message names the file age and points
-    at --force-recheck so the user knows how to override."""
+    at --force-recheck so the user knows how to override.
+
+    Tested with ``skip_complete=False`` so the early Complete/Abandoned
+    gate doesn't preempt the stale-complete one.
+    """
     lib = tmp_path / "lib"
     lib.mkdir()
     path = ffndl_epub(
@@ -823,6 +827,7 @@ def test_stale_complete_skips_old_complete_story(tmp_path: Path):
     queue, skipped = build_refresh_queue(
         lib,
         index_path=_index(tmp_path),
+        skip_complete=False,
         skip_stale_complete_days=365,
         progress=messages.append,
     )
@@ -835,7 +840,11 @@ def test_stale_complete_keeps_fresh_complete_story(tmp_path: Path):
     """A story that's Complete but was re-exported recently (mtime
     younger than the threshold) must stay in the probe queue — the
     whole point of this gate over --skip-complete is that
-    recently-completed fics still get a chance to show an epilogue."""
+    recently-completed fics still get a chance to show an epilogue.
+
+    Tested with ``skip_complete=False`` so we exercise the stale gate
+    in isolation.
+    """
     lib = tmp_path / "lib"
     lib.mkdir()
     ffndl_epub(
@@ -849,6 +858,7 @@ def test_stale_complete_keeps_fresh_complete_story(tmp_path: Path):
     queue, skipped = build_refresh_queue(
         lib,
         index_path=_index(tmp_path),
+        skip_complete=False,
         skip_stale_complete_days=365,
     )
     assert len(queue) == 1
@@ -912,9 +922,10 @@ def test_stale_complete_bypassed_for_pending_resume(tmp_path: Path):
 
 
 def test_stale_complete_disabled_by_default(tmp_path: Path):
-    """Omitting the flag preserves the pre-gate behaviour — old
-    Complete stories still get probed. Protects scripted callers that
-    don't opt into the new gate."""
+    """With both gates off, an old Complete story still lands in the
+    queue. Documents the ``skip_complete=False`` + zero-day stale gate
+    combination — useful for callers that want every probe regardless.
+    """
     lib = tmp_path / "lib"
     lib.mkdir()
     path = ffndl_epub(
@@ -929,6 +940,124 @@ def test_stale_complete_disabled_by_default(tmp_path: Path):
     queue, skipped = build_refresh_queue(
         lib,
         index_path=_index(tmp_path),
+        skip_complete=False,
     )
     assert len(queue) == 1
+    assert skipped == []
+
+
+def test_skip_complete_default_skips_complete_story(tmp_path: Path):
+    """The default behaviour: a Complete fic is skipped without
+    needing the stale-complete gate or any flag, because that's what
+    a typical user wants from `--update-library`."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(
+        lib,
+        title="Default Complete",
+        url="https://www.fanfiction.net/s/45/1/",
+        status="Complete",
+    )
+    scan(lib, index_path=_index(tmp_path))
+
+    queue, skipped = build_refresh_queue(
+        lib,
+        index_path=_index(tmp_path),
+    )
+    assert queue == []
+    assert len(skipped) == 1
+
+
+def test_skip_complete_default_skips_completed_alias(tmp_path: Path):
+    """Old HTML-metadata files store the literal "Status: Completed"
+    string from FFN. The skip-complete gate must accept that spelling
+    in addition to the normalised "Complete"."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(
+        lib,
+        title="Completed Spelling",
+        url="https://www.fanfiction.net/s/46/1/",
+        status="Completed",
+    )
+    scan(lib, index_path=_index(tmp_path))
+
+    queue, skipped = build_refresh_queue(
+        lib,
+        index_path=_index(tmp_path),
+    )
+    assert queue == []
+    assert len(skipped) == 1
+
+
+def test_skip_complete_default_skips_abandoned_status(tmp_path: Path):
+    """A status string of ``Abandoned`` (the soft signal the user
+    sometimes types into a fic's metadata) skips alongside the hard
+    ``abandoned_at`` timestamp — both mean "stop probing"."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(
+        lib,
+        title="Author Walked Away",
+        url="https://www.fanfiction.net/s/47/1/",
+        status="Abandoned",
+    )
+    scan(lib, index_path=_index(tmp_path))
+
+    queue, skipped = build_refresh_queue(
+        lib,
+        index_path=_index(tmp_path),
+    )
+    assert queue == []
+    assert len(skipped) == 1
+
+
+def test_skip_complete_default_keeps_in_progress(tmp_path: Path):
+    """Active WIPs must keep going through the queue under the new
+    default — that's the whole point of the update sweep."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(
+        lib,
+        title="Active WIP",
+        url="https://www.fanfiction.net/s/48/1/",
+        status="In-Progress",
+    )
+    scan(lib, index_path=_index(tmp_path))
+
+    queue, skipped = build_refresh_queue(
+        lib,
+        index_path=_index(tmp_path),
+    )
+    assert len(queue) == 1
+    assert skipped == []
+
+
+def test_skip_complete_default_lets_pending_through(tmp_path: Path):
+    """A Complete story with a recorded remote > local count has work
+    owed locally — the gate must release it so the resume path fires
+    instead of silently swallowing the pending download."""
+    from ffn_dl.library.index import LibraryIndex
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ffndl_epub(
+        lib,
+        title="Complete With Pending",
+        url="https://www.fanfiction.net/s/49/1/",
+        status="Complete",
+        chapters=3,
+    )
+    idx_path = _index(tmp_path)
+    scan(lib, index_path=idx_path)
+
+    idx = LibraryIndex.load(idx_path)
+    idx.mark_probed(lib, {"https://www.fanfiction.net/s/49": 5})
+
+    queue, skipped = build_refresh_queue(
+        lib,
+        index_path=idx_path,
+    )
+    assert len(queue) == 1
+    assert queue[0]["remote"] == 5
     assert skipped == []

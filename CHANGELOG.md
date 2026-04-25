@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.2.3 — 2026-04-25
+
+### Fix
+
+- **`--update-library` no longer pays for two metadata fetches per
+  legacy-format file.** Foreign-format files (FicLab, Calibre,
+  older home-brew exports) used to slip past the merge-in-place
+  shortcut: `_download_one` ran a `skip=existing` first pass,
+  the merge fallback raised `ChaptersNotReadableError`, and the
+  retry path then issued a fresh `skip=0` download — an extra
+  metadata round-trip plus a confusing "Downloading … re-
+  downloading …" double log entry per story. The new pre-check
+  parses the existing file *before* the first download decides
+  what to do; an unreadable file logs `[legacy-format]` once and
+  takes a single full download.
+
+- **Updated stories now write back to their original filename.**
+  When a file's name didn't match the active `--name` template
+  (common for hand-named legacy files where FFN's title later
+  changed, e.g. *Muggle-Raised Champion.html* vs. *Dragon
+  Chronicles 1: Muggle-Raised Champion - Stargon1.html*), the
+  exporter wrote a templated twin and orphaned the original on
+  disk. The next update cycle then hit the same legacy-format
+  fallback against the unreplaced file forever. Updates now
+  atomically rename the export back to `update_path`, so a
+  legacy-format conversion sticks after one run.
+
+### Change
+
+- **`--update-library` skips Complete and Abandoned fics by
+  default.** A 700-story library where ~40% are Complete used
+  to spend an HTTP probe per finished story per refresh — pure
+  waste once the author moved on. The skip is now driven by the
+  index `status` field (a single dict lookup, no disk read), so
+  adding it costs nothing. `--no-skip-complete` opts back in for
+  one run; `--force-recheck` bypasses the gate alongside the
+  TTL and stale-complete gates as the blunt "probe everything"
+  escape hatch. The GUI's *Force recheck* checkbox now does the
+  same thing.
+
+- **Skip-complete recognises `Completed` and `Abandoned` status
+  strings, not just `Complete`.** Older HTML-metadata files
+  parsed by the library scanner store the literal *Status:
+  Completed* line from FFN; the previous gate's exact-match
+  `== "complete"` check let those slip through and re-probed
+  every refresh. Now matches the `complete` prefix (case-
+  insensitive) plus exact `abandoned` so the soft `Status:
+  Abandoned` signal joins the hard `abandoned_at` timestamp in
+  the skip set.
+
 ## 2.2.2 — 2026-04-25
 
 ### Docs

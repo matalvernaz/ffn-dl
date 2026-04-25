@@ -97,11 +97,27 @@ SECONDS_PER_DAY = 86400
 the internal comparison stays in epoch seconds."""
 
 
+def _is_terminal_status(status: object) -> bool:
+    """True if the entry's status means upstream has nothing more for us.
+
+    Matches both ``Complete`` (FFN/AO3/Wattpad/RR normalised) and
+    ``Completed`` (the older HTML-metadata files where the scanner
+    parsed the literal ``Status: Completed`` line untouched). Also
+    treats ``Abandoned`` as terminal — the user types this manually
+    in a few cases, separately from the explicit ``abandoned_at``
+    timestamp set by ``--mark-abandoned-after``.
+    """
+    if not isinstance(status, str):
+        return False
+    s = status.strip().lower()
+    return s.startswith("complete") or s == "abandoned"
+
+
 def build_refresh_queue(
     root: Path,
     *,
     index_path: Path | None = None,
-    skip_complete: bool = False,
+    skip_complete: bool = True,
     recheck_interval_s: int = 0,
     skip_stale_complete_days: int = 0,
     skip_abandoned: bool = True,
@@ -125,15 +141,22 @@ def build_refresh_queue(
     preserves the pre-TTL behaviour so scripted callers don't change
     behaviour without opting in.
 
+    ``skip_complete`` (default on) drops any entry whose index
+    ``status`` is Complete, Completed, or Abandoned. The check is
+    a single dict lookup — no disk read — so adding it to a 1000-
+    story refresh costs nothing while saving the upstream probe for
+    every finished fic. ``--force-recheck`` (CLI) and the GUI's
+    Force-recheck checkbox flip this off. Pending-resume entries
+    (``remote_chapter_count > local``) bypass the gate so an owed
+    download still lands.
+
     ``skip_stale_complete_days`` is a gentler companion to
     ``skip_complete``: it skips a story only when it's both marked
     Complete *and* its file has been untouched for that many days.
-    The intent is to stop hammering upstream for stories that the
-    author finished years ago, without blinding the update to the
-    author who marks their fic Complete today and publishes an
-    epilogue tomorrow. ``0`` disables the gate; a pending-resume
-    entry (``remote_chapter_count > local``) bypasses it because
-    those still have a download to finish locally.
+    Mostly redundant now that ``skip_complete`` is the default —
+    kept for callers that explicitly opt out of the blanket skip
+    but still want the stale-only behaviour. ``0`` disables the
+    gate; a pending-resume entry bypasses it.
 
     ``skip_abandoned`` (default on) drops any entry carrying an
     ``abandoned_at`` timestamp — set by ``--mark-abandoned-after``
@@ -179,6 +202,28 @@ def build_refresh_queue(
                 skipped.append(display_rel)
                 continue
 
+        # Index-driven skip-complete: check before doing any disk
+        # work. The pending-resume bypass below still runs first via
+        # the order of the gates further down — but we have to look
+        # up the pending count there, not here, so a Complete fic
+        # with an unfinished download can still land.
+        if skip_complete and _is_terminal_status(entry.get("status")):
+            pending_remote = entry.get("remote_chapter_count")
+            cached_count = entry.get("chapter_count")
+            has_pending_download = (
+                isinstance(pending_remote, int)
+                and isinstance(cached_count, int)
+                and pending_remote > cached_count
+            )
+            if not has_pending_download:
+                status_label = str(entry.get("status") or "").strip() or "Complete"
+                progress(
+                    f"  [skip] {display_rel}: marked {status_label} "
+                    "(--no-skip-complete / --force-recheck to override)"
+                )
+                skipped.append(display_rel)
+                continue
+
         cached = _cached_chapter_count(path, entry)
         if cached is not None:
             local = cached
@@ -219,18 +264,10 @@ def build_refresh_queue(
             isinstance(pending_remote, int)
             and pending_remote > local
         ):
-            if skip_complete:
-                try:
-                    status = extract_status(path)
-                except Exception:
-                    status = ""
-                if status.lower() == "complete":
-                    progress(
-                        f"  [skip] {display_rel}: marked Complete "
-                        f"({local} chapters)"
-                    )
-                    skipped.append(display_rel)
-                    continue
+            # The terminal-status gate above already lets pending
+            # downloads through — anything that reaches here either
+            # isn't Complete or has work owed, both of which we want
+            # to finish.
             progress(
                 f"  [resume] {display_rel}: {local} local / "
                 f"{pending_remote} upstream — queued without re-probing"
@@ -259,24 +296,19 @@ def build_refresh_queue(
                     skipped.append(display_rel)
                     continue
 
-        if skip_complete:
-            try:
-                status = extract_status(path)
-            except Exception:
-                status = ""
-            if status.lower() == "complete":
-                progress(
-                    f"  [skip] {display_rel}: marked Complete ({local} chapters)"
-                )
-                skipped.append(display_rel)
-                continue
-
         if stale_gate_active:
-            try:
-                status = extract_status(path)
-            except Exception:
-                status = ""
-            if status.lower() == "complete":
+            # Prefer the index status (free); fall back to the file
+            # only when the index doesn't carry one (older indexes
+            # written before the field existed).
+            entry_status = entry.get("status")
+            if isinstance(entry_status, str) and entry_status:
+                status = entry_status
+            else:
+                try:
+                    status = extract_status(path)
+                except Exception:
+                    status = ""
+            if _is_terminal_status(status):
                 try:
                     file_mtime = path.stat().st_mtime
                 except OSError:
@@ -314,7 +346,7 @@ detection); the CLI's --recheck-interval flag accepts any value.
 def default_refresh_args(
     *,
     dry_run: bool = False,
-    skip_complete: bool = False,
+    skip_complete: bool = True,
     workers: int = 5,
     recheck_interval_s: int = 0,
     force_recheck: bool = False,

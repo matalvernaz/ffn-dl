@@ -608,7 +608,41 @@ def _download_one(
         refetch_all_update = bool(
             update_path and getattr(args, "refetch_all", False)
         )
-        initial_skip = 0 if refetch_all_update else existing_chapters
+
+        # Merge-feasibility pre-check. The merge-in-place shortcut
+        # only works on ffn-dl's own export shapes; foreign-format
+        # files (FicLab, Calibre, older home-brew exports) raise
+        # ChaptersNotReadableError when ``read_chapters`` runs against
+        # them. Detecting that *before* the first download lets us
+        # skip straight to a clean re-export with skip=0 — otherwise
+        # we'd download with skip=existing, fail the merge, and
+        # re-download with skip=0 (an extra metadata fetch and a
+        # confusing "Downloading … re-downloading …" log pair). Also
+        # caches the parsed chapters so the merge step below doesn't
+        # re-read the file.
+        existing_chapters_list: list | None = None
+        legacy_format = False
+        if update_path is not None and not refetch_all_update:
+            try:
+                existing_chapters_list = read_chapters(update_path)
+                # Authoritative count from the actual parsed file.
+                # The caller-supplied ``existing_chapters`` came from
+                # ``count_chapters``/the index and can disagree with
+                # the parsed list (e.g., index out-of-date); trust
+                # the file we just opened.
+                existing_chapters = len(existing_chapters_list)
+            except ChaptersNotReadableError as exc:
+                legacy_format = True
+                existing_chapters = 0
+                status(
+                    f"\n  [legacy-format] {update_path.name}: {exc}.\n"
+                    "  Doing a clean re-export under the existing "
+                    "filename — this is a one-time conversion."
+                )
+
+        initial_skip = (
+            0 if (refetch_all_update or legacy_format) else existing_chapters
+        )
         if refetch_all_update:
             status(
                 "  Fresh-copies mode — re-downloading every chapter."
@@ -645,16 +679,25 @@ def _download_one(
         status(f"  Words:    {words}")
         status(f"  Status:   {story_status}")
 
-        if update_path and not refetch_all_update:
-            # refetch_all already pulled the full story in the initial
-            # download — ``story`` is complete, nothing to merge.
-            story = _merge_with_existing(
-                story, scraper, url, chapter_spec,
-                update_path=update_path,
-                refetch_all=False,
-                status=status,
-                progress_callback=progress,
+        if (
+            update_path
+            and not refetch_all_update
+            and not legacy_format
+            and existing_chapters_list is not None
+        ):
+            # refetch_all and legacy-format both already pulled the
+            # full story in the initial download — ``story`` is
+            # complete, nothing to merge. Otherwise, splice the
+            # cached existing chapters with the freshly-downloaded
+            # new ones. We use the chapters from the pre-check rather
+            # than re-reading the file.
+            status(
+                f"\n  Merging {len(existing_chapters_list)} existing "
+                f"chapter(s) with {len(story.chapters)} new."
             )
+            merged = list(existing_chapters_list) + list(story.chapters)
+            merged.sort(key=lambda c: c.number)
+            story.chapters = merged
 
         # Library auto-sort: for fresh downloads only, route into
         # <library>/<fandom>/... based on the story's metadata.
@@ -693,6 +736,24 @@ def _download_one(
                 hr_as_stars=args.hr_as_stars,
                 strip_notes=args.strip_notes,
             )
+
+        # Filename preservation on update: if the user's existing
+        # file lives at a name that differs from what the template
+        # produces (e.g., they hand-named "Muggle-Raised Champion.html"
+        # but FFN's title is "Dragon Chronicles 1: Muggle-Raised
+        # Champion"), keep the original name. Without this rename,
+        # the export writes the templated name and orphans the old
+        # file — leaving two copies of the same fic and the legacy
+        # one stuck in the re-download loop forever. ``Path.replace``
+        # is atomic on POSIX and Windows.
+        if update_path is not None:
+            try:
+                same_path = path.resolve() == update_path.resolve()
+            except OSError:
+                same_path = False
+            if not same_path:
+                path.replace(update_path)
+                path = update_path
         status(f"\nSaved to: {path}")
 
         if getattr(args, "send_to_kindle", None):
@@ -1019,7 +1080,9 @@ def _handle_update_all(args: argparse.Namespace) -> None:
     if args.dry_run:
         mode_bits.append("dry-run")
     if args.skip_complete:
-        mode_bits.append("skipping completed")
+        mode_bits.append("skipping Complete/Abandoned")
+    else:
+        mode_bits.append("probing every status")
     mode_bits.append(f"{workers} probe worker{'s' if workers != 1 else ''}")
     mode = f" ({', '.join(mode_bits)})"
     print(f"Scanning {len(files)} files in {folder}{mode}...\n")
@@ -1059,8 +1122,10 @@ def _handle_update_all(args: argparse.Namespace) -> None:
             except (OSError, ValueError) as exc:
                 logger.debug("extract_status failed for %s", path, exc_info=True)
                 status = ""
-            if status.lower() == "complete":
-                print(f"  [skip] {rel}: marked Complete ({local} chapters)")
+            status_lc = status.strip().lower()
+            if status_lc.startswith("complete") or status_lc == "abandoned":
+                label = status.strip() or "Complete"
+                print(f"  [skip] {rel}: marked {label} ({local} chapters)")
                 skipped.append(rel)
                 continue
 
@@ -2193,11 +2258,21 @@ def _handle_update_library(args: argparse.Namespace) -> None:
     stale_complete_days = 0 if args.force_recheck else int(
         getattr(args, "skip_stale_complete", 0) or 0
     )
+    # --force-recheck is the global "probe everything" escape hatch:
+    # it bypasses the TTL, the stale-complete gate, AND the default
+    # Complete/Abandoned skip. A user who wants to specifically
+    # include completed fics for one run can also pass
+    # --no-skip-complete on its own.
+    skip_complete_eff = (
+        False if args.force_recheck else bool(args.skip_complete)
+    )
     mode_bits = []
     if args.dry_run:
         mode_bits.append("dry-run")
-    if args.skip_complete:
-        mode_bits.append("skipping completed")
+    if skip_complete_eff:
+        mode_bits.append("skipping Complete/Abandoned")
+    else:
+        mode_bits.append("probing every status")
     if stale_complete_days > 0:
         mode_bits.append(f"skip stale-complete >{stale_complete_days}d")
     mode_bits.append(f"{workers} probe worker{'s' if workers != 1 else ''}")
@@ -2205,7 +2280,7 @@ def _handle_update_library(args: argparse.Namespace) -> None:
 
     probe_queue, skipped = build_refresh_queue(
         root_resolved,
-        skip_complete=args.skip_complete,
+        skip_complete=skip_complete_eff,
         recheck_interval_s=recheck_interval,
         skip_stale_complete_days=stale_complete_days,
     )
@@ -2829,10 +2904,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--skip-complete",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "With --update-all: skip stories whose local file is already "
-            "marked Complete (saves the remote probe)"
+            "With --update-library / --update-all: skip stories whose "
+            "index status is Complete, Completed, or Abandoned (saves "
+            "the remote probe). Default: on. Pass --no-skip-complete "
+            "to probe every story regardless of status. --force-recheck "
+            "implies --no-skip-complete for that run."
         ),
     )
     parser.add_argument(
@@ -2862,9 +2941,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force-recheck",
         action="store_true",
         help=(
-            "With --update-library: ignore --recheck-interval and "
-            "--skip-stale-complete, probe every story. Equivalent "
-            "to --recheck-interval 0 for that run."
+            "With --update-library: ignore --recheck-interval, "
+            "--skip-stale-complete, and --skip-complete — probe every "
+            "indexed story regardless of TTL or status. The blunt "
+            "escape hatch when you suspect the index is wrong."
         ),
     )
     parser.add_argument(
