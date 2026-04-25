@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.0.4 — 2026-04-24
+
+### Fix
+
+- **403-retry log noise: per-attempt warnings demoted to debug.** The
+  scraper's retry path was logging every attempt of a transient 403 at
+  WARNING. In real-world FFN traffic ~50% of requests hit a 403 that
+  resolves on the very next try (the second request lands on the
+  Cloudflare edge cache that the first one warmed up), and the
+  per-attempt WARN spam was burying actually-stuck failures and
+  dominating screen-reader output during library updates — one log
+  sample showed 339 warnings in a single run, all self-resolved.
+  Attempt 0 is now logged at DEBUG; escalations (attempt 1+, slow-retry
+  tier, browser rotations) still WARN. A correlation-context-scoped
+  counter tallies the resolved 403s and emits a single INFO summary at
+  context exit (``"Resolved N transient 403 retries during this
+  session"``) so the aggregate signal is preserved without the
+  per-attempt noise.
+
 ## 2.0.3 — 2026-04-24
 
 ### Fix

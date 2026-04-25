@@ -12,6 +12,7 @@ from typing import Optional, Union
 from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
 
+from .logging_utils import record_transient_403
 from .models import Chapter, Story
 
 logger = logging.getLogger(__name__)
@@ -500,6 +501,7 @@ class BaseScraper:
                         sess=sess, resp=resp, url=url,
                         label="200-after-403",
                     )
+                    record_transient_403()
                 if hit_rate_limit:
                     self._bump_delay_up()
                 return resp.text
@@ -549,10 +551,26 @@ class BaseScraper:
                 if attempt >= self.max_retries - 2:
                     self._rotate_browser()
                     wait = FORBIDDEN_SLOW_RETRY_S
-                logger.warning(
-                    "Forbidden (HTTP 403), retrying in %.0fs (attempt %d/%d)",
-                    wait, attempt + 1, self.max_retries,
-                )
+                # The first 403 is dominated by the "FFN behind Cloudflare
+                # served from origin" pattern that resolves on the very next
+                # request via the CF edge cache — the WARN-per-attempt
+                # version of this path produced hundreds of warnings per
+                # library update for issues the retry loop already handled
+                # silently. Demote attempt 0 to DEBUG and let escalations
+                # (attempt 1+, browser rotations, the slow-retry tier)
+                # remain at WARNING so persistent failures still surface.
+                # The aggregate count is reported at correlation-context
+                # exit by :func:`record_transient_403`.
+                if attempt == 0:
+                    logger.debug(
+                        "Forbidden (HTTP 403), retrying in %.0fs (attempt %d/%d)",
+                        wait, attempt + 1, self.max_retries,
+                    )
+                else:
+                    logger.warning(
+                        "Forbidden (HTTP 403), retrying in %.0fs (attempt %d/%d)",
+                        wait, attempt + 1, self.max_retries,
+                    )
                 time.sleep(wait)
                 continue
 
