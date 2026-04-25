@@ -190,6 +190,60 @@ def _prepare_chapter_html(
     return html
 
 
+def _prepare_chapter_html_with_llm_fallback(
+    html: str,
+    hr_as_stars: bool,
+    strip_notes: bool,
+    *,
+    llm_config: dict | None,
+    site_name: str | None,
+    story_id,
+    chapter_number: int | None,
+    progress: Callable[[str], None] | None,
+) -> tuple[str, bool]:
+    """Run the chapter pipeline; on a ``LLMUnavailable`` from the LLM
+    A/N pass, retry without the LLM and signal back so the caller can
+    skip the LLM for subsequent chapters.
+
+    Returns ``(prepared_html, llm_disabled)``. The chapter loops in
+    each ``export_*`` function pass the second element back into
+    their local ``llm_config`` so a 100-chapter story doesn't log
+    the same connection-refused warning 100 times when the user's
+    Ollama daemon is offline.
+    """
+    from .attribution import LLMUnavailable
+
+    try:
+        return (
+            _prepare_chapter_html(
+                html, hr_as_stars, strip_notes,
+                llm_config=llm_config,
+                site_name=site_name,
+                story_id=story_id,
+                chapter_number=chapter_number,
+                progress=progress,
+            ),
+            False,
+        )
+    except LLMUnavailable as exc:
+        if progress:
+            progress(
+                f"  [llm-an] endpoint unreachable ({exc}); "
+                "skipping LLM for remaining chapters"
+            )
+        return (
+            _prepare_chapter_html(
+                html, hr_as_stars, strip_notes,
+                llm_config=None,
+                site_name=site_name,
+                story_id=story_id,
+                chapter_number=chapter_number,
+                progress=progress,
+            ),
+            True,
+        )
+
+
 def export_txt(
     story: Story,
     output_dir: str = ".",
@@ -214,18 +268,14 @@ def export_txt(
     buf.write("=" * 60 + "\n")
     for ch in story.chapters:
         buf.write(f"\n\n--- {ch.title} ---\n\n")
-        html = ch.html
-        if strip_notes:
-            html = strip_note_paragraphs(html)
-            if llm_config:
-                html = strip_an_via_llm(
-                    html,
-                    llm_config=llm_config,
-                    site_name=site_name,
-                    story_id=story.id,
-                    chapter_number=ch.number,
-                    progress=progress,
-                )
+        html, llm_disabled = _prepare_chapter_html_with_llm_fallback(
+            ch.html, hr_as_stars=False, strip_notes=strip_notes,
+            llm_config=llm_config,
+            site_name=site_name, story_id=story.id,
+            chapter_number=ch.number, progress=progress,
+        )
+        if llm_disabled:
+            llm_config = None
         buf.write(html_to_text(html))
     atomic_write_text(path, buf.getvalue())
     return path
@@ -303,7 +353,7 @@ def export_html(
     for i, ch in enumerate(story.chapters, 1):
         ch_title = escape(ch.title)
         buf.write(f'<div class="chapter" id="chapter-{i}"><h2>{ch_title}</h2>\n')
-        chapter_html = _prepare_chapter_html(
+        chapter_html, llm_disabled = _prepare_chapter_html_with_llm_fallback(
             ch.html, hr_as_stars, strip_notes,
             llm_config=llm_config,
             site_name=site_name,
@@ -311,6 +361,8 @@ def export_html(
             chapter_number=ch.number,
             progress=progress,
         )
+        if llm_disabled:
+            llm_config = None
         buf.write(chapter_html)
         buf.write("\n</div><hr>\n")
 
@@ -1248,7 +1300,7 @@ def export_epub(
             lang="en",
         )
         heading = escape(ch.title)
-        chapter_html = _prepare_chapter_html(
+        chapter_html, llm_disabled = _prepare_chapter_html_with_llm_fallback(
             ch.html, hr_as_stars, strip_notes,
             llm_config=llm_config,
             site_name=site_prefix,
@@ -1256,6 +1308,8 @@ def export_epub(
             chapter_number=ch.number,
             progress=progress,
         )
+        if llm_disabled:
+            llm_config = None
         ec.content = f"<h2>{heading}</h2>\n{chapter_html}".encode("utf-8")
         ec.add_item(css)
         book.add_item(ec)

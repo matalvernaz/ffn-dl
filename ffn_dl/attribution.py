@@ -49,6 +49,18 @@ _EXTRA_ARGS = {
 logger = logging.getLogger(__name__)
 
 
+class LLMUnavailable(RuntimeError):
+    """The configured LLM endpoint refused the connection, timed out,
+    or wasn't resolvable.
+
+    Distinct from a ``RuntimeError`` raised on a malformed reply or a
+    rejected HTTP status: those are per-call problems, but an
+    unavailable endpoint is the same failure for every subsequent
+    chapter in a download. Callers that loop over chapters can catch
+    this once and stop trying — see the chapter loops in
+    ``ffn_dl.exporters``."""
+
+
 # ── Registry ────────────────────────────────────────────────────────
 
 # Each entry: distribution-name used with pip. The import name may
@@ -1444,6 +1456,14 @@ def _llm_call(
         raise RuntimeError(
             f"LLM HTTP {exc.code} from {provider}: {detail or exc.reason}"
         ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        # Connection refused, DNS failure, timeout — the endpoint isn't
+        # reachable at all. Distinct from HTTPError above (which means
+        # the server replied) because per-chapter loops want to give
+        # up after one of these instead of retrying 100+ times.
+        raise LLMUnavailable(
+            f"LLM endpoint {url} unreachable: {exc}"
+        ) from exc
 
     parsed = _json.loads(body)
     if provider == "ollama":
@@ -1839,6 +1859,11 @@ def classify_authors_notes_via_llm(
             system_prompt=system_prompt_override or _AN_SYSTEM_PROMPT,
             user_prompt=user_prompt,
         )
+    except LLMUnavailable:
+        # Endpoint is down — propagate so the chapter-loop caller can
+        # disable LLM for the rest of the run instead of retrying every
+        # chapter and spamming the same warning.
+        raise
     except Exception as exc:  # noqa: BLE001 — additive, never fail
         logger.warning("LLM author's-note classifier failed: %s", exc)
         return set()

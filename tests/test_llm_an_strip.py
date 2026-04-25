@@ -316,6 +316,30 @@ class TestStripAnViaLlmFailures:
         )
         assert out == html
 
+    def test_unavailable_endpoint_propagates_for_caller_to_short_circuit(
+        self, tmp_path, monkeypatch,
+    ):
+        """A connection-refused / DNS / timeout failure isn't a
+        per-call problem — the endpoint is just down, and every
+        subsequent chapter in the same export will hit the same wall.
+        ``strip_an_via_llm`` must let :class:`LLMUnavailable`
+        propagate so the chapter-loop caller can disable the LLM for
+        the rest of the run instead of logging a "connection refused"
+        warning once per chapter (the bug the user reported on a
+        116-chapter FFN download)."""
+        _isolate_cache_dir(monkeypatch, tmp_path)
+
+        def boom(**_kwargs):
+            raise attribution.LLMUnavailable("endpoint down")
+
+        monkeypatch.setattr(attribution, "_llm_call", boom)
+        html = "<p>One.</p><p>Two.</p><p>Three.</p><p>Four.</p>"
+        with pytest.raises(attribution.LLMUnavailable):
+            exporters.strip_an_via_llm(
+                html, llm_config=_llm_config(),
+                site_name="ffn", story_id=1, chapter_number=1,
+            )
+
 
 # ── Plumbing through _prepare_chapter_html ────────────────────────
 
@@ -379,3 +403,184 @@ class TestPrepareChapterHtmlWiring:
         # Regex pass still runs (and finds nothing to strip here).
         assert out == html
         assert calls == []
+
+
+# ── Connection-refused circuit breaker ────────────────────────────
+
+
+class TestLlmCallTransportClassification:
+    """``_llm_call`` distinguishes "endpoint refused the connection"
+    from "endpoint replied with an error": only the former is a
+    per-export-fatal failure. HTTPError stays a regular ``RuntimeError``
+    so a transient 503 doesn't kill LLM use for the rest of the run."""
+
+    def test_url_error_raises_llm_unavailable(self, monkeypatch):
+        import urllib.error
+
+        def boom(req, timeout=None):
+            raise urllib.error.URLError("Connection refused")
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        with pytest.raises(attribution.LLMUnavailable):
+            attribution._llm_call(
+                provider="ollama", model="m", api_key="",
+                endpoint="http://127.0.0.1:11434",
+                system_prompt="", user_prompt="",
+            )
+
+    def test_connection_refused_raises_llm_unavailable(self, monkeypatch):
+        # Plain ``ConnectionRefusedError`` (subclass of OSError) — what
+        # Python actually raises on Windows when nothing is listening
+        # at the configured endpoint.
+        def boom(req, timeout=None):
+            raise ConnectionRefusedError(
+                "[WinError 10061] No connection could be made"
+            )
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        with pytest.raises(attribution.LLMUnavailable):
+            attribution._llm_call(
+                provider="ollama", model="m", api_key="",
+                endpoint="http://127.0.0.1:11434",
+                system_prompt="", user_prompt="",
+            )
+
+    def test_timeout_raises_llm_unavailable(self, monkeypatch):
+        def boom(req, timeout=None):
+            raise TimeoutError("read timed out")
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        with pytest.raises(attribution.LLMUnavailable):
+            attribution._llm_call(
+                provider="ollama", model="m", api_key="",
+                endpoint="http://127.0.0.1:11434",
+                system_prompt="", user_prompt="",
+            )
+
+    def test_http_error_stays_runtime_error_not_unavailable(self, monkeypatch):
+        # 503 from a reachable server is per-call; LLM use must NOT be
+        # disabled for the whole run on this kind of failure.
+        import io as _io
+        import urllib.error
+
+        def boom(req, timeout=None):
+            raise urllib.error.HTTPError(
+                url="http://x", code=503, msg="Service Unavailable",
+                hdrs=None, fp=_io.BytesIO(b""),
+            )
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        with pytest.raises(RuntimeError) as exc_info:
+            attribution._llm_call(
+                provider="ollama", model="m", api_key="",
+                endpoint="http://127.0.0.1:11434",
+                system_prompt="", user_prompt="",
+            )
+        assert not isinstance(exc_info.value, attribution.LLMUnavailable)
+
+
+class TestExportLoopCircuitBreaker:
+    """End-to-end check on the chapter-loop short-circuit. The bug the
+    user reported was a 116-chapter download that called the LLM 116
+    times against an offline endpoint — once per chapter — logging a
+    duplicate connection-refused warning each time. The fix lets
+    ``LLMUnavailable`` propagate from ``strip_an_via_llm`` and has
+    each exporter catch it once, then skip the LLM pass for the
+    remaining chapters in that download."""
+
+    def _multi_chapter_story(self, n: int):
+        from ffn_dl.models import Chapter, Story
+        s = Story(
+            id=1,
+            title="T",
+            author="A",
+            summary="",
+            url="https://www.fanfiction.net/s/1",
+        )
+        for i in range(1, n + 1):
+            s.chapters.append(Chapter(
+                number=i,
+                title=f"Ch {i}",
+                # ≥ _LLM_AN_MIN_PARAGRAPHS (4) so the LLM round-trip
+                # would actually fire in the absence of the breaker.
+                html=(
+                    "<p>Para one of chapter.</p>"
+                    "<p>Para two of chapter.</p>"
+                    "<p>Para three of chapter.</p>"
+                    "<p>Para four of chapter.</p>"
+                ),
+            ))
+        return s
+
+    def test_export_html_calls_llm_once_when_endpoint_down(
+        self, tmp_path, monkeypatch,
+    ):
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        calls: list = []
+
+        def boom(**kwargs):
+            calls.append(kwargs)
+            raise attribution.LLMUnavailable("endpoint down")
+
+        monkeypatch.setattr(attribution, "_llm_call", boom)
+
+        story = self._multi_chapter_story(5)
+        progress_lines: list[str] = []
+        exporters.export_html(
+            story, output_dir=str(tmp_path),
+            strip_notes=True,
+            llm_config=_llm_config(),
+            progress=progress_lines.append,
+        )
+        assert len(calls) == 1, (
+            "After the first LLMUnavailable the chapter loop must "
+            "stop calling the LLM for remaining chapters"
+        )
+        # The "skipping LLM for remaining chapters" notice fires once
+        # so the user sees one line of context, not 5×.
+        unreachable_lines = [
+            l for l in progress_lines if "endpoint unreachable" in l
+        ]
+        assert len(unreachable_lines) == 1
+
+    def test_export_txt_calls_llm_once_when_endpoint_down(
+        self, tmp_path, monkeypatch,
+    ):
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        calls: list = []
+
+        def boom(**kwargs):
+            calls.append(kwargs)
+            raise attribution.LLMUnavailable("endpoint down")
+
+        monkeypatch.setattr(attribution, "_llm_call", boom)
+
+        story = self._multi_chapter_story(5)
+        exporters.export_txt(
+            story, output_dir=str(tmp_path),
+            strip_notes=True,
+            llm_config=_llm_config(),
+        )
+        assert len(calls) == 1
+
+    def test_export_html_succeeds_with_llm_disabled_after_failure(
+        self, tmp_path, monkeypatch,
+    ):
+        """Hitting LLMUnavailable must not abort the export — the
+        chapter content (after the regex pass) still has to land in
+        the file."""
+        _isolate_cache_dir(monkeypatch, tmp_path)
+
+        def boom(**_kwargs):
+            raise attribution.LLMUnavailable("endpoint down")
+
+        monkeypatch.setattr(attribution, "_llm_call", boom)
+        story = self._multi_chapter_story(3)
+        path = exporters.export_html(
+            story, output_dir=str(tmp_path),
+            strip_notes=True,
+            llm_config=_llm_config(),
+        )
+        body = path.read_text(encoding="utf-8")
+        # All three chapters' content survives.
+        assert body.count("Para one of chapter") == 3
