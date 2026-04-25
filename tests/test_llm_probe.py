@@ -183,6 +183,126 @@ class TestProbeAnthropic:
         assert headers["anthropic-version"] == "2023-06-01"
 
 
+class TestProbeEdgeCases:
+    """Cases the dialog will hit in practice with weird providers or
+    user-typed endpoints. None of these should crash; all should
+    produce a useful detail string."""
+
+    def test_openai_compatible_without_api_key_still_attempts_probe(
+        self, monkeypatch,
+    ):
+        # vLLM / Ollama-compatible servers serve OpenAI-shaped responses
+        # without requiring auth. Don't reject up front — try the call.
+        body = json.dumps({"data": [{"id": "local-model"}]}).encode()
+        captured = _stub_urlopen(monkeypatch, _FakeResp(body))
+
+        result = attribution.probe_llm_endpoint(
+            provider="openai-compatible",
+            endpoint="http://localhost:8000/v1",
+            api_key="",
+        )
+        assert result.ok
+        # No Authorization header attached when there's no key.
+        assert "Authorization" not in captured[0]["headers"]
+
+    def test_endpoint_trailing_slash_normalised(self, monkeypatch):
+        # ``_llm_normalize_endpoint`` rstrips the slash; the probe
+        # mustn't double it (``//api/tags``) when the user pastes a
+        # URL with a trailing slash from a config file.
+        captured = _stub_urlopen(
+            monkeypatch, _FakeResp(json.dumps({"models": []}).encode()),
+        )
+        attribution.probe_llm_endpoint(
+            provider="ollama", endpoint="http://localhost:11434/",
+        )
+        assert captured[0]["url"] == "http://localhost:11434/api/tags"
+
+    def test_malformed_json_response_is_treated_as_reachable(
+        self, monkeypatch,
+    ):
+        # Some reverse proxies serve plain text "OK" on health-check
+        # endpoints. The probe should treat this as "endpoint is up,
+        # not a real LLM" — useful info for the user, not a crash.
+        _stub_urlopen(monkeypatch, _FakeResp(b"not json at all"))
+        result = attribution.probe_llm_endpoint(
+            provider="ollama", endpoint="http://localhost:11434",
+        )
+        assert result.ok
+        assert "wasn't json" in result.detail.lower() or "json" in result.detail.lower()
+
+    def test_response_without_models_key_doesnt_crash(self, monkeypatch):
+        # An unusual provider that returns a non-dict JSON body. Don't
+        # AttributeError trying to ``.get("models")``.
+        _stub_urlopen(monkeypatch, _FakeResp(json.dumps([1, 2, 3]).encode()))
+        result = attribution.probe_llm_endpoint(
+            provider="ollama", endpoint="http://localhost:11434",
+        )
+        # Still ok=True (server replied), just no model list to show.
+        assert result.ok
+        assert result.models == [] or result.models is None
+
+    def test_500_error_reports_status_not_unreachable(self, monkeypatch):
+        import urllib.error
+        _stub_urlopen(
+            monkeypatch,
+            urllib.error.HTTPError(
+                url="http://localhost:11434/api/tags",
+                code=500, msg="Internal Server Error", hdrs=None,
+                fp=io.BytesIO(b"db down"),
+            ),
+        )
+        result = attribution.probe_llm_endpoint(
+            provider="ollama", endpoint="http://localhost:11434",
+        )
+        # Server replied — endpoint is reachable but unhealthy. Don't
+        # send the user to "is the daemon running?", that's misleading.
+        assert not result.ok
+        assert result.status == 500
+        assert "500" in result.detail
+        assert "is the ollama daemon running" not in result.detail.lower()
+
+    def test_dns_failure_reports_unreachable(self, monkeypatch):
+        import urllib.error
+        _stub_urlopen(
+            monkeypatch,
+            urllib.error.URLError(
+                "[Errno -2] Name or service not known"
+            ),
+        )
+        result = attribution.probe_llm_endpoint(
+            provider="ollama", endpoint="http://nope.invalid:11434",
+        )
+        assert not result.ok
+        assert "unreachable" in result.detail.lower()
+
+    def test_dict_models_with_neither_name_nor_id_skipped(self, monkeypatch):
+        # Some local stacks return ``{"object": "model"}`` without a
+        # name field. Don't TypeError; just skip those entries.
+        body = json.dumps(
+            {"models": [
+                {"object": "model"},  # no name, no id
+                {"name": "actual-model"},
+            ]}
+        ).encode()
+        _stub_urlopen(monkeypatch, _FakeResp(body))
+        result = attribution.probe_llm_endpoint(
+            provider="ollama", endpoint="http://localhost:11434",
+        )
+        assert result.ok
+        assert result.models == ["actual-model"]
+
+    def test_anthropic_without_api_key_short_circuits(self):
+        # No urlopen stub — we must not reach the network when the key
+        # is missing for a provider that requires it.
+        result = attribution.probe_llm_endpoint(
+            provider="anthropic",
+            endpoint="https://api.anthropic.com/v1",
+            api_key=None,
+        )
+        assert not result.ok
+        assert "api key" in result.detail.lower()
+
+
 # ── ollama_install ────────────────────────────────────────────────
 
 

@@ -1190,6 +1190,12 @@ class LlmSettingsDialog(wx.Dialog):
         )
         self._prefs = prefs
         self._busy = False
+        # Worker threads that finish after the user closed the dialog
+        # would call ``wx.CallAfter`` on destroyed widgets — guard
+        # every callback with this flag so the post-close race is a
+        # no-op instead of a crash.
+        self._alive = True
+        self.Bind(wx.EVT_CLOSE, self._on_close)
 
         from . import prefs as _p
         self._p = _p
@@ -1426,7 +1432,16 @@ class LlmSettingsDialog(wx.Dialog):
         """Append a line to the read-only status log. Always called
         on the GUI thread; worker threads marshal here via
         ``wx.CallAfter``."""
+        if not self._alive:
+            return
         self.status_ctrl.AppendText(line.rstrip() + "\n")
+
+    def _on_close(self, event):
+        """User closed the dialog — flip the alive flag so any worker
+        callbacks that haven't fired yet skip their GUI work instead
+        of touching destroyed widgets."""
+        self._alive = False
+        event.Skip()
 
     def _on_test_connection(self, event):
         from . import attribution
@@ -1458,6 +1473,8 @@ class LlmSettingsDialog(wx.Dialog):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_test_done(self, result) -> None:
+        if not self._alive:
+            return
         prefix = "OK" if result.ok else "FAIL"
         self._append_status(f"  {prefix}: {result.detail}")
         self._set_busy(False)
@@ -1491,6 +1508,8 @@ class LlmSettingsDialog(wx.Dialog):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_install_done(self, ok: bool) -> None:
+        if not self._alive:
+            return
         if ok:
             self._append_status(
                 "Install finished. Click 'Test connection' to confirm "
