@@ -1,0 +1,482 @@
+"""LLM-driven character analysis for richer voice mapping.
+
+When the LLM attribution backend is enabled, ffn-dl runs a single
+extra round-trip per story to classify every detected speaker into a
+profile dict the audiobook generator uses as a prior:
+
+    {
+      "Harry Potter": {"gender": "male", "age": "teen",
+                       "accent": "en-GB", "tone": "earnest"},
+      "Hagrid":       {"gender": "male", "age": "elder",
+                       "accent": "en-GB", "tone": "warm rural"},
+      ...
+    }
+
+The profile feeds VoiceMapper's per-character voice pool — combined
+with the user's enabled TTS providers, the cast list, and the
+detected gender we pick voices that match each character's age /
+accent / tone rather than just their gender.
+
+This module reuses ``ffn_dl.attribution._llm_call`` for transport so
+the same provider config (Ollama / OpenAI / Anthropic / OpenAI-
+compatible) drives both attribution and profiling — there's no second
+config surface for the user to fill in.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "seed_profiles_via_llm",
+    "derive_accents_from_profiles",
+    "seed_pronunciations_via_llm",
+    "suggest_narrator_via_llm",
+    "pick_narrator_voice_for_profile",
+]
+
+
+# Cap how many chars of the story we feed into the profile prompt.
+# Profiling doesn't need every chapter — the first ~40 KB of text plus
+# the cast list is plenty for a model to identify canon characters and
+# infer accents from in-text dialogue cues. Larger feeds wouldn't
+# improve accuracy and would burn tokens on cloud providers.
+_PROFILE_SAMPLE_CHARS = 40000
+
+
+def _truncate_sample(full_text: str) -> str:
+    if len(full_text) <= _PROFILE_SAMPLE_CHARS:
+        return full_text
+    # Take the head of the text — fanfic exposition (where canon
+    # characters get introduced) sits at the front.
+    return full_text[:_PROFILE_SAMPLE_CHARS]
+
+
+_SYSTEM_PROMPT = (
+    "You are an expert at classifying characters in fanfiction for "
+    "audiobook narration. For each character listed, infer four "
+    "attributes from canon knowledge plus in-text dialogue cues:\n"
+    "- gender: 'male', 'female', or 'neutral'\n"
+    "- age: 'child', 'teen', 'young adult', 'adult', or 'elder'\n"
+    "- accent: a BCP-47 locale code that fits the character's "
+    "  established speech (e.g. 'en-GB' for most Hogwarts characters, "
+    "  'en-GB' for Hagrid (West Country), 'en-GB' for McGonagall "
+    "  (Scottish — still en-GB), 'fr-FR' for Fleur Delacour, 'en-US' "
+    "  for American characters, 'en-IE' for Irish, 'en-IN' for "
+    "  Indian, 'en-AU' for Australian, etc.). Use 'any' if you "
+    "  genuinely have no signal.\n"
+    "- tone: a short free-form descriptor of vocal character "
+    "  ('warm rural', 'crisp posh', 'gruff', 'soft melodic', "
+    "  'aristocratic', 'earnest', 'sardonic', ...).\n"
+    "Respond with ONLY a JSON object whose keys are the character "
+    "names exactly as listed and whose values are objects with the "
+    "four attribute keys."
+)
+
+
+def seed_profiles_via_llm(
+    *, character_list: list[str],
+    full_text: str,
+    llm_config: dict,
+) -> dict[str, dict]:
+    """Ask the LLM to classify every name in ``character_list``.
+
+    ``llm_config`` matches the dict ``generate_audiobook`` accepts
+    (provider / model / api_key / endpoint). Returns an empty dict on
+    any error — profile seeding is purely additive, so a transport
+    failure should never block the audiobook render.
+    """
+    if not character_list or not llm_config:
+        return {}
+    try:
+        from .attribution import _llm_call, _llm_normalize_endpoint
+    except ImportError:
+        return {}
+
+    provider = llm_config.get("provider", "")
+    model = llm_config.get("model", "")
+    if not provider or not model:
+        return {}
+    endpoint = _llm_normalize_endpoint(provider, llm_config.get("endpoint"))
+
+    sample = _truncate_sample(full_text)
+    user_prompt = (
+        "Characters to classify (use these names exactly as keys):\n"
+        + "\n".join(f"- {n}" for n in character_list)
+        + "\n\nStory excerpt:\n"
+        + sample
+        + "\n\nReturn JSON only."
+    )
+    try:
+        reply = _llm_call(
+            provider=provider, model=model,
+            api_key=llm_config.get("api_key"),
+            endpoint=endpoint,
+            system_prompt=_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001 — never fail the render
+        logger.warning("LLM character-profile seeding failed: %s", exc)
+        return {}
+    return _parse_profile_response(reply, character_list)
+
+
+def _parse_profile_response(reply: str, character_list: list[str]) -> dict[str, dict]:
+    """Extract a ``{name: {gender, age, accent, tone}}`` dict from the
+    LLM reply, validating each entry's shape. Unknown keys are dropped;
+    missing attributes default to neutral / any. We only keep entries
+    whose key is in the requested ``character_list`` so a hallucinated
+    extra name can't introduce a phantom voice mapping."""
+    if not reply:
+        return {}
+    text = reply.strip()
+    if text.startswith("```"):
+        first_nl = text.find("\n")
+        if first_nl != -1:
+            text = text[first_nl + 1:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace == -1 or last_brace <= first_brace:
+        return {}
+    blob = text[first_brace : last_brace + 1]
+    try:
+        parsed = json.loads(blob)
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+
+    cl_lower = {c.lower(): c for c in character_list}
+    out: dict[str, dict] = {}
+    for raw_name, raw_attrs in parsed.items():
+        if not isinstance(raw_attrs, dict):
+            continue
+        canonical = _resolve_name(raw_name, cl_lower)
+        if canonical is None:
+            continue
+        gender = _clean_gender(raw_attrs.get("gender"))
+        age = _clean_age(raw_attrs.get("age"))
+        accent = _clean_accent(raw_attrs.get("accent"))
+        tone = (raw_attrs.get("tone") or "").strip() if isinstance(
+            raw_attrs.get("tone"), str
+        ) else ""
+        out[canonical] = {
+            "gender": gender,
+            "age": age,
+            "accent": accent,
+            "tone": tone,
+        }
+    return out
+
+
+def _resolve_name(raw: object, cl_lower: dict[str, str]) -> str | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    low = raw.strip().lower()
+    if low in cl_lower:
+        return cl_lower[low]
+    # Allow first-name match (model returns "Harry" against "Harry Potter").
+    for full_low, full in cl_lower.items():
+        if low == full_low.split()[0]:
+            return full
+    return None
+
+
+def _clean_gender(raw: object) -> str:
+    if not isinstance(raw, str):
+        return "neutral"
+    low = raw.strip().lower()
+    if low in {"male", "m", "man"}:
+        return "male"
+    if low in {"female", "f", "woman"}:
+        return "female"
+    return "neutral"
+
+
+_AGE_VALUES = {"child", "teen", "young adult", "adult", "elder"}
+
+
+def _clean_age(raw: object) -> str:
+    if not isinstance(raw, str):
+        return "adult"
+    low = raw.strip().lower()
+    if low in _AGE_VALUES:
+        return low
+    if low in {"old", "elderly", "senior"}:
+        return "elder"
+    if low in {"young", "youth", "youngster"}:
+        return "young adult"
+    if low in {"kid", "small child", "infant", "toddler"}:
+        return "child"
+    return "adult"
+
+
+_LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?$")
+
+
+def _clean_accent(raw: object) -> str:
+    if not isinstance(raw, str):
+        return "any"
+    val = raw.strip()
+    if val.lower() in {"any", "", "unknown", "none"}:
+        return "any"
+    if _LOCALE_RE.match(val):
+        # Normalise to xx-XX casing.
+        if "-" in val:
+            lang, region = val.split("-", 1)
+            return f"{lang.lower()}-{region.upper()}"
+        return val.lower()
+    return "any"
+
+
+def derive_accents_from_profiles(profiles: dict[str, dict]) -> dict[str, str]:
+    """Pull just the accent field out of every profile, dropping
+    ``"any"`` so the user's accent map stays small. Used to seed
+    ``.ffn-accents-*.json`` from a freshly-computed profile dict."""
+    out: dict[str, str] = {}
+    for name, profile in profiles.items():
+        accent = (profile or {}).get("accent")
+        if isinstance(accent, str) and accent and accent != "any":
+            out[name] = accent
+    return out
+
+
+# ── Pronunciation seeder ──────────────────────────────────────────
+
+
+_PRONUNCIATION_SYSTEM_PROMPT = (
+    "You are a phonetic editor preparing fanfiction for audiobook "
+    "narration. Many fanfic words trip up text-to-speech engines: "
+    "made-up character names ('Hermione', 'Daenerys', 'Nymphadora'), "
+    "fandom-specific terms ('Voldemort', 'Quidditch', 'Avada "
+    "Kedavra'), foreign loanwords used by characters, and place "
+    "names. For each problematic word in the story, provide a "
+    "phonetic respelling that an English-reading TTS will pronounce "
+    "correctly. Use plain English letters with hyphens between "
+    "syllables; do NOT use IPA. Capitalize the stressed syllable. "
+    "Skip ordinary English words and obvious names that any TTS "
+    "would handle (Harry, Ron, Tom, John). Respond with ONLY a "
+    "JSON object mapping the original spelling to the phonetic "
+    'respelling. Example: {"Hermione": "Her-MY-oh-nee", "Quidditch": '
+    '"KWID-itch", "Daenerys": "Duh-NAIR-iss"}.'
+)
+
+
+def seed_pronunciations_via_llm(
+    *, character_list: list[str],
+    full_text: str,
+    llm_config: dict,
+) -> dict[str, str]:
+    """Ask the LLM for a starter pronunciation override map.
+
+    Targets the words ffn-dl's TTS pipeline mangles most: invented
+    names, fandom terms, foreign words. Empty dict on any error so
+    the user's existing (manual) pronunciation file isn't disturbed
+    by a transport failure."""
+    if not llm_config:
+        return {}
+    try:
+        from .attribution import _llm_call, _llm_normalize_endpoint
+    except ImportError:
+        return {}
+
+    provider = llm_config.get("provider", "")
+    model = llm_config.get("model", "")
+    if not provider or not model:
+        return {}
+    endpoint = _llm_normalize_endpoint(provider, llm_config.get("endpoint"))
+
+    sample = _truncate_sample(full_text)
+    cast_lines = "\n".join(f"- {n}" for n in character_list) or "(none)"
+    user_prompt = (
+        "Cast list (treat names as candidates for respelling — "
+        "include ones you think TTS will mispronounce):\n"
+        + cast_lines
+        + "\n\nStory excerpt (look for fandom terms, place names, "
+        "foreign words, made-up vocabulary):\n"
+        + sample
+        + "\n\nReturn JSON only — keep it tight, no more than 25 "
+        "entries. Skip words that any TTS will read correctly."
+    )
+    try:
+        reply = _llm_call(
+            provider=provider, model=model,
+            api_key=llm_config.get("api_key"),
+            endpoint=endpoint,
+            system_prompt=_PRONUNCIATION_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM pronunciation seeding failed: %s", exc)
+        return {}
+
+    return _parse_pronunciation_response(reply)
+
+
+def _parse_pronunciation_response(reply: str) -> dict[str, str]:
+    if not reply:
+        return {}
+    text = reply.strip()
+    if text.startswith("```"):
+        first_nl = text.find("\n")
+        if first_nl != -1:
+            text = text[first_nl + 1:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace == -1 or last_brace <= first_brace:
+        return {}
+    blob = text[first_brace : last_brace + 1]
+    try:
+        parsed = json.loads(blob)
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in parsed.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            continue
+        key = k.strip()
+        val = v.strip()
+        # Reject identity entries — they pollute the map without
+        # changing anything ("Harry" -> "Harry").
+        if not key or not val or key == val:
+            continue
+        out[key] = val
+    return out
+
+
+# ── Narrator voice suggestion ─────────────────────────────────────
+
+
+_NARRATOR_SYSTEM_PROMPT = (
+    "You are choosing a narrator voice for an audiobook of a fanfic. "
+    "Read the story excerpt and recommend a narrator profile based "
+    "on its tone (dark / cozy / dramatic / lighthearted / literary "
+    "/ pulpy / etc.). Respond with ONLY a JSON object: "
+    "{'gender': 'male'|'female'|'neutral', 'accent': 'BCP-47 locale', "
+    "'tone': '<short tone descriptor>', 'rationale': "
+    "'<one-sentence why>'}. Default to 'en-GB' for British-coded "
+    "fandoms (Harry Potter, Sherlock, Doctor Who) and 'en-US' "
+    "otherwise unless the text clearly points elsewhere."
+)
+
+
+def suggest_narrator_via_llm(
+    *, full_text: str, llm_config: dict,
+) -> dict | None:
+    """Ask the LLM for a narrator profile that fits the story's tone.
+
+    Returns ``{"gender": ..., "accent": ..., "tone": ..., "rationale": ...}``
+    or None on any failure. The audiobook generator picks the actual
+    voice id from this profile by filtering its catalog by the
+    suggested gender + accent (same machinery as the per-character
+    pool builder)."""
+    if not llm_config:
+        return None
+    try:
+        from .attribution import _llm_call, _llm_normalize_endpoint
+    except ImportError:
+        return None
+
+    provider = llm_config.get("provider", "")
+    model = llm_config.get("model", "")
+    if not provider or not model:
+        return None
+    endpoint = _llm_normalize_endpoint(provider, llm_config.get("endpoint"))
+
+    sample = _truncate_sample(full_text)
+    user_prompt = (
+        "Story excerpt to assess for narrator selection:\n\n"
+        + sample
+        + "\n\nReturn JSON only."
+    )
+    try:
+        reply = _llm_call(
+            provider=provider, model=model,
+            api_key=llm_config.get("api_key"),
+            endpoint=endpoint,
+            system_prompt=_NARRATOR_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM narrator-voice suggestion failed: %s", exc)
+        return None
+
+    if not reply:
+        return None
+    text = reply.strip()
+    if text.startswith("```"):
+        first_nl = text.find("\n")
+        if first_nl != -1:
+            text = text[first_nl + 1:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace == -1 or last_brace <= first_brace:
+        return None
+    blob = text[first_brace : last_brace + 1]
+    try:
+        parsed = json.loads(blob)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return {
+        "gender": _clean_gender(parsed.get("gender")),
+        "accent": _clean_accent(parsed.get("accent")),
+        "tone": (parsed.get("tone") or "").strip()
+        if isinstance(parsed.get("tone"), str) else "",
+        "rationale": (parsed.get("rationale") or "").strip()
+        if isinstance(parsed.get("rationale"), str) else "",
+    }
+
+
+def pick_narrator_voice_for_profile(
+    *, profile: dict | None,
+    enabled_providers: list[str] | None,
+    fallback: str,
+) -> str:
+    """Translate a narrator profile into an actual voice id by
+    filtering the live provider catalog.
+
+    Returns the namespaced voice id (``edge:en-GB-RyanNeural`` or
+    similar). On no match the legacy ``fallback`` is returned
+    unchanged so audiobook rendering never blocks on this — narration
+    has to keep working even if the LLM picks an accent we can't
+    fulfil."""
+    if not profile:
+        return fallback
+    try:
+        from . import tts_providers
+    except ImportError:
+        return fallback
+    catalog = tts_providers.all_voices(providers=enabled_providers)
+    if not catalog:
+        return fallback
+    target_gender = (profile.get("gender") or "neutral").lower()
+    target_accent = (profile.get("accent") or "any").lower()
+    target_lang = target_accent.split("-", 1)[0] if "-" in target_accent else target_accent
+    for v in catalog:
+        if target_gender in ("male", "female") and v.gender.lower() != target_gender:
+            continue
+        if target_accent in ("any", "") or v.locale.lower() == target_accent:
+            return v.id
+    # Locale fallback to language match.
+    for v in catalog:
+        if target_gender in ("male", "female") and v.gender.lower() != target_gender:
+            continue
+        if v.language.lower() == target_lang:
+            return v.id
+    return fallback

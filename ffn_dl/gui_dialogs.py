@@ -928,6 +928,224 @@ class OptionalFeaturesDialog(wx.Dialog):
             )
 
 
+class TtsProvidersDialog(wx.Dialog):
+    """Manage which TTS providers contribute voices to the audiobook
+    generator's pool, and install / download Piper assets on demand.
+
+    The dialog lists every registered provider with its install state
+    and a toggle. Saving writes a comma-separated list of enabled
+    provider names back to ``KEY_TTS_PROVIDERS`` (empty string == all
+    installed providers, the implicit default). For Piper the dialog
+    additionally exposes an Install Binary button (one-shot download
+    of the upstream release) and a Download All Voices button (kicks
+    off the lazy fetch for every voice in the manifest).
+    """
+
+    def __init__(self, parent, prefs, log_callback=None):
+        super().__init__(
+            parent, title="TTS providers", size=(640, 420),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._prefs = prefs
+        self._log = log_callback or (lambda _msg: None)
+
+        from . import prefs as _p
+        self._p = _p
+        from . import tts_providers
+        self._tts_providers = tts_providers
+
+        root = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        pad = 8
+
+        sizer.Add(
+            wx.StaticText(
+                root,
+                label=(
+                    "Pick which TTS providers contribute voices to the "
+                    "audiobook generator. The voice pool VoiceMapper picks "
+                    "from is the union of every enabled provider, filtered "
+                    "by each character's accent and gender."
+                ),
+            ),
+            0, wx.ALL, pad,
+        )
+
+        # Per-provider rows. wx.CheckListBox is fine here — we don't
+        # need the screen-reader [x]/[ ] prefix workaround because the
+        # state never changes outside the dialog and we'll re-read on
+        # save anyway.
+        self._provider_names = self._tts_providers.all_provider_names()
+        self.list_ctrl = wx.CheckListBox(
+            root,
+            choices=[self._row_label(n) for n in self._provider_names],
+        )
+        self.list_ctrl.SetName("Enabled TTS providers")
+        self.list_ctrl.Bind(wx.EVT_LISTBOX, self._on_select)
+        sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+
+        self.detail = wx.StaticText(root, label="")
+        self.detail.Wrap(580)
+        sizer.Add(self.detail, 0, wx.ALL, pad)
+
+        btns = wx.BoxSizer(wx.HORIZONTAL)
+        self.install_btn = wx.Button(root, label="&Install Piper binary")
+        self.install_btn.Bind(wx.EVT_BUTTON, self._on_install_piper)
+        btns.Add(self.install_btn, 0, wx.RIGHT, pad)
+
+        self.download_btn = wx.Button(root, label="Download &all Piper voices")
+        self.download_btn.Bind(wx.EVT_BUTTON, self._on_download_voices)
+        btns.Add(self.download_btn, 0, wx.RIGHT, pad)
+        btns.AddStretchSpacer(1)
+
+        save = wx.Button(root, wx.ID_OK, "&Save")
+        save.SetDefault()
+        save.Bind(wx.EVT_BUTTON, self._on_save)
+        cancel = wx.Button(root, wx.ID_CANCEL, "Cancel")
+        btns.Add(save, 0, wx.RIGHT, 4)
+        btns.Add(cancel, 0)
+        sizer.Add(btns, 0, wx.EXPAND | wx.ALL, pad)
+
+        root.SetSizer(sizer)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(root, 1, wx.EXPAND)
+        self.SetSizer(outer)
+
+        self._load_state()
+
+    def _row_label(self, name: str) -> str:
+        provider = self._tts_providers.get_provider(name)
+        if provider is None:
+            return f"{name} (unavailable)"
+        if provider.is_installed():
+            return f"{name} (installed)"
+        return f"{name} (not installed)"
+
+    def _refresh_rows(self):
+        for i, name in enumerate(self._provider_names):
+            self.list_ctrl.SetString(i, self._row_label(name))
+
+    def _load_state(self):
+        raw = (self._prefs.get(self._p.KEY_TTS_PROVIDERS) or "").strip()
+        enabled = (
+            [n.strip().lower() for n in raw.split(",") if n.strip()]
+            if raw else self._tts_providers.installed_provider_names()
+        )
+        for i, name in enumerate(self._provider_names):
+            self.list_ctrl.Check(i, name in enabled)
+        if self._provider_names:
+            self.list_ctrl.SetSelection(0)
+            self._refresh_detail(0)
+
+    def _on_select(self, event):
+        self._refresh_detail(self.list_ctrl.GetSelection())
+
+    def _refresh_detail(self, idx):
+        if idx < 0 or idx >= len(self._provider_names):
+            self.detail.SetLabel("")
+            return
+        name = self._provider_names[idx]
+        provider = self._tts_providers.get_provider(name)
+        if provider is None:
+            self.detail.SetLabel(f"{name}: provider failed to load.")
+            return
+        try:
+            voices = provider.list_voices() if provider.is_installed() else []
+        except Exception as exc:  # noqa: BLE001
+            voices = []
+            err = f" (catalog error: {exc})"
+        else:
+            err = ""
+        if name == "edge":
+            text = (
+                f"Edge TTS — Microsoft Edge Neural Voices via edge-tts. "
+                f"{len(voices)} voices available."
+                + err
+            )
+        elif name == "piper":
+            from .tts_providers import piper as _piper
+
+            installed = _piper.piper_executable() is not None
+            downloaded = sum(
+                1 for v in voices
+                if _piper.voice_is_downloaded(v.short_name)
+            )
+            text = (
+                f"Piper TTS — local ONNX inference. "
+                f"Binary: {'installed' if installed else 'not installed'}. "
+                f"Catalog: {len(voices)} voices, {downloaded} downloaded."
+                + err
+            )
+        else:
+            text = f"{name}: {len(voices)} voices."
+        self.detail.SetLabel(text)
+        self.detail.Wrap(580)
+        self.Layout()
+
+    def _on_install_piper(self, event):
+        from .tts_providers import piper as _piper
+
+        self._log("TTS providers: installing Piper binary...")
+        ok = _piper.install_piper_binary(log_callback=self._log)
+        if ok:
+            wx.MessageBox(
+                "Piper binary installed.",
+                "TTS providers", wx.OK | wx.ICON_INFORMATION, self,
+            )
+        else:
+            wx.MessageBox(
+                "Could not install Piper. See the main log for details "
+                "(menu: View → Status log).",
+                "TTS providers", wx.OK | wx.ICON_WARNING, self,
+            )
+        self._refresh_rows()
+        self._refresh_detail(self.list_ctrl.GetSelection())
+
+    def _on_download_voices(self, event):
+        from .tts_providers import piper as _piper
+
+        provider = self._tts_providers.get_provider("piper")
+        if provider is None:
+            return
+        voices = [
+            v for v in provider.list_voices()
+            if not _piper.voice_is_downloaded(v.short_name)
+        ]
+        if not voices:
+            wx.MessageBox(
+                "Every Piper voice is already downloaded.",
+                "TTS providers", wx.OK | wx.ICON_INFORMATION, self,
+            )
+            return
+        confirm = wx.MessageBox(
+            f"Download {len(voices)} Piper voices "
+            f"(roughly {len(voices) * 35} MB total)? They land under "
+            "the portable folder's piper_models/ directory.",
+            "Confirm download", wx.YES_NO | wx.ICON_QUESTION, self,
+        )
+        if confirm != wx.YES:
+            return
+        for v in voices:
+            self._log(f"Piper: downloading {v.short_name}...")
+            _piper.download_voice(v.short_name, log_callback=self._log)
+        self._refresh_detail(self.list_ctrl.GetSelection())
+
+    def _on_save(self, event):
+        enabled = [
+            name for i, name in enumerate(self._provider_names)
+            if self.list_ctrl.IsChecked(i)
+        ]
+        # Empty selection collapses to "" so the audiobook code falls
+        # back to "all installed providers" — never empty == "no TTS".
+        installed = self._tts_providers.installed_provider_names()
+        if set(enabled) == set(installed):
+            value = ""
+        else:
+            value = ",".join(enabled)
+        self._prefs.set(self._p.KEY_TTS_PROVIDERS, value)
+        self.EndModal(wx.ID_OK)
+
+
 class LlmSettingsDialog(wx.Dialog):
     """Edit the four LLM-attribution prefs (provider / model / API key
     / endpoint) and save them.

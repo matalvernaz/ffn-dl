@@ -28,6 +28,11 @@ KEY_LLM_PROVIDER = "llm_provider"
 KEY_LLM_MODEL = "llm_model"
 KEY_LLM_API_KEY = "llm_api_key"
 KEY_LLM_ENDPOINT = "llm_endpoint"
+# Comma-separated list of enabled TTS provider names. Empty == fall
+# back to "all installed providers" so a fresh install (just edge-tts)
+# behaves like 2.1.x. The audiobook generator pulls the union of every
+# listed provider's voice catalog into the per-character pool.
+KEY_TTS_PROVIDERS = "tts_providers"
 KEY_LOG_LEVEL = "log_level"
 KEY_LOG_TO_FILE = "log_to_file"
 # Prompt before closing the main window while a long-running job
@@ -100,6 +105,7 @@ DEFAULTS = {
     KEY_LLM_MODEL: "llama3.1:8b",
     KEY_LLM_API_KEY: "",
     KEY_LLM_ENDPOINT: "",
+    KEY_TTS_PROVIDERS: "",
     KEY_LOG_LEVEL: "INFO",
     KEY_LOG_TO_FILE: False,
     KEY_CONFIRM_CANCEL_ON_CLOSE: True,

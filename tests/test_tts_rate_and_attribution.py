@@ -578,25 +578,62 @@ def test_llm_normalize_endpoint_falls_back_to_default():
     assert "api.openai.com" in norm
 
 
-def test_llm_parse_speaker_map_basic_object():
+def test_llm_parse_speaker_map_legacy_string_shape():
+    """Older prompts emitted bare strings; the parser must keep
+    accepting them so anyone whose model still returns the older
+    shape isn't broken."""
     out = attribution._llm_parse_speaker_map('{"1": "Harry", "2": "Ron"}')
-    assert out == {"1": "Harry", "2": "Ron"}
+    assert out == {"1": {"speaker": "Harry"}, "2": {"speaker": "Ron"}}
+
+
+def test_llm_parse_speaker_map_object_shape_with_emotion():
+    """New prompt shape — speaker + emotion per quote."""
+    reply = (
+        '{"1": {"speaker": "Harry", "emotion": "shouting"}, '
+        '"2": {"speaker": "Ron"}}'
+    )
+    out = attribution._llm_parse_speaker_map(reply)
+    assert out == {
+        "1": {"speaker": "Harry", "emotion": "shouting"},
+        "2": {"speaker": "Ron"},
+    }
 
 
 def test_llm_parse_speaker_map_strips_markdown_fence():
     reply = '```json\n{"1": "Harry"}\n```'
-    assert attribution._llm_parse_speaker_map(reply) == {"1": "Harry"}
+    assert attribution._llm_parse_speaker_map(reply) == {"1": {"speaker": "Harry"}}
 
 
 def test_llm_parse_speaker_map_isolates_first_object():
     reply = 'Sure! Here is your JSON: {"1": "Harry"} Done.'
-    assert attribution._llm_parse_speaker_map(reply) == {"1": "Harry"}
+    assert attribution._llm_parse_speaker_map(reply) == {"1": {"speaker": "Harry"}}
 
 
 def test_llm_parse_speaker_map_handles_garbage():
     assert attribution._llm_parse_speaker_map("") == {}
     assert attribution._llm_parse_speaker_map("not json at all") == {}
     assert attribution._llm_parse_speaker_map('{"1": 42}') == {}
+
+
+def test_llm_normalise_emotion_aliases_to_prosody_keys():
+    assert attribution._llm_normalise_emotion("shouting") == "shout"
+    assert attribution._llm_normalise_emotion("WHISPERED") == "whisper"
+    assert attribution._llm_normalise_emotion("furious") == "angry"
+    assert attribution._llm_normalise_emotion("sobbing") == "sad"
+
+
+def test_llm_normalise_emotion_neutral_collapses_to_none():
+    assert attribution._llm_normalise_emotion("neutral") is None
+    assert attribution._llm_normalise_emotion("calm") is None
+    assert attribution._llm_normalise_emotion("") is None
+    assert attribution._llm_normalise_emotion(None) is None
+
+
+def test_llm_normalise_emotion_unknown_drops():
+    """Unknown labels must NOT pass through — they'd confuse the
+    prosody table lookup downstream and yield no audible change."""
+    assert attribution._llm_normalise_emotion("contemplative") is None
+    assert attribution._llm_normalise_emotion("confused") is None
 
 
 def test_llm_canonicalise_name_narrator_variants():

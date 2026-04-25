@@ -1302,16 +1302,43 @@ def detect_character_genders(full_text, characters):
 
 
 class VoiceMapper:
-    """Assigns and persists character → voice mappings."""
+    """Assigns and persists character → voice mappings.
+
+    The mapper picks each character a voice from the candidate pool —
+    by default the legacy edge-only ``MALE_VOICES`` / ``FEMALE_VOICES``
+    constants (so behavior matches pre-2.2.0 unless callers opt in),
+    but ``set_voice_pool`` lets the audiobook generator install a
+    richer per-character pool built from the user's enabled providers,
+    accent map, and (when LLM analysis ran) character-profile metadata.
+
+    Voice ids written into the map JSON are now namespaced as
+    ``provider:short_name``. Pre-2.2.0 maps with bare short_names are
+    auto-prefixed with ``edge:`` on read so existing per-story
+    mappings keep resolving.
+    """
 
     def __init__(self, map_path=None):
         self.map_path = Path(map_path) if map_path else None
-        self.mapping = {}  # character name → voice ID
+        self.mapping = {}  # character name → voice id ("provider:short_name")
         self._male_idx = 0
         self._female_idx = 0
         self._neutral_idx = 0
+        # Default candidate lists — fed by the legacy edge-only
+        # constants. ``set_voice_pool`` overrides to provide the
+        # per-character pools the multi-provider / accent-aware
+        # audiobook pipeline computes.
+        self._fallback_male = [_namespace_legacy(v) for v in MALE_VOICES]
+        self._fallback_female = [_namespace_legacy(v) for v in FEMALE_VOICES]
+        self._fallback_neutral = [_namespace_legacy(v) for v in NEUTRAL_VOICES]
+        self._per_character_pool: dict[str, list[str]] = {}
+        self._per_character_idx: dict[str, int] = {}
         if self.map_path and self.map_path.exists():
-            self.mapping = json.loads(self.map_path.read_text(encoding="utf-8"))
+            try:
+                raw = json.loads(self.map_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Voice map unreadable (%s); ignoring", exc)
+                raw = {}
+            self.mapping = {k: _namespace_legacy(v) for k, v in raw.items()}
             logger.info("Loaded voice map with %d characters", len(self.mapping))
 
     def save(self):
@@ -1321,29 +1348,65 @@ class VoiceMapper:
                 json.dumps(self.mapping, indent=2), encoding="utf-8"
             )
 
-    def assign(self, name, gender="neutral"):
-        if name in self.mapping:
-            return self.mapping[name]
+    def set_voice_pool(self, per_character: dict[str, list[str]]):
+        """Install a per-character voice pool — VoiceMapper consults
+        these lists first before falling back to the gender-based
+        defaults. Each list is the gender / accent / locale-filtered
+        candidate set for that character; we round-robin across it so
+        repeated characters in the same fic don't collide on voice.
+        Voice ids inside the pool may be bare or namespaced; both are
+        normalised to the namespaced form."""
+        self._per_character_pool = {
+            name: [_namespace_legacy(v) for v in voices]
+            for name, voices in per_character.items()
+            if voices
+        }
+        self._per_character_idx = {name: 0 for name in self._per_character_pool}
 
-        if gender == "male":
-            voice = MALE_VOICES[self._male_idx % len(MALE_VOICES)]
+    def assign(self, name, gender="neutral"):
+        existing = self.mapping.get(name)
+        if existing:
+            return existing
+
+        pool = self._per_character_pool.get(name)
+        if pool:
+            idx = self._per_character_idx.get(name, 0)
+            voice = pool[idx % len(pool)]
+            self._per_character_idx[name] = idx + 1
+        elif gender == "male":
+            voice = self._fallback_male[self._male_idx % len(self._fallback_male)]
             self._male_idx += 1
         elif gender == "female":
-            voice = FEMALE_VOICES[self._female_idx % len(FEMALE_VOICES)]
+            voice = self._fallback_female[
+                self._female_idx % len(self._fallback_female)
+            ]
             self._female_idx += 1
         else:
-            voice = NEUTRAL_VOICES[self._neutral_idx % len(NEUTRAL_VOICES)]
+            voice = self._fallback_neutral[
+                self._neutral_idx % len(self._fallback_neutral)
+            ]
             self._neutral_idx += 1
 
-        # Don't assign the narrator voice to a character
-        if voice == NARRATOR_VOICE:
+        # Don't assign the narrator voice to a character.
+        narrator_ns = _namespace_legacy(NARRATOR_VOICE)
+        if voice == narrator_ns and (pool or self._fallback_male):
             return self.assign(name, gender)
 
         self.mapping[name] = voice
         return voice
 
     def get(self, name, default=None):
-        return self.mapping.get(name, default or NARRATOR_VOICE)
+        narrator = _namespace_legacy(default or NARRATOR_VOICE)
+        return self.mapping.get(name, narrator)
+
+
+def _namespace_legacy(voice: str) -> str:
+    """Add a ``edge:`` prefix to a bare short_name. Legacy voice maps
+    written before 2.2.0 have bare names; the provider dispatcher only
+    accepts namespaced ids. Already-namespaced ids pass through."""
+    if not voice or ":" in voice:
+        return voice
+    return f"edge:{voice}"
 
 
 # ── Audio generation ──────────────────────────────────────────────
@@ -1395,10 +1458,13 @@ def _tts_kwargs_for_segment(segment, voice, speech_rate=0):
 
 
 async def _generate_segment_audio(segment, voice, output_path, speech_rate=0):
-    """Generate audio for a single segment using edge-tts.
+    """Generate audio for a single segment via the chosen TTS provider.
 
     speech_rate is an integer percent delta applied on top of any
-    emotion-driven rate adjustment.
+    emotion-driven rate adjustment. The voice id may be either a bare
+    edge short_name (legacy, pre-2.2.0 voice maps) or the namespaced
+    ``provider:short_name`` form — ``tts_providers.synthesize`` handles
+    both.
     """
     text = segment.text.strip()
     # Skip fragments too short to be meaningful speech
@@ -1406,8 +1472,21 @@ async def _generate_segment_audio(segment, voice, output_path, speech_rate=0):
         return False
 
     kwargs = _tts_kwargs_for_segment(segment, voice, speech_rate=speech_rate)
-    comm = _require_edge_tts().Communicate(text, **kwargs)
-    await comm.save(str(output_path))
+    from . import tts_providers
+
+    voice_arg = kwargs.pop("voice", voice)
+    # The provider dispatcher is sync; running it inside an async
+    # function keeps the call-site shape unchanged (the audiobook
+    # generator awaits this coroutine in a gather) but pushes the
+    # actual subprocess / network work onto a worker thread so we
+    # don't block the asyncio loop the audio generator runs on.
+    await asyncio.to_thread(
+        tts_providers.synthesize,
+        voice_arg, text, output_path,
+        rate=kwargs.get("rate"),
+        volume=kwargs.get("volume"),
+        pitch=kwargs.get("pitch"),
+    )
     return True
 
 
@@ -1652,6 +1731,34 @@ def _normalize_scene_break_lines(text):
     return "\n".join(lines) if changed else text
 
 
+def _llm_strip_an_paragraphs(text: str, llm_config: dict | None) -> str:
+    """Backstop pass: when ``--strip-notes`` is on AND the LLM
+    attribution backend is configured, send every top-level paragraph
+    of the post-regex chapter text to the LLM for an A/N decision and
+    drop the flagged ones.
+
+    Runs after ``strip_note_paragraphs`` so the regex catches the easy
+    80% (explicit ``A/N:`` labels, structural pre/post-divider blocks)
+    without burning LLM tokens. The LLM is the second pass that picks
+    up the disguised cases — outros that don't reach the structural
+    keyword gate, shout-outs in the middle of a chapter, etc.
+    """
+    if not text or not llm_config:
+        return text
+    paragraphs = [p for p in text.split("\n\n") if p.strip()]
+    if not paragraphs:
+        return text
+    from . import attribution
+
+    flagged = attribution.classify_authors_notes_via_llm(
+        paragraphs, llm_config=llm_config,
+    )
+    if not flagged:
+        return text
+    kept = [p for i, p in enumerate(paragraphs) if i not in flagged]
+    return "\n\n".join(kept)
+
+
 def _html_to_audiobook_text(html, strip_notes=False, hr_as_stars=False):
     """HTML → plain text tuned for TTS, gated on the user-facing flags.
 
@@ -1767,6 +1874,107 @@ def _load_pronunciation_map(path):
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Pronunciation map at %s unreadable: %s", path, exc)
     return {}
+
+
+def _build_voice_pool(
+    *, characters: list[str],
+    genders: dict[str, str],
+    profiles: dict[str, dict],
+    accents: dict[str, str],
+    enabled_providers: list[str] | None,
+    narrator_voice: str,
+) -> dict[str, list[str]]:
+    """Build the per-character candidate voice list the VoiceMapper
+    rotates through.
+
+    Layered prior, strongest first:
+
+    1. Per-character accent map override (``en-GB``, ``fr-FR``, ...).
+    2. LLM-derived profile accent (when present).
+    3. No accent filter — use the whole pool of the right gender.
+
+    Gender comes from the profile when available, falling back to the
+    name-based heuristic. The narrator voice is excluded from every
+    pool so a character can't accidentally collide with the narrator.
+
+    The returned dict maps character name → ordered list of namespaced
+    voice ids (``"edge:en-GB-RyanNeural"``, ``"piper:en_GB-alan-medium"``,
+    ...). VoiceMapper.assign rotates through the list when picking.
+    """
+    from . import tts_providers
+
+    catalog = tts_providers.all_voices(providers=enabled_providers)
+    if not catalog:
+        return {}
+
+    by_id = {v.id: v for v in catalog}
+    narrator_id = _namespace_legacy(narrator_voice)
+    narrator_info = by_id.get(narrator_id)
+
+    def _gender_filter(target_gender: str):
+        def _ok(v):
+            if narrator_info is not None and v.id == narrator_info.id:
+                return False
+            if target_gender == "male" and v.gender.lower() != "male":
+                return False
+            if target_gender == "female" and v.gender.lower() != "female":
+                return False
+            return True
+        return _ok
+
+    out: dict[str, list[str]] = {}
+    for name in characters:
+        profile = profiles.get(name) or {}
+        gender = (
+            profile.get("gender")
+            or genders.get(name)
+            or "neutral"
+        ).lower()
+        accent = accents.get(name) or profile.get("accent") or "any"
+        accent_lc = accent.lower()
+        accent_lang = accent_lc.split("-", 1)[0] if "-" in accent_lc else accent_lc
+
+        gender_ok = _gender_filter(gender)
+
+        # Three-tier preference: exact locale > language > any locale.
+        # Take the best non-empty tier so a single en-GB pick beats a
+        # noisy mix of en-US fallbacks polluting the rotation.
+        if accent_lc in ("any", ""):
+            candidates = [v for v in catalog if gender_ok(v)]
+        else:
+            tier_exact = [
+                v for v in catalog
+                if gender_ok(v) and v.locale.lower() == accent_lc
+            ]
+            tier_language = [
+                v for v in catalog
+                if gender_ok(v) and v.language.lower() == accent_lang
+            ]
+            if tier_exact:
+                candidates = tier_exact
+            elif tier_language:
+                logger.info(
+                    "Voice pool: no %s voices in exact locale %s for %s "
+                    "— using language-level fallback (%s)",
+                    gender, accent_lc, name, accent_lang,
+                )
+                candidates = tier_language
+            else:
+                logger.info(
+                    "Voice pool: no %s voices match accent %s for %s "
+                    "— falling back to any locale",
+                    gender, accent_lc, name,
+                )
+                candidates = [v for v in catalog if gender_ok(v)]
+
+        if candidates:
+            out[name] = [v.id for v in candidates]
+    return out
+
+
+# Forward type alias only used in the helper above; avoids a TYPE_CHECKING
+# block while keeping the annotation readable.
+VoiceInfo_t = "tts_providers.VoiceInfo"
 
 
 async def _generate_with_semaphore(
@@ -2274,14 +2482,13 @@ def detect_voices(story, map_path=None, strip_notes=False, hr_as_stars=False):
     return results, mapper
 
 
-async def _synth_sample_async(text, voice, output_path):
-    comm = _require_edge_tts().Communicate(text, voice=voice)
-    await comm.save(str(output_path))
-
-
 def synthesize_sample(voice, text, output_path):
-    """Synthesize a short preview clip to output_path (MP3)."""
-    asyncio.run(_synth_sample_async(text, voice, str(output_path)))
+    """Synthesize a short preview clip to output_path (MP3) via the
+    voice's provider. Accepts both legacy bare voice names and the
+    ``provider:short_name`` form."""
+    from . import tts_providers
+
+    tts_providers.synthesize(voice, text, Path(output_path))
     return Path(output_path)
 
 
@@ -2525,6 +2732,7 @@ def generate_audiobook(
     attribution_backend="builtin",
     attribution_model_size=None,
     attribution_llm_config=None,
+    enabled_tts_providers=None,
     strip_notes=False,
     hr_as_stars=False,
 ):
@@ -2574,18 +2782,64 @@ def generate_audiobook(
             )
         }
         pron_path.write_text(json.dumps(skeleton, indent=2) + "\n", encoding="utf-8")
+
+    # LLM pronunciation seeding — only fires on first render of a
+    # story (existing user-edited maps are never overwritten). Uses
+    # the metadata cast list + the first chunks of chapter text to
+    # identify made-up names, fandom terms, foreign words.
+    if (
+        not pronunciation_map
+        and attribution_backend == "llm"
+        and attribution_llm_config
+    ):
+        from . import character_profile
+
+        seed_text = "\n\n".join(
+            ch.html for ch in story.chapters[:2]
+        )[:40000]
+        seeded_pron = character_profile.seed_pronunciations_via_llm(
+            character_list=_extract_character_list(story),
+            full_text=seed_text,
+            llm_config=attribution_llm_config,
+        )
+        if seeded_pron:
+            existing = {}
+            try:
+                existing = json.loads(pron_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+            for key, val in seeded_pron.items():
+                existing.setdefault(key, val)
+            pron_path.write_text(
+                json.dumps(existing, indent=2) + "\n", encoding="utf-8",
+            )
+            pronunciation_map = _load_pronunciation_map(pron_path)
+            logger.info(
+                "LLM seeded %d pronunciation overrides", len(seeded_pron),
+            )
+
     if pronunciation_map:
         logger.info("Loaded %d pronunciation overrides", len(pronunciation_map))
 
     # Gather full text for gender detection — honours the caller's
     # strip-notes / hr-as-stars preferences so A/Ns and dividers are
     # handled consistently with what the listener will hear.
+    use_llm_an = (
+        strip_notes
+        and attribution_backend == "llm"
+        and bool(attribution_llm_config)
+    )
     full_text = ""
     chapter_texts = []
     for ch in story.chapters:
         text = _html_to_audiobook_text(
             ch.html, strip_notes=strip_notes, hr_as_stars=hr_as_stars,
         )
+        if use_llm_an:
+            # Backstop: regex-based strip_note_paragraphs may have left
+            # disguised A/Ns (mid-chapter outros, beta thanks dressed as
+            # prose). Ask the LLM to flag any remaining ones.
+            text = _llm_strip_an_paragraphs(text, attribution_llm_config)
         chapter_texts.append(text)
         full_text += text + "\n"
 
@@ -2697,12 +2951,98 @@ def generate_audiobook(
     characters = [name for name, count in char_counts.most_common() if count >= 2]
     genders = detect_character_genders(full_text, characters)
 
+    # Accent + profile maps live next to the audiobook output. The
+    # accent map is the user's hand-editable override; the profile
+    # map is whatever the LLM most-recently classified. Both survive
+    # re-renders so edits aren't clobbered. Only seed when empty.
+    from . import accent_map as _accent_map
+    accents_path = output_dir / f".ffn-accents-{story.id}.json"
+    profile_path = output_dir / f".ffn-profile-{story.id}.json"
+    accents = _accent_map.filter_user_entries(_accent_map.load_accents(accents_path))
+    profiles = _accent_map.filter_user_entries(_accent_map.load_profiles(profile_path))
+
+    if (
+        attribution_backend == "llm"
+        and attribution_llm_config
+        and characters
+        and (not profiles or not accents)
+    ):
+        from . import character_profile
+
+        candidate_names = list(characters)
+        if character_list:
+            for n in character_list:
+                if n not in candidate_names:
+                    candidate_names.append(n)
+        seeded = character_profile.seed_profiles_via_llm(
+            character_list=candidate_names,
+            full_text=full_text,
+            llm_config=attribution_llm_config,
+        )
+        if seeded:
+            # Only fill in keys the user hasn't already set — never
+            # clobber a hand-edited entry.
+            for name, profile in seeded.items():
+                profiles.setdefault(name, profile)
+            _accent_map.save_profiles(profile_path, profiles)
+            for name, accent in character_profile.derive_accents_from_profiles(
+                seeded
+            ).items():
+                accents.setdefault(name, accent)
+            _accent_map.save_accents(accents_path, accents)
+            logger.info(
+                "LLM character-profile seeder filled %d profile entries",
+                len(seeded),
+            )
+
+        # Narrator voice suggestion — only fires when the caller hasn't
+        # forced ``narrator_voice``. The LLM picks gender + accent that
+        # match the story's tone; we translate that into a real voice id
+        # by filtering the live provider catalog.
+        if not narrator_voice:
+            narrator_profile = character_profile.suggest_narrator_via_llm(
+                full_text=full_text,
+                llm_config=attribution_llm_config,
+            )
+            if narrator_profile:
+                picked = character_profile.pick_narrator_voice_for_profile(
+                    profile=narrator_profile,
+                    enabled_providers=enabled_tts_providers,
+                    fallback=narrator,
+                )
+                if picked and picked != narrator:
+                    logger.info(
+                        "LLM narrator-voice suggestion: %s (%s — %s)",
+                        picked,
+                        narrator_profile.get("accent") or "any",
+                        narrator_profile.get("rationale") or "",
+                    )
+                    narrator = picked
+
+    if not accents_path.exists():
+        _accent_map.save_accents(accents_path, accents)
+    if not profile_path.exists():
+        _accent_map.save_profiles(profile_path, profiles)
+
+    pool = _build_voice_pool(
+        characters=characters,
+        genders=genders,
+        profiles=profiles,
+        accents=accents,
+        enabled_providers=enabled_tts_providers,
+        narrator_voice=narrator,
+    )
+    if pool:
+        mapper.set_voice_pool(pool)
+
     logger.info("Detected %d speaking characters (merged from %d raw)",
                 len(characters), len(raw_char_counts))
     for name in characters[:15]:
-        gender = genders.get(name, "neutral")
+        profile = profiles.get(name) or {}
+        gender = profile.get("gender") or genders.get(name) or "neutral"
         voice = mapper.assign(name, gender)
-        logger.info("  %s (%s) → %s", name, gender, voice)
+        accent = accents.get(name) or profile.get("accent") or "any"
+        logger.info("  %s (%s, %s) → %s", name, gender, accent, voice)
 
     mapper.save()
 

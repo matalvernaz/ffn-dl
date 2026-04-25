@@ -52,6 +52,21 @@ _DOWNLOAD_EXPECTED_ERRORS = (
 )
 
 
+def _tts_providers_from_args(args: argparse.Namespace) -> list[str] | None:
+    """Resolve the ``--tts-providers`` flag into a list, or None to
+    mean "all installed providers". Order is preserved so a user-
+    listed sequence determines voice-pool priority."""
+    raw = getattr(args, "tts_providers", None)
+    if not raw:
+        return None
+    out: list[str] = []
+    for tok in str(raw).split(","):
+        name = tok.strip().lower()
+        if name and name not in out:
+            out.append(name)
+    return out or None
+
+
 def _llm_config_from_args(args: argparse.Namespace) -> dict | None:
     """Build the kwargs dict that ``generate_audiobook`` forwards to the
     LLM attribution backend, or None if --attribution != llm.
@@ -256,6 +271,7 @@ def _handle_merge_series(
                 attribution_backend=args.attribution,
                 attribution_model_size=args.attribution_model_size,
                 attribution_llm_config=_llm_config_from_args(args),
+                enabled_tts_providers=_tts_providers_from_args(args),
                 strip_notes=args.strip_notes,
                 hr_as_stars=args.hr_as_stars,
             )
@@ -350,6 +366,7 @@ def _handle_merge_parts(
             attribution_backend=args.attribution,
             attribution_model_size=args.attribution_model_size,
             attribution_llm_config=_llm_config_from_args(args),
+            enabled_tts_providers=_tts_providers_from_args(args),
             strip_notes=args.strip_notes,
             hr_as_stars=args.hr_as_stars,
         )
@@ -663,6 +680,7 @@ def _download_one(
                 attribution_backend=args.attribution,
                 attribution_model_size=args.attribution_model_size,
                 attribution_llm_config=_llm_config_from_args(args),
+                enabled_tts_providers=_tts_providers_from_args(args),
                 strip_notes=args.strip_notes,
                 hr_as_stars=args.hr_as_stars,
             )
@@ -2977,6 +2995,28 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--tts-providers",
+        default=None,
+        metavar="LIST",
+        help=(
+            "Comma-separated list of TTS providers to draw voices "
+            "from when synthesising audiobooks (default: all "
+            "installed providers). Choices: 'edge', 'piper'. The "
+            "voice catalog the VoiceMapper picks from is the union "
+            "of every listed provider, filtered per-character by the "
+            "accent map and detected gender."
+        ),
+    )
+    parser.add_argument(
+        "--install-piper",
+        action="store_true",
+        help=(
+            "Download and install the Piper TTS binary into ffn-dl's "
+            "managed dir, then exit. Voice models download lazily on "
+            "first use of each Piper voice."
+        ),
+    )
+    parser.add_argument(
         "--install-attribution",
         choices=["fastcoref", "booknlp"],
         default=None,
@@ -3870,6 +3910,12 @@ def main(argv: list[str] | None = None) -> None:
 
     if getattr(args, "install_attribution", None):
         sys.exit(_handle_install_attribution(args.install_attribution))
+
+    if getattr(args, "install_piper", False):
+        from .tts_providers import piper as _piper
+
+        ok = _piper.install_piper_binary(log_callback=lambda m: print(m))
+        sys.exit(0 if ok else 1)
 
     # --- Watchlist modes: all self-contained (no positional URLs) ---
     # Checked before search / library / URL dispatch so none of those

@@ -1460,8 +1460,15 @@ def _llm_call(
     return (choices[0].get("message") or {}).get("content", "")
 
 
-def _llm_parse_speaker_map(reply: str) -> dict[str, str]:
-    """Pull a ``{"1": "Name", ...}`` mapping out of the LLM reply.
+def _llm_parse_speaker_map(reply: str) -> dict[str, dict]:
+    """Pull a ``{"1": {"speaker": "Name", "emotion": "..."}}`` mapping
+    out of the LLM reply.
+
+    Two response shapes are accepted so the parser stays compatible
+    with older prompts that only asked for the speaker:
+
+    - ``{"1": "Harry"}`` -> ``{"1": {"speaker": "Harry"}}``
+    - ``{"1": {"speaker": "Harry", "emotion": "shouting"}}`` (verbatim)
 
     LLMs sometimes wrap the JSON in prose or markdown fences; we strip
     a leading ```json fence and isolate the first balanced ``{...}``
@@ -1493,11 +1500,83 @@ def _llm_parse_speaker_map(reply: str) -> dict[str, str]:
         return {}
     if not isinstance(parsed, dict):
         return {}
-    out = {}
+    out: dict[str, dict] = {}
     for k, v in parsed.items():
+        key = str(k).strip()
         if isinstance(v, str) and v.strip():
-            out[str(k).strip()] = v.strip()
+            out[key] = {"speaker": v.strip()}
+        elif isinstance(v, dict):
+            speaker = v.get("speaker")
+            if isinstance(speaker, str) and speaker.strip():
+                entry = {"speaker": speaker.strip()}
+                emotion = v.get("emotion")
+                if isinstance(emotion, str) and emotion.strip():
+                    entry["emotion"] = emotion.strip()
+                out[key] = entry
     return out
+
+
+# Map LLM-emitted free-form emotion labels to the keys our prosody
+# table actually understands. Anything not in the table is dropped
+# so a hallucinated tag (``"contemplative"``) doesn't slip into the
+# Segment and confuse downstream prosody lookup.
+_LLM_EMOTION_ALIASES = {
+    "whisper": "whisper",
+    "whispered": "whisper",
+    "whispering": "whisper",
+    "muttered": "whisper",
+    "muttering": "whisper",
+    "shout": "shout",
+    "shouted": "shout",
+    "shouting": "shout",
+    "yell": "shout",
+    "yelled": "shout",
+    "yelling": "shout",
+    "scream": "shout",
+    "screamed": "shout",
+    "screaming": "shout",
+    "excited": "excited",
+    "excitement": "excited",
+    "exclaim": "excited",
+    "exclaimed": "excited",
+    "exclaiming": "excited",
+    "cheerful": "cheerful",
+    "happy": "cheerful",
+    "joyful": "cheerful",
+    "laughing": "cheerful",
+    "amused": "cheerful",
+    "sad": "sad",
+    "sorrowful": "sad",
+    "crying": "sad",
+    "sobbed": "sad",
+    "sobbing": "sad",
+    "tearful": "sad",
+    "angry": "angry",
+    "anger": "angry",
+    "furious": "angry",
+    "snarled": "angry",
+    "growled": "angry",
+    "neutral": "",
+    "normal": "",
+    "calm": "",
+    "default": "",
+}
+
+
+def _llm_normalise_emotion(raw: str | None) -> str | None:
+    """Map a free-form LLM emotion label to a prosody-table key, or
+    None for a label we don't recognise / care about. Empty / neutral
+    labels collapse to None so we don't override an already-detected
+    emotion with a no-op."""
+    if not raw or not isinstance(raw, str):
+        return None
+    low = raw.strip().lower()
+    if not low:
+        return None
+    mapped = _LLM_EMOTION_ALIASES.get(low)
+    if mapped is None:
+        return None
+    return mapped or None
 
 
 def _llm_canonicalise_name(
@@ -1584,14 +1663,21 @@ def _refine_with_llm(
     char_list_str = ", ".join(char_list) if char_list else "(none provided)"
     system_prompt = (
         "You are an expert at identifying who said each line of dialogue "
-        "in fanfiction. You will be given a passage and a numbered list "
-        "of quoted lines from that passage. For each line, identify the "
-        "speaker. Use exactly one of the listed character names when the "
-        "speaker is one of them. Use 'Narrator' for unspoken thoughts or "
-        "narration. Use 'Unknown' only when you genuinely cannot tell. "
-        "Respond with ONLY a single JSON object whose keys are the quote "
-        'numbers (as strings) and values are speaker names. Example: '
-        '{"1": "Harry Potter", "2": "Narrator", "3": "Unknown"}.'
+        "in fanfiction and what emotional register they used. You will "
+        "be given a passage and a numbered list of quoted lines from "
+        "that passage. For each line, identify:\n"
+        "- 'speaker': use exactly one of the listed character names "
+        "  when the speaker is one of them, 'Narrator' for unspoken "
+        "  thoughts / narration, or 'Unknown' only when you genuinely "
+        "  cannot tell.\n"
+        "- 'emotion': pick from {whisper, shout, excited, cheerful, "
+        "  sad, angry, neutral} — use the one that fits the line's "
+        "  delivery, defaulting to 'neutral' for plain dialogue.\n"
+        "Respond with ONLY a single JSON object whose keys are the "
+        "quote numbers (as strings) and values are objects with "
+        "'speaker' and 'emotion'. Example: "
+        '{"1": {"speaker": "Harry Potter", "emotion": "shout"}, '
+        '"2": {"speaker": "Narrator", "emotion": "neutral"}}.'
     )
 
     chunk_size = _LLM_CHUNK_CHARS
@@ -1631,13 +1717,23 @@ def _refine_with_llm(
             )
             mapping = _llm_parse_speaker_map(reply)
             for n, (seg_i, _qpos) in enumerate(batch, 1):
-                raw_name = mapping.get(str(n)) or mapping.get(n)
-                if raw_name is None:
+                entry = mapping.get(str(n)) or mapping.get(n)
+                if entry is None:
+                    continue
+                raw_name = entry.get("speaker") if isinstance(entry, dict) else entry
+                if not raw_name:
                     continue
                 canonical = _llm_canonicalise_name(
                     raw_name, char_list, cast_tokens,
                 )
                 segments[seg_i].speaker = canonical
+                # Emotion is optional — only override the segment's
+                # existing emotion (which the regex parser may have
+                # already set) when the LLM emitted a tag we know.
+                if isinstance(entry, dict):
+                    emotion = _llm_normalise_emotion(entry.get("emotion"))
+                    if emotion:
+                        segments[seg_i].emotion = emotion
                 handled.add(seg_i)
 
         # Advance the window. Stop sliding once we've covered the
@@ -1671,3 +1767,102 @@ def llm_cache_token(provider: str, model: str) -> str:
     """
     safe_model = re.sub(r"[^A-Za-z0-9._-]+", "_", model or "")
     return f"{provider}-{safe_model}".strip("-_") or "default"
+
+
+# ── Author's-note classifier (LLM) ────────────────────────────────
+
+
+_AN_SYSTEM_PROMPT = (
+    "You are an editor preparing fanfiction for an audiobook. The "
+    "user wants the actual story text, not author commentary. For "
+    "each numbered paragraph below, decide whether it is an 'author's "
+    "note' that should be skipped during narration — examples include: "
+    "thanks to beta readers, requests for reviews / kudos / favourites, "
+    "Patreon plugs, update schedules, disclaimers about ownership, "
+    "warnings the author wrote outside the story, links to "
+    "discord/tumblr, replies to reviews, or short translator's notes "
+    "explaining a foreign phrase. Story prose, dialogue, and in-world "
+    "footnotes are NOT author's notes even if they sound personal. "
+    "Respond with ONLY a JSON object whose keys are the paragraph "
+    'numbers (as strings) and values are booleans. Example: '
+    '{"1": true, "2": false, "3": false, "4": true}.'
+)
+
+
+def classify_authors_notes_via_llm(
+    paragraphs: list[str], *, llm_config: dict,
+) -> set[int]:
+    """Ask the LLM to flag which paragraphs are author's notes.
+
+    Returns a set of zero-based indices. ``llm_config`` matches the
+    dict ``generate_audiobook`` accepts. Failure modes (transport
+    error, parse failure, missing config) return an empty set so the
+    regex pre-pass is the only A/N filter applied — i.e. the LLM
+    backstop is purely additive."""
+    if not paragraphs or not llm_config:
+        return set()
+
+    provider = llm_config.get("provider", "")
+    model = llm_config.get("model", "")
+    if not provider or not model:
+        return set()
+    endpoint = _llm_normalize_endpoint(provider, llm_config.get("endpoint"))
+
+    numbered = []
+    # Truncate each paragraph to a reasonable length so a 5K-word
+    # narration block doesn't dominate the prompt and crowd out the
+    # actual decisions. The first 600 chars almost always contain
+    # the signal that distinguishes A/N from prose.
+    for i, p in enumerate(paragraphs, 1):
+        sample = p.strip()
+        if len(sample) > 600:
+            sample = sample[:600] + "…"
+        numbered.append(f"{i}. {sample}")
+    user_prompt = (
+        "Paragraphs to classify (true = author's note, false = story "
+        "content):\n\n" + "\n\n".join(numbered) + "\n\nReturn JSON only."
+    )
+    try:
+        reply = _llm_call(
+            provider=provider, model=model,
+            api_key=llm_config.get("api_key"),
+            endpoint=endpoint,
+            system_prompt=_AN_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001 — additive, never fail
+        logger.warning("LLM author's-note classifier failed: %s", exc)
+        return set()
+
+    import json as _json
+
+    if not reply:
+        return set()
+    text = reply.strip()
+    if text.startswith("```"):
+        first_nl = text.find("\n")
+        if first_nl != -1:
+            text = text[first_nl + 1:]
+        if text.endswith("```"):
+            text = text[: -3]
+        text = text.strip()
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace == -1 or last_brace <= first_brace:
+        return set()
+    blob = text[first_brace : last_brace + 1]
+    try:
+        parsed = _json.loads(blob)
+    except (ValueError, _json.JSONDecodeError):
+        return set()
+    if not isinstance(parsed, dict):
+        return set()
+    flagged: set[int] = set()
+    for k, v in parsed.items():
+        try:
+            idx = int(str(k).strip()) - 1
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(paragraphs) and bool(v):
+            flagged.add(idx)
+    return flagged

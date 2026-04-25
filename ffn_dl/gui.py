@@ -251,8 +251,18 @@ class MainFrame(wx.Frame):
         )
         self.llm_settings_btn.SetName("LLM settings")
         self.llm_settings_btn.Bind(wx.EVT_BUTTON, self._on_llm_settings)
-        audio_sizer.Add(self.llm_settings_btn, 0)
+        audio_sizer.Add(self.llm_settings_btn, 0, wx.RIGHT, 4)
         self.llm_settings_btn.Hide()
+
+        # Multi-provider TTS controls — pick which providers contribute
+        # voices to the synthesis pool, and a button to install Piper /
+        # download voices on first use.
+        self.tts_providers_btn = wx.Button(
+            self.audio_panel, label="&TTS providers...", size=(150, -1),
+        )
+        self.tts_providers_btn.SetName("Manage TTS providers")
+        self.tts_providers_btn.Bind(wx.EVT_BUTTON, self._on_tts_providers)
+        audio_sizer.Add(self.tts_providers_btn, 0)
 
         # Track the currently-displayed size keys so we can map the
         # Choice's selection index back to a backend-specific size name.
@@ -729,6 +739,27 @@ class MainFrame(wx.Frame):
             dlg.Destroy()
         # Status label reads from prefs — refresh after Save.
         self.attribution_status.SetLabel(self._llm_status_label())
+
+    def _on_tts_providers(self, event):
+        from .gui_dialogs import TtsProvidersDialog
+
+        dlg = TtsProvidersDialog(self, self.prefs, log_callback=self._log)
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+
+    def _enabled_tts_providers(self) -> list[str] | None:
+        """Resolve the user's TTS-provider preference into the list the
+        audiobook generator wants. Empty / unset means "all installed
+        providers" — the generator handles that as None."""
+        from . import prefs as _p
+
+        raw = (self.prefs.get(_p.KEY_TTS_PROVIDERS) or "").strip()
+        if not raw:
+            return None
+        names = [n.strip().lower() for n in raw.split(",") if n.strip()]
+        return names or None
 
     def _llm_config_for_render(self):
         """Read the saved LLM prefs and build the kwargs dict that
@@ -1837,6 +1868,7 @@ class MainFrame(wx.Frame):
                 attribution_backend=backend,
                 attribution_model_size=size,
                 attribution_llm_config=llm_config,
+                enabled_tts_providers=self._enabled_tts_providers(),
                 strip_notes=strip_notes,
                 hr_as_stars=hr_as_stars,
             )

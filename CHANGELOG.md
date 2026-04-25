@@ -1,5 +1,83 @@
 # Changelog
 
+## 2.2.0 — 2026-04-25
+
+### Add
+
+- **Pluggable TTS provider stack — Piper joins edge-tts.** Audiobook
+  synthesis is no longer locked to Microsoft Edge Neural Voices. A new
+  `ffn_dl.tts_providers` package introduces a TTSProvider abstraction;
+  edge-tts is now one provider in the registry, and Rhasspy's local
+  ONNX-based Piper TTS ships as the second. Voice ids are namespaced
+  as `provider:short_name` (e.g. `edge:en-US-AvaNeural`,
+  `piper:en_GB-alan-medium`), with backwards compatibility for every
+  pre-2.2.0 voice map: bare short_names auto-prefix to `edge:` on read.
+  The audiobook generator's voice pool is now the union of every
+  enabled provider's catalog. Piper is bundled in the curated voice
+  manifest covering English (US/UK/Scottish/Irish/Welsh/Australian/
+  Indian via dedicated regional voices) and seven non-English locales;
+  voice ONNX files lazy-download on first use. Pick which providers
+  contribute via `--tts-providers <names>` on the CLI or the new "TTS
+  providers..." button in the audio toolbar; install Piper itself with
+  `--install-piper` or the dialog's "Install Piper binary" button.
+
+- **Per-character accent map.** A new `.ffn-accents-<story_id>.json`
+  file lives next to each audiobook output, mapping speaker → BCP-47
+  locale code (`en-GB`, `en-IE`, `fr-FR`, ...). The VoiceMapper builds
+  each character's voice pool by filtering the catalog with the
+  three-tier preference exact-locale > language-only > any-locale, so
+  Hagrid gets a UK voice instead of the round-robin US default.
+  User-editable; edits survive re-renders.
+
+- **LLM character profile pass.** When the LLM attribution backend is
+  enabled, ffn-dl runs a single per-story analysis call asking the
+  model to classify every cast member into `{gender, age, accent,
+  tone}`. The result seeds the accent map and feeds VoiceMapper as a
+  richer prior than the gender heuristic alone. Saved to
+  `.ffn-profile-<story_id>.json`; the user's edits are never
+  overwritten on re-render.
+
+- **LLM emotion per quote.** The per-chapter LLM attribution call now
+  asks for both speaker AND emotion in a single prompt, mapping
+  free-form labels (`shouting`, `furious`, `sobbing`, `whispered`)
+  back to the existing prosody table (`shout`, `angry`, `sad`,
+  `whisper`). Older response shapes (bare speaker strings) keep
+  parsing for backwards compatibility.
+
+- **LLM author's-note backstop.** When `--strip-notes` is on AND the
+  LLM attribution backend is configured, every paragraph that survived
+  the regex pre-pass gets one more LLM check — catches disguised
+  outros, mid-chapter beta thanks, and shout-outs the keyword gate
+  misses.
+
+- **LLM pronunciation seeder.** First-time renders with the LLM
+  backend now arrive with a populated `.ffn-pronunciations-*.json` —
+  the LLM identifies made-up names (Hermione, Daenerys), fandom terms
+  (Quidditch, Avada Kedavra), foreign loanwords, and hard-to-pronounce
+  place names, and provides phonetic respellings. Skips identity
+  entries and ordinary English. Existing user-edited maps are never
+  overwritten.
+
+- **LLM narrator voice suggestion.** The story-tone analysis pass
+  also recommends a narrator profile (gender + accent + tone). The
+  audiobook generator translates that into a real voice id by
+  filtering the live provider catalog, so a British-coded fandom
+  picks an en-GB narrator out of the box. Caller-supplied
+  `narrator_voice` overrides the suggestion.
+
+### Changed
+
+- **VoiceMapper voice ids are now namespaced.** Newly-written voice
+  maps store `edge:en-US-AvaNeural`; legacy maps with bare
+  short_names continue to load. Providers other than `edge` (i.e.
+  `piper`) write provider-prefixed ids verbatim, so swapping the
+  enabled provider list doesn't silently fall back to the wrong
+  catalog.
+
+- **Synthesis dispatch routes through the provider abstraction.**
+  Every `edge_tts.Communicate` call site in `tts.py` now goes through
+  `tts_providers.synthesize`, which dispatches by namespace prefix.
+
 ## 2.1.0 — 2026-04-25
 
 ### Add
