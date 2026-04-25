@@ -18,6 +18,16 @@ KEY_STRIP_NOTES = "strip_notes"
 KEY_SPEECH_RATE = "speech_rate"
 KEY_ATTRIBUTION_BACKEND = "attribution_backend"
 KEY_ATTRIBUTION_MODEL_SIZE = "attribution_model_size"
+# LLM attribution settings — only consulted when
+# KEY_ATTRIBUTION_BACKEND == "llm". Provider is one of
+# "ollama", "openai", "anthropic", "openai-compatible".
+# api_key is plain-text in the config file (the same store already
+# holds Pushover/Discord secrets); endpoint blank means the provider's
+# default (Ollama: localhost:11434, OpenAI: api.openai.com/v1, ...).
+KEY_LLM_PROVIDER = "llm_provider"
+KEY_LLM_MODEL = "llm_model"
+KEY_LLM_API_KEY = "llm_api_key"
+KEY_LLM_ENDPOINT = "llm_endpoint"
 KEY_LOG_LEVEL = "log_level"
 KEY_LOG_TO_FILE = "log_to_file"
 # Prompt before closing the main window while a long-running job
@@ -86,6 +96,10 @@ DEFAULTS = {
     KEY_SPEECH_RATE: "0",
     KEY_ATTRIBUTION_BACKEND: "builtin",
     KEY_ATTRIBUTION_MODEL_SIZE: "",
+    KEY_LLM_PROVIDER: "ollama",
+    KEY_LLM_MODEL: "llama3.1:8b",
+    KEY_LLM_API_KEY: "",
+    KEY_LLM_ENDPOINT: "",
     KEY_LOG_LEVEL: "INFO",
     KEY_LOG_TO_FILE: False,
     KEY_CONFIRM_CANCEL_ON_CLOSE: True,

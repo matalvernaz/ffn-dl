@@ -2353,6 +2353,29 @@ def _hash_chapter_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _extract_character_list(story):
+    """Return the per-story character list as a list of strings.
+
+    Each scraper merges the inner ``extra`` dict directly onto
+    ``Story.metadata`` (see e.g. ``FFNScraper.download``,
+    ``AO3Scraper.download``), so the cast lives at
+    ``story.metadata["characters"]`` regardless of site. The string
+    is comma-separated for FFN/FicWad/AO3; we also split on "/" so
+    pairing-style entries ("Harry/Ginny") yield two names.
+    """
+    metadata = getattr(story, "metadata", None) or {}
+    raw = metadata.get("characters") if isinstance(metadata, dict) else None
+    if not raw or not isinstance(raw, str):
+        return []
+    parts: list[str] = []
+    for chunk in raw.split(","):
+        for sub in chunk.split("/"):
+            name = sub.strip()
+            if name:
+                parts.append(name)
+    return parts
+
+
 def _segment_to_dict(seg):
     return {
         "text": seg.text,
@@ -2501,6 +2524,7 @@ def generate_audiobook(
     speech_rate=0,
     attribution_backend="builtin",
     attribution_model_size=None,
+    attribution_llm_config=None,
     strip_notes=False,
     hr_as_stars=False,
 ):
@@ -2510,10 +2534,12 @@ def generate_audiobook(
     speech_rate is an integer percent delta (-50..+100 sensible range)
     applied to every TTS synthesis call on top of any emotion prosody.
     attribution_backend selects the speaker-attribution refinement pass:
-    "builtin" (regex only), "fastcoref", or "booknlp". Unknown or
-    uninstalled backends silently fall back to builtin.
+    "builtin" (regex only), "fastcoref", "booknlp", or "llm". Unknown
+    or uninstalled backends silently fall back to builtin.
     attribution_model_size picks a size variant for backends that
     expose one (BookNLP: "small" or "big"; ignored otherwise).
+    attribution_llm_config is required when attribution_backend=="llm":
+    a dict with keys ``provider``, ``model``, ``api_key``, ``endpoint``.
     strip_notes, when True, drops paragraph-level author's notes before
     synthesis (listeners who want A/Ns read aloud can leave it off).
     hr_as_stars, when True, replaces every scene divider (<hr/> plus
@@ -2569,18 +2595,35 @@ def generate_audiobook(
         segs = _segment_chapter_text(text)
         all_segments.append(segs)
 
+    # Pull the metadata-derived character list (AO3 character tags,
+    # FFN's third bare segment, FicWad's story-characters span) and
+    # use it as a closed-world prior for both the LLM prompt and
+    # heuristic post-refinement.
+    character_list = _extract_character_list(story)
+
     # Optional neural refinement pass — replaces / augments the regex
     # speaker attribution. Silently no-ops if the backend isn't
     # installed, so the render never fails on a missing dep.
     if attribution_backend and attribution_backend != "builtin":
         from . import attribution
 
+        # The cache key encodes (backend, size_bucket, chapter_hash).
+        # For the LLM backend the (provider, model) pair determines
+        # the answer, so encode that into the size_bucket slot.
+        if attribution_backend == "llm" and attribution_llm_config:
+            cache_size_bucket = attribution.llm_cache_token(
+                attribution_llm_config.get("provider", ""),
+                attribution_llm_config.get("model", ""),
+            )
+        else:
+            cache_size_bucket = attribution_model_size
+
         hits = 0
         misses = 0
         for idx, (text, segs) in enumerate(zip(chapter_texts, all_segments)):
             key = _hash_chapter_text(text)
             cached = _load_attr_entry(
-                attribution_backend, attribution_model_size, key,
+                attribution_backend, cache_size_bucket, key,
             )
             if cached is not None:
                 all_segments[idx] = [_segment_from_dict(d) for d in cached]
@@ -2590,6 +2633,8 @@ def generate_audiobook(
                 segs, text,
                 backend=attribution_backend,
                 model_size=attribution_model_size,
+                character_list=character_list,
+                llm_config=attribution_llm_config,
             )
             all_segments[idx] = refined
             # Only persist when the backend actually ran. On fallback
@@ -2606,7 +2651,7 @@ def generate_audiobook(
             # per-chapter progress — re-running won't repeat completed
             # attribution work.
             _save_attr_entry(
-                attribution_backend, attribution_model_size, key,
+                attribution_backend, cache_size_bucket, key,
                 [_segment_to_dict(s) for s in refined],
             )
             misses += 1
@@ -2623,7 +2668,7 @@ def generate_audiobook(
     # rebuilding audio from an existing attribution cache still picks
     # up the latest self-intro / junk-speaker passes.
     from . import attribution as _post_attribution
-    _post_attribution.post_refine(all_segments)
+    _post_attribution.post_refine(all_segments, character_list=character_list)
 
     # Apply pronunciation overrides to every segment's text before TTS.
     if pronunciation_map:

@@ -240,7 +240,19 @@ class MainFrame(wx.Frame):
             self.audio_panel, label="&Install...", size=(90, -1),
         )
         self.attribution_install_btn.Bind(wx.EVT_BUTTON, self._on_install_attribution)
-        audio_sizer.Add(self.attribution_install_btn, 0)
+        audio_sizer.Add(self.attribution_install_btn, 0, wx.RIGHT, 4)
+
+        # LLM-only "Settings..." button — opens a modal for provider /
+        # model / API key / endpoint. Hidden unless the LLM backend is
+        # selected so the audio toolbar stays uncluttered for everyone
+        # using the heuristic / neural backends.
+        self.llm_settings_btn = wx.Button(
+            self.audio_panel, label="LLM &settings...", size=(140, -1),
+        )
+        self.llm_settings_btn.SetName("LLM settings")
+        self.llm_settings_btn.Bind(wx.EVT_BUTTON, self._on_llm_settings)
+        audio_sizer.Add(self.llm_settings_btn, 0)
+        self.llm_settings_btn.Hide()
 
         # Track the currently-displayed size keys so we can map the
         # Choice's selection index back to a backend-specific size name.
@@ -665,6 +677,16 @@ class MainFrame(wx.Frame):
 
     def _refresh_attribution_status(self):
         backend = self._selected_attribution_backend()
+        # The LLM backend has no install step (urllib + json from the
+        # stdlib are enough); show its config button instead and hide
+        # the install button.
+        is_llm = backend == "llm"
+        self.llm_settings_btn.Show(is_llm)
+        self.attribution_install_btn.Show(not is_llm)
+        self.audio_panel.Layout()
+        if is_llm:
+            self.attribution_status.SetLabel(self._llm_status_label())
+            return
         if backend == "builtin":
             self.attribution_status.SetLabel("(built-in)")
             self.attribution_install_btn.Enable(False)
@@ -684,6 +706,50 @@ class MainFrame(wx.Frame):
             self.attribution_status.SetLabel("(not installed)")
             self.attribution_install_btn.Enable(True)
             self.attribution_install_btn.SetLabel("&Install...")
+
+    def _llm_status_label(self):
+        """One-line summary of the LLM config — ``provider/model`` when
+        configured, ``(needs setup)`` when not. Read live from prefs so
+        the dialog's Save updates the toolbar without a redraw call."""
+        from . import prefs as _p
+
+        provider = (self.prefs.get(_p.KEY_LLM_PROVIDER) or "").strip()
+        model = (self.prefs.get(_p.KEY_LLM_MODEL) or "").strip()
+        if not provider or not model:
+            return "(needs setup)"
+        return f"({provider} / {model})"
+
+    def _on_llm_settings(self, event):
+        from .gui_dialogs import LlmSettingsDialog
+
+        dlg = LlmSettingsDialog(self, self.prefs)
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+        # Status label reads from prefs — refresh after Save.
+        self.attribution_status.SetLabel(self._llm_status_label())
+
+    def _llm_config_for_render(self):
+        """Read the saved LLM prefs and build the kwargs dict that
+        ``generate_audiobook`` forwards to the LLM backend. Returns
+        None when the user hasn't picked a model yet — the dispatcher
+        treats that as a config error and falls back to builtin so
+        the render still produces audio."""
+        from . import prefs as _p
+
+        provider = (self.prefs.get(_p.KEY_LLM_PROVIDER) or "").strip() or "ollama"
+        model = (self.prefs.get(_p.KEY_LLM_MODEL) or "").strip()
+        api_key = (self.prefs.get(_p.KEY_LLM_API_KEY) or "").strip()
+        endpoint = (self.prefs.get(_p.KEY_LLM_ENDPOINT) or "").strip()
+        if not model:
+            return None
+        return {
+            "provider": provider,
+            "model": model,
+            "api_key": api_key,
+            "endpoint": endpoint,
+        }
 
     def _on_attribution_change(self, event):
         self._refresh_attribution_status()
@@ -1754,9 +1820,15 @@ class MainFrame(wx.Frame):
             backend = self._selected_attribution_backend()
             size = self._selected_size()
             rate = self.speech_rate_ctrl.GetValue()
+            llm_config = self._llm_config_for_render() if backend == "llm" else None
             size_note = f", size={size}" if size else ""
+            llm_note = (
+                f", llm={llm_config['provider']}/{llm_config['model']}"
+                if llm_config else ""
+            )
             self._log(
-                f"\nGenerating audiobook (attribution={backend}{size_note}, rate={rate:+d}%)..."
+                f"\nGenerating audiobook (attribution={backend}{size_note}{llm_note}, "
+                f"rate={rate:+d}%)..."
             )
             return generate_audiobook(
                 story, output_dir,
@@ -1764,6 +1836,7 @@ class MainFrame(wx.Frame):
                 speech_rate=rate,
                 attribution_backend=backend,
                 attribution_model_size=size,
+                attribution_llm_config=llm_config,
                 strip_notes=strip_notes,
                 hr_as_stars=hr_as_stars,
             )

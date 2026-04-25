@@ -71,7 +71,7 @@ def test_combine_rate_bad_emotion_string_falls_back_to_user():
 
 
 def test_available_lists_all_backends():
-    assert attribution.available() == ["builtin", "fastcoref", "booknlp"]
+    assert attribution.available() == ["builtin", "fastcoref", "booknlp", "llm"]
 
 
 def test_builtin_is_always_installed():
@@ -472,6 +472,259 @@ def test_install_builtin_noop_when_frozen(monkeypatch):
     accidentally start rejecting it."""
     monkeypatch.setattr(attribution, "_is_frozen", lambda: True)
     assert attribution.install("builtin") is True
+
+
+# ── character-list grounding ──────────────────────────────────────
+
+
+def test_character_tokens_handles_ffn_initial_suffix():
+    """FFN tags arrive as 'Harry P., Hermione G.' — both the full
+    string and the first-name-only form should count as known speakers
+    so a backend emitting 'Harry' is still grounded."""
+    out = attribution._character_tokens(["Harry P.", "Hermione G."])
+    assert "Harry P." in out
+    assert "Harry" in out
+    assert "Hermione G." in out
+    assert "Hermione" in out
+
+
+def test_character_tokens_handles_ao3_full_names():
+    out = attribution._character_tokens(["Harry Potter", "Hermione Granger"])
+    assert "Harry Potter" in out
+    assert "Harry" in out
+    assert "Potter" in out
+    assert "Granger" in out
+
+
+def test_character_tokens_empty_input():
+    assert attribution._character_tokens(None) == set()
+    assert attribution._character_tokens([]) == set()
+    assert attribution._character_tokens(["", "  "]) == set()
+
+
+def test_post_refine_self_intro_trusts_cast_list_first_name():
+    """Without a cast list, a single-token self-intro for a never-
+    elsewhere-mentioned name is rejected. With the name on the cast
+    list it should be trusted on first occurrence."""
+    chapter = [
+        Segment("I'm Padma.", speaker="Harry"),
+        Segment("Padma kept silent."),
+    ]
+    # Without cast: rejected (Padma only appears once, no two-token form).
+    attribution.post_refine([list(chapter)])
+    assert chapter[0].speaker == "Harry"
+    # With cast: accepted.
+    attribution.post_refine([chapter], character_list=["Padma Patil"])
+    assert chapter[0].speaker == "Padma"
+
+
+def test_post_refine_junk_filter_spares_cast_member():
+    """'Captain' is on the junk list. If the story's character tag is
+    'Captain America', the single-occurrence junk demotion must NOT
+    fire — that's a real cast member."""
+    chapter_a = [
+        Segment("Listen up.", speaker="Captain"),
+        Segment("Steve nodded.", speaker="Steve"),
+        Segment("Right.", speaker="Steve"),
+    ]
+    attribution.post_refine(
+        [chapter_a], character_list=["Captain America", "Steve Rogers"],
+    )
+    assert chapter_a[0].speaker == "Captain"
+
+
+def test_post_refine_junk_filter_still_demotes_unrelated_word():
+    """A junk word with no cast match still gets demoted on a single
+    occurrence — the cast list is a positive override, not a switch."""
+    chapter = [
+        Segment("Boom!", speaker="Cruciatus"),
+        Segment("Harry winced.", speaker="Harry"),
+        Segment("Again.", speaker="Harry"),
+    ]
+    attribution.post_refine(
+        [chapter], character_list=["Harry Potter", "Hermione Granger"],
+    )
+    assert chapter[0].speaker is None
+
+
+# ── LLM backend ───────────────────────────────────────────────────
+
+
+def test_llm_provider_supported():
+    assert attribution._llm_provider_supported("ollama")
+    assert attribution._llm_provider_supported("openai")
+    assert attribution._llm_provider_supported("anthropic")
+    assert attribution._llm_provider_supported("openai-compatible")
+    assert not attribution._llm_provider_supported("totally_made_up")
+
+
+def test_llm_default_endpoints():
+    assert "11434" in attribution._llm_default_endpoint("ollama")
+    assert "api.openai.com" in attribution._llm_default_endpoint("openai")
+    assert "api.anthropic.com" in attribution._llm_default_endpoint("anthropic")
+
+
+def test_llm_normalize_endpoint_strips_trailing_slash():
+    norm = attribution._llm_normalize_endpoint(
+        "openai", "https://example.com/v1/",
+    )
+    assert norm == "https://example.com/v1"
+
+
+def test_llm_normalize_endpoint_falls_back_to_default():
+    norm = attribution._llm_normalize_endpoint("ollama", None)
+    assert "11434" in norm
+    norm = attribution._llm_normalize_endpoint("openai", "")
+    assert "api.openai.com" in norm
+
+
+def test_llm_parse_speaker_map_basic_object():
+    out = attribution._llm_parse_speaker_map('{"1": "Harry", "2": "Ron"}')
+    assert out == {"1": "Harry", "2": "Ron"}
+
+
+def test_llm_parse_speaker_map_strips_markdown_fence():
+    reply = '```json\n{"1": "Harry"}\n```'
+    assert attribution._llm_parse_speaker_map(reply) == {"1": "Harry"}
+
+
+def test_llm_parse_speaker_map_isolates_first_object():
+    reply = 'Sure! Here is your JSON: {"1": "Harry"} Done.'
+    assert attribution._llm_parse_speaker_map(reply) == {"1": "Harry"}
+
+
+def test_llm_parse_speaker_map_handles_garbage():
+    assert attribution._llm_parse_speaker_map("") == {}
+    assert attribution._llm_parse_speaker_map("not json at all") == {}
+    assert attribution._llm_parse_speaker_map('{"1": 42}') == {}
+
+
+def test_llm_canonicalise_name_narrator_variants():
+    cl = ["Harry Potter"]
+    tokens = attribution._character_tokens(cl)
+    assert attribution._llm_canonicalise_name("Narrator", cl, tokens) is None
+    assert attribution._llm_canonicalise_name("UNKNOWN", cl, tokens) is None
+    assert attribution._llm_canonicalise_name("", cl, tokens) is None
+
+
+def test_llm_canonicalise_name_exact_case_insensitive():
+    cl = ["Harry Potter", "Hermione Granger"]
+    tokens = attribution._character_tokens(cl)
+    assert attribution._llm_canonicalise_name(
+        "harry potter", cl, tokens,
+    ) == "Harry Potter"
+
+
+def test_llm_canonicalise_name_token_match():
+    cl = ["Harry Potter"]
+    tokens = attribution._character_tokens(cl)
+    assert attribution._llm_canonicalise_name(
+        "harry", cl, tokens,
+    ) == "Harry"
+
+
+def test_llm_canonicalise_name_unknown_passes_through():
+    """An OC the story didn't tag — preserve verbatim rather than
+    dropping. The voice mapper will still get something to assign."""
+    cl = ["Harry Potter"]
+    tokens = attribution._character_tokens(cl)
+    assert attribution._llm_canonicalise_name(
+        "Original Character Name", cl, tokens,
+    ) == "Original Character Name"
+
+
+def test_llm_cache_token_distinguishes_provider_and_model():
+    a = attribution.llm_cache_token("ollama", "llama3.1:8b")
+    b = attribution.llm_cache_token("openai", "gpt-4o-mini")
+    assert a != b
+    assert "ollama" in a
+    assert "openai" in b
+
+
+def test_llm_cache_token_filesystem_safe():
+    """Slashes, colons, spaces in model ids must not break the cache
+    path on any platform."""
+    token = attribution.llm_cache_token("openai-compatible", "meta/llama-3:8b")
+    assert "/" not in token
+    assert ":" not in token
+    assert " " not in token
+
+
+def test_refine_llm_requires_config():
+    """The dispatcher must surface a missing-config as a fall-back,
+    not crash. ``has_failed`` then reports it so the cache-saver
+    skips persisting bogus segments."""
+    segs = [Segment('"Hi."', speaker=None)]
+    out = attribution.refine_speakers(
+        segs, '"Hi."', backend="llm", llm_config=None,
+    )
+    assert out is segs
+    assert attribution.has_failed("llm")
+
+
+def test_refine_llm_routes_to_adapter(monkeypatch):
+    """Wiring check: backend=='llm' must invoke ``_refine_with_llm``
+    with the config dict spread as kwargs and the character_list
+    passed through."""
+    seen = {}
+
+    def fake_llm(segments, full_text, *, character_list=None, **kwargs):
+        seen["full_text"] = full_text
+        seen["character_list"] = list(character_list or [])
+        seen["kwargs"] = dict(kwargs)
+        return segments
+
+    monkeypatch.setattr(attribution, "_refine_with_llm", fake_llm)
+
+    segs = [Segment('"Hi."', speaker=None)]
+    cfg = {
+        "provider": "ollama", "model": "llama3.1:8b",
+        "api_key": "", "endpoint": "",
+    }
+    attribution.refine_speakers(
+        segs, '"Hi."', backend="llm", llm_config=cfg,
+        character_list=["Harry Potter"],
+    )
+    assert seen["full_text"] == '"Hi."'
+    assert seen["character_list"] == ["Harry Potter"]
+    assert seen["kwargs"]["provider"] == "ollama"
+    assert seen["kwargs"]["model"] == "llama3.1:8b"
+
+
+def test_refine_with_llm_calls_provider_and_applies_labels(monkeypatch):
+    """End-to-end through ``_refine_with_llm`` with a stubbed HTTP
+    layer. Verifies the prompt round-trip, the JSON parse, and the
+    per-segment overwrite."""
+    full_text = (
+        'Chapter one. "Hello there," said the boy. The room was '
+        'silent. "I am cold," said the girl.'
+    )
+    segments = [
+        Segment("Chapter one."),
+        Segment('"Hello there,"'),
+        Segment("The room was silent."),
+        Segment('"I am cold,"'),
+    ]
+
+    def fake_call(*, provider, model, api_key, endpoint,
+                  system_prompt, user_prompt):
+        # Sanity-check the prompt contains the cast list and quotes.
+        assert "Harry Potter" in user_prompt
+        assert "Hello there" in user_prompt
+        return '{"1": "Harry Potter", "2": "Hermione Granger"}'
+
+    monkeypatch.setattr(attribution, "_llm_call", fake_call)
+
+    out = attribution._refine_with_llm(
+        segments, full_text,
+        provider="ollama", model="llama3.1:8b",
+        api_key=None, endpoint=None,
+        character_list=["Harry Potter", "Hermione Granger"],
+    )
+    assert out[0].speaker is None  # narration untouched
+    assert out[1].speaker == "Harry Potter"
+    assert out[2].speaker is None  # narration untouched
+    assert out[3].speaker == "Hermione Granger"
 
 
 def test_install_reactivates_deps_dir_after_pip_install(monkeypatch):

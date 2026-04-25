@@ -111,6 +111,23 @@ BACKENDS = {
         },
         "default_size": "small",
     },
+    "llm": {
+        "pip_name": None,  # uses urllib + a remote/local HTTP API
+        "import_name": None,
+        "display": "LLM (Ollama / OpenAI / Anthropic)",
+        "size_hint": "API",
+        "description": (
+            "Sends each chapter to a Large Language Model and asks it "
+            "to label the speaker of every quoted line, grounded by the "
+            "story's character list. Choose between a local Ollama "
+            "endpoint (no key, runs offline) or a remote provider "
+            "(OpenAI / Anthropic / OpenAI-compatible) that needs an "
+            "API key. Latest research puts well-prompted LLMs above "
+            "BookNLP-big on quotation attribution accuracy."
+        ),
+        "sizes": None,  # provider/model live in dedicated config
+        "default_size": None,
+    },
 }
 
 
@@ -140,17 +157,18 @@ def normalize_size(backend: str, size: str | None) -> str | None:
 
 def available() -> List[str]:
     """Ordered list of backend names suitable for a UI dropdown."""
-    return ["builtin", "fastcoref", "booknlp"]
+    return ["builtin", "fastcoref", "booknlp", "llm"]
 
 
 def is_installed(backend: str) -> bool:
     """True if the backend can be imported right now.
 
-    "builtin" is always installed. For the others, we try a cheap
-    ``importlib.util.find_spec`` — no actual import, so this is safe
-    to call repeatedly from a UI.
+    "builtin" and "llm" are always installed (the LLM adapter only
+    needs urllib + json from the stdlib). For the others, we try a
+    cheap ``importlib.util.find_spec`` — no actual import, so this is
+    safe to call repeatedly from a UI.
     """
-    if backend == "builtin":
+    if backend in ("builtin", "llm"):
         return True
     info = BACKENDS.get(backend)
     if not info or not info["import_name"]:
@@ -320,12 +338,25 @@ def refine_speakers(
     segments, full_text: str,
     backend: str = "builtin",
     model_size: str | None = None,
+    character_list: Iterable[str] | None = None,
+    llm_config: dict | None = None,
 ):
     """Apply the chosen backend's refinement to `segments` (in order).
 
     `model_size` picks a size variant for backends that expose them
     (currently only BookNLP: "small" or "big"). Ignored for backends
     without size variants.
+
+    `character_list` is the story's metadata-derived cast list (e.g.
+    AO3 character tags or FFN's third bare-segment). It serves as a
+    closed-world prior — names matching the list are trusted, names
+    that don't aren't necessarily wrong. Backends use it differently:
+    LLM bakes it into the prompt; heuristic backends pass it to
+    ``post_refine`` so junk-speaker / self-intro passes treat them as
+    confirmed speakers even on a single occurrence.
+
+    `llm_config` is required when ``backend == "llm"`` and carries the
+    provider/model/key/endpoint. Ignored for other backends.
 
     Returns the possibly-updated segment list. On any error the
     builtin no-op is used and a warning is logged — audiobook
@@ -349,6 +380,16 @@ def refine_speakers(
             return _refine_with_fastcoref(segments, full_text)
         if backend == "booknlp":
             return _refine_with_booknlp(segments, full_text, model_size=size)
+        if backend == "llm":
+            if not llm_config:
+                raise RuntimeError(
+                    "llm backend selected but no llm_config provided"
+                )
+            return _refine_with_llm(
+                segments, full_text,
+                character_list=character_list,
+                **llm_config,
+            )
     except Exception as exc:  # the whole point is to never blow up the render
         logger.warning(
             "Attribution backend %r failed (%s); falling back to builtin "
@@ -537,18 +578,23 @@ def _collect_global_speaker_counts(all_segments) -> dict[str, int]:
     return counts
 
 
-def _filter_junk_speakers(all_segments, speaker_counts):
+def _filter_junk_speakers(all_segments, speaker_counts, character_tokens=None):
     """Demote obvious BookNLP PROP mis-classifications back to narrator.
 
     A speaker is demoted only when all of:
     - its total count across the whole book is 1,
     - the name is a single capitalised word,
-    - the name is in `_FANFIC_JUNK_NAMES` (case-insensitive).
+    - the name is in `_FANFIC_JUNK_NAMES` (case-insensitive),
+    - the lowercased token does not appear in ``character_tokens``
+      (the metadata-derived cast list).
 
     The single-occurrence gate keeps legitimate rarely-speaking
     characters whose first name collides with the junk list safe —
-    if they speak twice or more, their voice mapping stays.
+    if they speak twice or more, their voice mapping stays. The
+    cast-list check spares any tagged character whose name happens
+    to clash with a junk word ("Captain" in a Marvel fic).
     """
+    cast = {t.lower() for t in (character_tokens or ())}
     demoted = 0
     for segs in all_segments:
         for seg in segs:
@@ -563,6 +609,8 @@ def _filter_junk_speakers(all_segments, speaker_counts):
                 continue
             if speaker_counts.get(sp, 0) > 1:
                 continue
+            if low in cast:
+                continue
             seg.speaker = None
             demoted += 1
     if demoted:
@@ -573,22 +621,57 @@ def _filter_junk_speakers(all_segments, speaker_counts):
     return all_segments
 
 
-def post_refine(all_segments):
+def _character_tokens(character_list):
+    """Flatten a character list into the set of names that count as
+    confirmed speakers - the full name, the de-suffixed form (FFN
+    "Harry P." -> "Harry"), and each capitalised token of the cleaned
+    name.
+
+    A backend may emit "Hermione" or "Hermione Granger" depending on
+    its canonicalisation. AO3 tags arrive as full names, FFN as
+    "First L." with a trailing surname-initial.
+    """
+    out: set[str] = set()
+    if not character_list:
+        return out
+    for raw in character_list:
+        name = (raw or "").strip()
+        if not name:
+            continue
+        out.add(name)
+        cleaned = re.sub(r"\s+[A-Z]\.?$", "", name).strip()
+        if cleaned:
+            out.add(cleaned)
+            for token in cleaned.split():
+                if len(token) >= 3 and token[0].isupper():
+                    out.add(token)
+    return out
+
+
+def post_refine(all_segments, character_list=None):
     """Run both post-attribution passes in order.
 
     Applied after the chosen backend has finished refining every
     chapter (or after loading the attribution cache). The passes are
     backend-agnostic and handle patterns both parsers struggle with.
+
+    ``character_list`` is the metadata-derived cast (AO3 tags / FFN
+    bare segment). Cast members count as confirmed speakers for
+    self-intro validation even on a single occurrence, and are
+    immune to junk-speaker demotion regardless of count.
     """
     counts = _collect_global_speaker_counts(all_segments)
-    # A speaker counts as "known" if they appear more than once — a
-    # single random match shouldn't seed self-intro validation.
+    cast_tokens = _character_tokens(character_list)
+    # A speaker counts as "known" if they appear more than once - a
+    # single random match shouldn't seed self-intro validation. Cast-
+    # list names are trusted on the first occurrence too.
     known = {name for name, c in counts.items() if c >= 2}
+    known.update(cast_tokens)
     _apply_self_introductions(all_segments, known)
-    # Refresh counts before the junk filter — self-intro may have moved
+    # Refresh counts before the junk filter - self-intro may have moved
     # occurrences between speakers.
     counts = _collect_global_speaker_counts(all_segments)
-    _filter_junk_speakers(all_segments, counts)
+    _filter_junk_speakers(all_segments, counts, cast_tokens)
     return all_segments
 
 
@@ -1242,3 +1325,349 @@ def _refine_with_booknlp(segments, full_text, model_size="small"):
         return segments
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ── LLM adapter ────────────────────────────────────────────────────
+
+
+# Maximum chapter chars we send to a single LLM request before chunking.
+# Tuned for 8B local models (Llama 3.1 8B has 128K context but quality
+# degrades fast past 8-16K input on consumer GPUs / CPU). Cloud models
+# tolerate much more, but staying conservative keeps latency and token
+# cost predictable. Overlap on chunk boundaries lets a quote that lands
+# at the seam keep some surrounding context.
+_LLM_CHUNK_CHARS = 6000
+_LLM_CHUNK_OVERLAP_CHARS = 500
+_LLM_REQUEST_TIMEOUT_S = 180
+# Cap how many quoted segments we ask the model to label in one request.
+# Even with plenty of context, asking for 200 labels at once reliably
+# truncates the response; 40 is a comfortable ceiling that matches a
+# typical chapter's dialogue density.
+_LLM_QUOTES_PER_REQUEST = 40
+
+
+def _looks_quoted(text: str) -> bool:
+    """True for segments that read as direct dialogue. Used to decide
+    which segments to send to the LLM — narration we leave alone."""
+    if not text:
+        return False
+    quote_chars = ('"', '“', '”', '‘', '’')
+    return any(ch in text for ch in quote_chars)
+
+
+def _llm_provider_supported(provider: str) -> bool:
+    return provider in {"ollama", "openai", "anthropic", "openai-compatible"}
+
+
+def _llm_default_endpoint(provider: str) -> str:
+    if provider == "ollama":
+        return "http://localhost:11434"
+    if provider == "openai":
+        return "https://api.openai.com/v1"
+    if provider == "anthropic":
+        return "https://api.anthropic.com/v1"
+    return ""
+
+
+def _llm_normalize_endpoint(provider: str, endpoint: str | None) -> str:
+    base = (endpoint or "").strip().rstrip("/")
+    if not base:
+        base = _llm_default_endpoint(provider)
+    return base
+
+
+def _llm_call(
+    *, provider: str, model: str, api_key: str | None,
+    endpoint: str, system_prompt: str, user_prompt: str,
+) -> str:
+    """One round-trip to the configured LLM. Returns the raw text reply
+    (the caller is responsible for JSON-parsing it). Raises on transport
+    errors, non-2xx responses, or unsupported providers."""
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    headers = {"Content-Type": "application/json"}
+
+    if provider == "ollama":
+        url = f"{endpoint}/api/chat"
+        payload = {
+            "model": model,
+            "stream": False,
+            "format": "json",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+    elif provider == "anthropic":
+        url = f"{endpoint}/messages"
+        if not api_key:
+            raise RuntimeError("Anthropic backend requires an API key")
+        headers["x-api-key"] = api_key
+        headers["anthropic-version"] = "2023-06-01"
+        payload = {
+            "model": model,
+            "max_tokens": 4096,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_prompt}],
+        }
+    else:  # openai or openai-compatible
+        url = f"{endpoint}/chat/completions"
+        if provider == "openai" and not api_key:
+            raise RuntimeError("OpenAI backend requires an API key")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
+        }
+
+    data = _json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=_LLM_REQUEST_TIMEOUT_S) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        # Surface server-provided error text — most providers ship the
+        # underlying reason in the body and the bare status line is useless.
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"LLM HTTP {exc.code} from {provider}: {detail or exc.reason}"
+        ) from exc
+
+    parsed = _json.loads(body)
+    if provider == "ollama":
+        return (parsed.get("message") or {}).get("content", "")
+    if provider == "anthropic":
+        for block in parsed.get("content") or []:
+            if block.get("type") == "text":
+                return block.get("text", "")
+        return ""
+    # openai / openai-compatible
+    choices = parsed.get("choices") or []
+    if not choices:
+        return ""
+    return (choices[0].get("message") or {}).get("content", "")
+
+
+def _llm_parse_speaker_map(reply: str) -> dict[str, str]:
+    """Pull a ``{"1": "Name", ...}`` mapping out of the LLM reply.
+
+    LLMs sometimes wrap the JSON in prose or markdown fences; we strip
+    a leading ```json fence and isolate the first balanced ``{...}``
+    block before parsing. Returns an empty dict on any failure so the
+    caller can fall through to the next chunk without raising.
+    """
+    import json as _json
+
+    if not reply:
+        return {}
+    text = reply.strip()
+    # Strip a markdown fence if present.
+    if text.startswith("```"):
+        first_nl = text.find("\n")
+        if first_nl != -1:
+            text = text[first_nl + 1:]
+        if text.endswith("```"):
+            text = text[: -3]
+        text = text.strip()
+    # Isolate the first JSON object — sometimes models prefix "Sure! ".
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace == -1 or last_brace <= first_brace:
+        return {}
+    blob = text[first_brace : last_brace + 1]
+    try:
+        parsed = _json.loads(blob)
+    except (ValueError, _json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out = {}
+    for k, v in parsed.items():
+        if isinstance(v, str) and v.strip():
+            out[str(k).strip()] = v.strip()
+    return out
+
+
+def _llm_canonicalise_name(
+    name: str, character_list: list[str], cast_tokens: set[str],
+) -> str | None:
+    """Map an LLM-emitted speaker label back to a canonical character.
+
+    Models sometimes return surface forms ("Hermy", "the boy", "Harry's
+    mother") that don't match any cast entry exactly. We accept:
+    - "Narrator" / "Unknown" / empty -> None (narration)
+    - exact match on the full character_list (case-insensitive)
+    - exact match on a cast token
+    - a single-word reply whose lowercased form is a known cast token
+
+    Anything else is preserved verbatim — better to surface a real
+    out-of-cast name (an OC the metadata didn't tag) than to drop it.
+    """
+    if not name:
+        return None
+    low = name.strip().lower()
+    if low in {"narrator", "narration", "unknown", "none", "n/a"}:
+        return None
+    cl_lower = {c.lower(): c for c in character_list}
+    if low in cl_lower:
+        return cl_lower[low]
+    cast_lower = {t.lower(): t for t in cast_tokens}
+    if low in cast_lower:
+        return cast_lower[low]
+    return name.strip()
+
+
+def _refine_with_llm(
+    segments, full_text: str, *,
+    provider: str,
+    model: str,
+    api_key: str | None = None,
+    endpoint: str | None = None,
+    character_list: Iterable[str] | None = None,
+):
+    """Send chapter context + numbered quotes to an LLM and overwrite
+    segment speakers with its labels.
+
+    Strategy:
+    1. Pick out segments that look quoted (skip narration).
+    2. Slide a window over ``full_text``; for each window, batch the
+       quotes whose midpoint falls inside it and ask the LLM to label
+       them. Each quote is labelled exactly once (the first window
+       that contains it wins).
+    3. Map the LLM's reply through ``_llm_canonicalise_name`` and write
+       the result onto each segment.
+
+    On any provider error we raise — the dispatcher catches and falls
+    back to builtin for the rest of the render."""
+    if not _llm_provider_supported(provider):
+        raise RuntimeError(f"Unsupported LLM provider: {provider!r}")
+    if not model:
+        raise RuntimeError("LLM backend requires a model name")
+    endpoint_url = _llm_normalize_endpoint(provider, endpoint)
+    if not endpoint_url:
+        raise RuntimeError(f"No endpoint configured for provider {provider!r}")
+
+    char_list = [c for c in (character_list or []) if c]
+    cast_tokens = _character_tokens(char_list)
+
+    # Find each quoted segment's start position in full_text (best-effort
+    # substring search, same approach as fastcoref / booknlp adapters).
+    quoted_idx: list[tuple[int, int]] = []  # (segment_index, char_offset)
+    cursor = 0
+    for i, seg in enumerate(segments):
+        if not seg.text or not _looks_quoted(seg.text):
+            continue
+        pos = full_text.find(seg.text, cursor)
+        if pos < 0:
+            stripped = seg.text.strip('"“”')
+            pos = full_text.find(stripped, cursor)
+        if pos < 0:
+            continue
+        cursor = pos + len(seg.text)
+        quoted_idx.append((i, pos))
+
+    if not quoted_idx:
+        return segments
+
+    char_list_str = ", ".join(char_list) if char_list else "(none provided)"
+    system_prompt = (
+        "You are an expert at identifying who said each line of dialogue "
+        "in fanfiction. You will be given a passage and a numbered list "
+        "of quoted lines from that passage. For each line, identify the "
+        "speaker. Use exactly one of the listed character names when the "
+        "speaker is one of them. Use 'Narrator' for unspoken thoughts or "
+        "narration. Use 'Unknown' only when you genuinely cannot tell. "
+        "Respond with ONLY a single JSON object whose keys are the quote "
+        'numbers (as strings) and values are speaker names. Example: '
+        '{"1": "Harry Potter", "2": "Narrator", "3": "Unknown"}.'
+    )
+
+    chunk_size = _LLM_CHUNK_CHARS
+    overlap = _LLM_CHUNK_OVERLAP_CHARS
+    total = len(full_text)
+    pos = 0
+    handled: set[int] = set()  # segment indices already labelled
+
+    while pos < total and len(handled) < len(quoted_idx):
+        end = min(total, pos + chunk_size)
+        # Quotes whose midpoint falls in this window and aren't done yet.
+        batch: list[tuple[int, int]] = []
+        for seg_i, qpos in quoted_idx:
+            if seg_i in handled:
+                continue
+            mid = qpos + len(segments[seg_i].text) // 2
+            if pos <= mid < end:
+                batch.append((seg_i, qpos))
+            if len(batch) >= _LLM_QUOTES_PER_REQUEST:
+                break
+
+        if batch:
+            window_text = full_text[pos:end]
+            numbered = []
+            for n, (seg_i, _qpos) in enumerate(batch, 1):
+                numbered.append(f"{n}. {segments[seg_i].text}")
+            user_prompt = (
+                f"Character list: {char_list_str}\n\n"
+                f"Passage:\n{window_text}\n\n"
+                f"Quotes to attribute:\n" + "\n".join(numbered) + "\n\n"
+                "Return JSON only."
+            )
+            reply = _llm_call(
+                provider=provider, model=model, api_key=api_key,
+                endpoint=endpoint_url,
+                system_prompt=system_prompt, user_prompt=user_prompt,
+            )
+            mapping = _llm_parse_speaker_map(reply)
+            for n, (seg_i, _qpos) in enumerate(batch, 1):
+                raw_name = mapping.get(str(n)) or mapping.get(n)
+                if raw_name is None:
+                    continue
+                canonical = _llm_canonicalise_name(
+                    raw_name, char_list, cast_tokens,
+                )
+                segments[seg_i].speaker = canonical
+                handled.add(seg_i)
+
+        # Advance the window. Stop sliding once we've covered the
+        # text — the overlap subtraction guarantees forward progress
+        # even when chunk_size <= overlap.
+        if end >= total:
+            break
+        next_pos = end - overlap
+        if next_pos <= pos:
+            next_pos = end
+        pos = next_pos
+
+    if handled:
+        logger.info(
+            "LLM attribution: labelled %d/%d quoted segment%s (%s/%s)",
+            len(handled), len(quoted_idx),
+            "" if len(quoted_idx) == 1 else "s",
+            provider, model,
+        )
+
+    return segments
+
+
+def llm_cache_token(provider: str, model: str) -> str:
+    """Filesystem-safe cache discriminator for the LLM backend.
+
+    The attribution cache keys on (backend, model_size, chapter_hash);
+    for ``backend == "llm"`` we encode (provider, model) into the
+    model_size slot so an Ollama-llama3 result doesn't overwrite a
+    GPT-4o result for the same chapter.
+    """
+    safe_model = re.sub(r"[^A-Za-z0-9._-]+", "_", model or "")
+    return f"{provider}-{safe_model}".strip("-_") or "default"

@@ -3,6 +3,7 @@
 import argparse
 import copy
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
@@ -49,6 +50,59 @@ _DOWNLOAD_EXPECTED_ERRORS = (
     OSError,
     ImportError,
 )
+
+
+def _llm_config_from_args(args: argparse.Namespace) -> dict | None:
+    """Build the kwargs dict that ``generate_audiobook`` forwards to the
+    LLM attribution backend, or None if --attribution != llm.
+
+    Resolution order: explicit --llm-* flag > matching env var > GUI
+    pref (read via ``prefs.Prefs``) > sensible default. The provider
+    determines which env var supplies the key when --llm-api-key is
+    omitted (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` /
+    ``OPENROUTER_API_KEY`` for the openai-compatible bucket)."""
+    if getattr(args, "attribution", None) != "llm":
+        return None
+
+    from . import prefs as _prefs_mod
+
+    cli_prefs = _prefs_mod.Prefs()
+
+    provider = (
+        getattr(args, "llm_provider", None)
+        or cli_prefs.get(_prefs_mod.KEY_LLM_PROVIDER)
+        or "ollama"
+    )
+    model = (
+        getattr(args, "llm_model", None)
+        or cli_prefs.get(_prefs_mod.KEY_LLM_MODEL)
+        or ""
+    )
+    endpoint = (
+        getattr(args, "llm_endpoint", None)
+        or cli_prefs.get(_prefs_mod.KEY_LLM_ENDPOINT)
+        or ""
+    )
+
+    api_key = getattr(args, "llm_api_key", None) or ""
+    if not api_key:
+        env_for_provider = {
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "openai-compatible": "OPENROUTER_API_KEY",
+        }
+        env_var = env_for_provider.get(provider)
+        if env_var:
+            api_key = os.environ.get(env_var, "")
+    if not api_key:
+        api_key = cli_prefs.get(_prefs_mod.KEY_LLM_API_KEY) or ""
+
+    return {
+        "provider": provider,
+        "model": model,
+        "api_key": api_key,
+        "endpoint": endpoint,
+    }
 
 
 def _scrape_author_stories(
@@ -201,6 +255,7 @@ def _handle_merge_series(
                 speech_rate=args.speech_rate,
                 attribution_backend=args.attribution,
                 attribution_model_size=args.attribution_model_size,
+                attribution_llm_config=_llm_config_from_args(args),
                 strip_notes=args.strip_notes,
                 hr_as_stars=args.hr_as_stars,
             )
@@ -294,6 +349,7 @@ def _handle_merge_parts(
             speech_rate=args.speech_rate,
             attribution_backend=args.attribution,
             attribution_model_size=args.attribution_model_size,
+            attribution_llm_config=_llm_config_from_args(args),
             strip_notes=args.strip_notes,
             hr_as_stars=args.hr_as_stars,
         )
@@ -606,6 +662,7 @@ def _download_one(
                 speech_rate=args.speech_rate,
                 attribution_backend=args.attribution,
                 attribution_model_size=args.attribution_model_size,
+                attribution_llm_config=_llm_config_from_args(args),
                 strip_notes=args.strip_notes,
                 hr_as_stars=args.hr_as_stars,
             )
@@ -2856,13 +2913,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--attribution",
-        choices=["builtin", "fastcoref", "booknlp"],
+        choices=["builtin", "fastcoref", "booknlp", "llm"],
         default="builtin",
         help=(
             "Audiobook speaker attribution backend. 'builtin' is the "
             "default regex parser. 'fastcoref' and 'booknlp' are optional "
             "neural models you must pip-install separately — see "
-            "`ffn-dl --install-attribution BACKEND`."
+            "`ffn-dl --install-attribution BACKEND`. 'llm' sends each "
+            "chapter to a local Ollama instance or a remote LLM API "
+            "(see --llm-provider / --llm-model / --llm-api-key)."
         ),
     )
     parser.add_argument(
@@ -2872,7 +2931,49 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Size variant for attribution backends that offer them "
             "(BookNLP: 'small' ~150 MB or 'big' ~1 GB). Ignored "
-            "for 'builtin' and 'fastcoref'."
+            "for 'builtin', 'fastcoref', and 'llm'."
+        ),
+    )
+    parser.add_argument(
+        "--llm-provider",
+        choices=["ollama", "openai", "anthropic", "openai-compatible"],
+        default=None,
+        help=(
+            "LLM provider when --attribution=llm. 'ollama' is local and "
+            "needs no API key; 'openai' / 'anthropic' / 'openai-compatible' "
+            "use the provider's HTTPS API. Defaults to the GUI pref or "
+            "'ollama' if unset."
+        ),
+    )
+    parser.add_argument(
+        "--llm-model",
+        default=None,
+        metavar="MODEL",
+        help=(
+            "LLM model identifier — e.g. 'llama3.1:8b' for Ollama, "
+            "'gpt-4o-mini' for OpenAI, 'claude-haiku-4-5' for Anthropic. "
+            "Defaults to the GUI pref."
+        ),
+    )
+    parser.add_argument(
+        "--llm-api-key",
+        default=None,
+        metavar="KEY",
+        help=(
+            "API key for the chosen LLM provider. Falls back to env "
+            "vars OPENAI_API_KEY / ANTHROPIC_API_KEY / OPENROUTER_API_KEY "
+            "when this flag is omitted, then to the GUI pref. Ignored "
+            "for Ollama."
+        ),
+    )
+    parser.add_argument(
+        "--llm-endpoint",
+        default=None,
+        metavar="URL",
+        help=(
+            "Override the LLM provider's base URL. Useful for "
+            "self-hosted Ollama on another machine, or any "
+            "OpenAI-compatible endpoint (Groq, OpenRouter, vLLM, ...)."
         ),
     )
     parser.add_argument(

@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.1.0 — 2026-04-25
+
+### Add
+
+- **LLM attribution backend (Ollama / OpenAI / Anthropic / OpenAI-compatible).**
+  Audiobook generation gains a fourth speaker-attribution backend that
+  sends each chapter to a Large Language Model and asks it to label
+  every quoted line. Recent research (LLaMa-3 evaluations on the
+  Project Dialogism Novel Corpus) puts well-prompted LLMs above
+  BookNLP-big on quotation accuracy, and the new backend lets users
+  pick whichever provider they have available — local Ollama (no API
+  key, runs offline) or a remote provider (OpenAI / Anthropic / any
+  OpenAI-compatible endpoint such as Groq, OpenRouter, vLLM, ...). The
+  CLI exposes ``--attribution llm`` plus ``--llm-provider``,
+  ``--llm-model``, ``--llm-api-key``, and ``--llm-endpoint`` (with
+  fallbacks to ``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` /
+  ``OPENROUTER_API_KEY`` env vars and the GUI prefs). The GUI shows
+  an "LLM settings..." button next to the Attribution dropdown when
+  the backend is selected; the modal asks for provider, model name,
+  API key, and an optional endpoint override. The per-chapter
+  attribution cache keys on (provider, model) so an Ollama-llama3
+  result doesn't overwrite a GPT-4o result for the same chapter.
+
+- **Character-list grounding for every attribution backend.** The
+  metadata-derived cast list (FFN's bare-segment characters, AO3's
+  character tags, FicWad's story-characters span) is now plumbed
+  into the attribution pipeline as a closed-world prior. The LLM
+  backend bakes the list into its prompt so model output stays
+  inside the known cast wherever possible. The heuristic
+  post-attribution passes treat cast members as confirmed speakers
+  on their first occurrence (so "I'm Padma," in a story tagged
+  with Padma Patil now binds correctly even before she speaks
+  again) and skip the junk-speaker demotion for any cast name that
+  happens to clash with a junk word ("Captain" in a Marvel fic
+  tagged Captain America stays Captain instead of being demoted
+  to narrator).
+
 ## 2.0.4 — 2026-04-24
 
 ### Fix

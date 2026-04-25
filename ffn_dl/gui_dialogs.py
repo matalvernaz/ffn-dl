@@ -926,3 +926,196 @@ class OptionalFeaturesDialog(wx.Dialog):
             self._append_log(
                 f"\nInstall of {info['display']} failed — see log above."
             )
+
+
+class LlmSettingsDialog(wx.Dialog):
+    """Edit the four LLM-attribution prefs (provider / model / API key
+    / endpoint) and save them.
+
+    Shown from the Audio toolbar when the LLM backend is selected. The
+    fields are intentionally free-form so the user can pick any model
+    their chosen provider serves — we don't try to keep a curated list,
+    because new model names ship every couple of weeks.
+    """
+
+    _PROVIDER_KEYS = ["ollama", "openai", "anthropic", "openai-compatible"]
+    _PROVIDER_LABELS = {
+        "ollama": "Ollama (local, no API key)",
+        "openai": "OpenAI (api.openai.com)",
+        "anthropic": "Anthropic (api.anthropic.com)",
+        "openai-compatible": "OpenAI-compatible (Groq, OpenRouter, vLLM, ...)",
+    }
+    _DEFAULT_ENDPOINTS = {
+        "ollama": "http://localhost:11434",
+        "openai": "https://api.openai.com/v1",
+        "anthropic": "https://api.anthropic.com/v1",
+        "openai-compatible": "",
+    }
+
+    def __init__(self, parent, prefs):
+        super().__init__(
+            parent, title="LLM attribution settings", size=(560, 360),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._prefs = prefs
+
+        from . import prefs as _p
+        self._p = _p
+
+        root = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        pad = 8
+
+        intro = wx.StaticText(
+            root,
+            label=(
+                "Send each chapter to a Large Language Model and ask it "
+                "to label each line of dialogue. Pick Ollama for a local "
+                "model (no API key) or one of the cloud providers (key "
+                "required)."
+            ),
+        )
+        intro.Wrap(520)
+        sizer.Add(intro, 0, wx.ALL, pad)
+
+        grid = wx.FlexGridSizer(rows=4, cols=2, hgap=8, vgap=6)
+        grid.AddGrowableCol(1, 1)
+
+        grid.Add(
+            wx.StaticText(root, label="&Provider:"),
+            0, wx.ALIGN_CENTER_VERTICAL,
+        )
+        labels = [self._PROVIDER_LABELS[k] for k in self._PROVIDER_KEYS]
+        self.provider_ctrl = wx.Choice(root, choices=labels)
+        self.provider_ctrl.SetName("Provider")
+        self.provider_ctrl.Bind(wx.EVT_CHOICE, self._on_provider_change)
+        grid.Add(self.provider_ctrl, 1, wx.EXPAND)
+
+        grid.Add(
+            wx.StaticText(root, label="&Model:"),
+            0, wx.ALIGN_CENTER_VERTICAL,
+        )
+        self.model_ctrl = wx.TextCtrl(root)
+        self.model_ctrl.SetName("Model name")
+        grid.Add(self.model_ctrl, 1, wx.EXPAND)
+
+        grid.Add(
+            wx.StaticText(root, label="&API key:"),
+            0, wx.ALIGN_CENTER_VERTICAL,
+        )
+        self.api_key_ctrl = wx.TextCtrl(root, style=wx.TE_PASSWORD)
+        self.api_key_ctrl.SetName("API key")
+        grid.Add(self.api_key_ctrl, 1, wx.EXPAND)
+
+        grid.Add(
+            wx.StaticText(root, label="&Endpoint:"),
+            0, wx.ALIGN_CENTER_VERTICAL,
+        )
+        self.endpoint_ctrl = wx.TextCtrl(root)
+        self.endpoint_ctrl.SetName("Endpoint URL")
+        self.endpoint_ctrl.SetHint("(blank = provider default)")
+        grid.Add(self.endpoint_ctrl, 1, wx.EXPAND)
+
+        sizer.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+
+        self.hint = wx.StaticText(root, label="")
+        self.hint.Wrap(520)
+        sizer.Add(self.hint, 0, wx.ALL, pad)
+
+        btns = wx.StdDialogButtonSizer()
+        save = wx.Button(root, wx.ID_OK, "&Save")
+        save.SetDefault()
+        cancel = wx.Button(root, wx.ID_CANCEL, "Cancel")
+        btns.AddButton(save)
+        btns.AddButton(cancel)
+        btns.Realize()
+        sizer.Add(btns, 0, wx.ALIGN_RIGHT | wx.ALL, pad)
+
+        save.Bind(wx.EVT_BUTTON, self._on_save)
+
+        root.SetSizer(sizer)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(root, 1, wx.EXPAND)
+        self.SetSizer(outer)
+
+        self._load_prefs()
+
+    def _load_prefs(self):
+        provider = self._prefs.get(self._p.KEY_LLM_PROVIDER) or "ollama"
+        try:
+            idx = self._PROVIDER_KEYS.index(provider)
+        except ValueError:
+            idx = 0
+        self.provider_ctrl.SetSelection(idx)
+        self.model_ctrl.SetValue(self._prefs.get(self._p.KEY_LLM_MODEL) or "")
+        self.api_key_ctrl.SetValue(self._prefs.get(self._p.KEY_LLM_API_KEY) or "")
+        self.endpoint_ctrl.SetValue(self._prefs.get(self._p.KEY_LLM_ENDPOINT) or "")
+        self._refresh_hint()
+
+    def _selected_provider(self):
+        idx = self.provider_ctrl.GetSelection()
+        if idx < 0 or idx >= len(self._PROVIDER_KEYS):
+            return self._PROVIDER_KEYS[0]
+        return self._PROVIDER_KEYS[idx]
+
+    def _on_provider_change(self, event):
+        self._refresh_hint()
+
+    def _refresh_hint(self):
+        provider = self._selected_provider()
+        default_ep = self._DEFAULT_ENDPOINTS.get(provider, "")
+        if provider == "ollama":
+            text = (
+                "Default endpoint: " + default_ep + " — leave Endpoint "
+                "blank to use it. Pick any model already pulled into "
+                "Ollama (e.g. 'llama3.1:8b', 'qwen2.5:14b'). API key is "
+                "ignored."
+            )
+        elif provider == "openai":
+            text = (
+                "Default endpoint: " + default_ep + ". Set Model to a "
+                "valid OpenAI model id (e.g. 'gpt-4o-mini'). API key "
+                "is required."
+            )
+        elif provider == "anthropic":
+            text = (
+                "Default endpoint: " + default_ep + ". Set Model to a "
+                "Claude model id (e.g. 'claude-haiku-4-5', "
+                "'claude-sonnet-4-6'). API key is required."
+            )
+        else:
+            text = (
+                "OpenAI-compatible — point Endpoint at the provider's "
+                "base URL (e.g. 'https://api.groq.com/openai/v1' or "
+                "'https://openrouter.ai/api/v1'). Set Model to whatever "
+                "the provider exposes. API key usually required."
+            )
+        self.hint.SetLabel(text)
+        self.hint.Wrap(520)
+        self.Layout()
+
+    def _on_save(self, event):
+        provider = self._selected_provider()
+        model = self.model_ctrl.GetValue().strip()
+        api_key = self.api_key_ctrl.GetValue().strip()
+        endpoint = self.endpoint_ctrl.GetValue().strip()
+        if not model:
+            wx.MessageBox(
+                "Please enter a model name before saving.",
+                "Model required", wx.OK | wx.ICON_WARNING, self,
+            )
+            return
+        if provider != "ollama" and not api_key:
+            choice = wx.MessageBox(
+                f"The {provider} provider needs an API key. Save without "
+                "one anyway?",
+                "API key missing",
+                wx.YES_NO | wx.ICON_WARNING, self,
+            )
+            if choice != wx.YES:
+                return
+        self._prefs.set(self._p.KEY_LLM_PROVIDER, provider)
+        self._prefs.set(self._p.KEY_LLM_MODEL, model)
+        self._prefs.set(self._p.KEY_LLM_API_KEY, api_key)
+        self._prefs.set(self._p.KEY_LLM_ENDPOINT, endpoint)
+        self.EndModal(wx.ID_OK)
