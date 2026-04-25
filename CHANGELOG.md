@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.2 — 2026-04-25
+
+### Docs
+
+- **README audiobook section rewritten for 2.1 / 2.2.** The previous
+  copy described a single edge-tts + BookNLP pipeline and didn't
+  mention any of the LLM attribution backend, the multi-provider TTS
+  stack (Piper alongside edge), the per-character accent map, or any
+  of the five LLM enrichment passes (emotion, profile, accent,
+  pronunciation, narrator) that ride on top of the LLM backend. New
+  sections cover TTS providers, the four attribution backends with
+  their CLI / GUI entry points, and the enrichment pipeline.
+
 ## 2.2.1 — 2026-04-25
 
 ### Fix

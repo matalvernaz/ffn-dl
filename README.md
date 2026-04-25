@@ -58,7 +58,7 @@ Extras are split so you only pull what you need:
 | Extra       | Adds                          |
 |-------------|-------------------------------|
 | `epub`      | EPUB export (`ebooklib`)      |
-| `audio`     | Audiobook synthesis (`edge-tts`) — requires ffmpeg on PATH |
+| `audio`     | Audiobook synthesis via edge-tts — requires ffmpeg on PATH (Piper TTS is installed on demand from the GUI / `--install-piper`; the LLM attribution backend uses the stdlib and needs no extra) |
 | `gui`       | wxPython desktop GUI          |
 | `clipboard` | Clipboard-watch mode          |
 | `cf-solve`  | Playwright-backed Cloudflare-challenge fallback (also needs `playwright install chromium`) |
@@ -292,17 +292,95 @@ it back; use `--revive-abandoned` to undo the mark.
 
 ## Audiobook notes
 
-`-f audio` synthesises each chapter through
-[edge-tts](https://github.com/rany2/edge-tts) (Microsoft's neural voices)
-and concatenates into a chaptered M4B with embedded cover art. Needs
-`ffmpeg` and `ffprobe` on PATH for the pip install; they're bundled in
-the Windows / macOS / Linux binaries.
+`-f audio` synthesises each chapter through one or more pluggable
+TTS providers and concatenates into a chaptered M4B with embedded
+cover art. Needs `ffmpeg` and `ffprobe` on PATH for the pip install;
+they're bundled in the Windows / macOS / Linux binaries.
 
-Character voice casting runs through
-[BookNLP](https://github.com/booknlp/booknlp) when installed — each
-speaker gets a distinct Microsoft voice, the narrator stays on a
-stable baseline, and dialogue attribution falls back to a regex-based
-parser when BookNLP isn't available or fails mid-run.
+### TTS providers
+
+Two providers ship in-tree, and the audiobook generator pulls voices
+from the union of every enabled one. Pick which contribute via
+`--tts-providers <names>` on the CLI or the "TTS providers..."
+button in the GUI's audio toolbar.
+
+- **edge** — [edge-tts](https://github.com/rany2/edge-tts), Microsoft's
+  Edge Neural Voices. Cloud TTS, no API key, broad coverage of
+  English locales (US/UK/Australian/Canadian/Indian/Irish/NZ) plus
+  every major language. The historical default; every pre-2.2.0
+  voice map continues to resolve.
+- **piper** — local [Piper TTS](https://github.com/rhasspy/piper)
+  via ONNX inference. Runs offline once installed. Ships a curated
+  voice manifest that downloads on first use, covering English
+  regional accents (UK / Scottish / Irish / Welsh / Australian /
+  Indian) plus French / Spanish / German / Italian / Russian /
+  Japanese / Polish / Portuguese / Dutch / Swedish. Install the
+  binary with `--install-piper` or the GUI's "Install Piper binary"
+  button; voice ONNX files lazy-download on first use.
+
+Voice ids are namespaced as `provider:short_name`
+(`edge:en-US-AvaNeural`, `piper:en_GB-alan-medium`). Per-story
+voice maps live at `<output_dir>/.ffn-voices-<id>.json` and are
+user-editable.
+
+### Speaker attribution
+
+Four backends, picked via `--attribution`:
+
+- **builtin** — regex-based dialogue parser. No dependencies.
+  Default.
+- **fastcoref** — neural coreference refinement (~90 MB).
+  `pip install fastcoref` or click Install in the GUI.
+- **booknlp** — full [BookNLP](https://github.com/booknlp/booknlp)
+  quote + coref attribution (~150 MB small / ~1 GB big).
+- **llm** — sends each chapter to a Large Language Model. Use a
+  local Ollama instance (no key, offline) or a remote provider
+  (OpenAI / Anthropic / OpenAI-compatible like Groq / OpenRouter /
+  vLLM). LLaMa-3 evaluations on the Project Dialogism Novel Corpus
+  put well-prompted LLMs above BookNLP-big on quotation accuracy.
+
+CLI flags for the LLM backend: `--llm-provider`, `--llm-model`,
+`--llm-api-key`, `--llm-endpoint` — falls back through env vars
+(`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY`)
+then the GUI prefs. The GUI exposes the same settings via "LLM
+settings..." in the audio toolbar.
+
+### LLM-driven enrichment
+
+When the LLM attribution backend is enabled, the audiobook generator
+runs five additional analysis passes per story to produce a richer
+audiobook than the heuristic pipeline alone:
+
+1. **Per-quote emotion** classification (bundled into the same
+   per-chapter call as attribution): `whisper`, `shout`, `excited`,
+   `cheerful`, `sad`, `angry`. Maps to edge-tts prosody adjustments.
+2. **Character profiles** (`gender` / `age` / `accent` / `tone`)
+   saved to `.ffn-profile-<id>.json`. Feeds VoiceMapper as a richer
+   prior than gender alone.
+3. **Per-character accent map** seeded into `.ffn-accents-<id>.json`
+   from the profiles. The VoiceMapper builds each character's voice
+   pool with a three-tier preference (exact locale > language >
+   any), so Hagrid lands on a UK voice instead of round-robining to
+   en-US.
+4. **Pronunciation map** (`.ffn-pronunciations-<id>.json`):
+   pre-filled with phonetic respellings of made-up names, fandom
+   terms, foreign loanwords, hard-to-pronounce place names.
+5. **Narrator voice suggestion**: the LLM reads the story's tone and
+   recommends `gender` + `accent`, which the generator translates
+   into a real catalog voice. Caller-supplied `narrator_voice`
+   overrides.
+6. **Author's-note backstop**: when `--strip-notes` is also set,
+   paragraphs surviving the regex pre-pass get one more LLM check
+   for disguised outros, beta thanks, and shout-outs.
+
+Every map file is user-editable; edits survive re-renders. Every
+LLM enrichment is purely additive — transport failures fall through
+silently, and existing user-edited JSON is never clobbered.
+
+The per-chapter attribution result is cached at
+`<portable_root>/cache/attribution/v1/<backend>/<size>/<sha>.json`
+keyed by chapter text, so re-running after a partial failure or
+adding one new chapter doesn't repeat the LLM cost on the rest.
 
 ## Accessibility
 
