@@ -1235,6 +1235,10 @@ class LlmSettingsDialog(wx.Dialog):
         )
         self.model_ctrl = wx.TextCtrl(root)
         self.model_ctrl.SetName("Model name")
+        # Pull-model button enables/disables based on whether a name
+        # is present, so refresh on every keystroke. EVT_TEXT fires
+        # for both typing and programmatic ``SetValue``.
+        self.model_ctrl.Bind(wx.EVT_TEXT, self._on_model_change)
         grid.Add(self.model_ctrl, 1, wx.EXPAND)
 
         grid.Add(
@@ -1275,6 +1279,16 @@ class LlmSettingsDialog(wx.Dialog):
         self.install_btn.SetName("Install Ollama via winget")
         self.install_btn.Bind(wx.EVT_BUTTON, self._on_install_ollama)
         actions.Add(self.install_btn, 0, wx.RIGHT, pad)
+
+        self.pull_btn = wx.Button(root, label="&Pull model")
+        self.pull_btn.SetName("Pull the configured Ollama model")
+        self.pull_btn.SetToolTip(
+            "Download the model named in the Model field above into "
+            "Ollama. Requires the daemon to be running — click Test "
+            "connection first if you're not sure."
+        )
+        self.pull_btn.Bind(wx.EVT_BUTTON, self._on_pull_model)
+        actions.Add(self.pull_btn, 0, wx.RIGHT, pad)
 
         self.download_btn = wx.Button(root, label="&Download Ollama…")
         self.download_btn.SetName("Open Ollama download page")
@@ -1338,6 +1352,12 @@ class LlmSettingsDialog(wx.Dialog):
         self._refresh_hint()
         self._refresh_actions()
 
+    def _on_model_change(self, event):
+        # The Pull button is gated on a non-empty model name; this
+        # handler is what flips it as the user types.
+        self._refresh_actions()
+        event.Skip()
+
     def _refresh_hint(self):
         provider = self._selected_provider()
         default_ep = self._DEFAULT_ENDPOINTS.get(provider, "")
@@ -1400,13 +1420,14 @@ class LlmSettingsDialog(wx.Dialog):
     # ── Actions: test / install / download ──────────────────────
 
     def _refresh_actions(self) -> None:
-        """Show install/download only for Ollama, and grey out the
-        install button on platforms without winget so non-Windows
+        """Show install/pull/download only for Ollama, and grey out
+        the install button on platforms without winget so non-Windows
         users get a coherent UI instead of a broken click."""
         from . import ollama_install
 
         is_ollama = self._selected_provider() == "ollama"
         self.install_btn.Show(is_ollama)
+        self.pull_btn.Show(is_ollama)
         self.download_btn.Show(is_ollama)
 
         if is_ollama:
@@ -1420,12 +1441,17 @@ class LlmSettingsDialog(wx.Dialog):
                     "Run `winget install Ollama.Ollama` to download and "
                     "install Ollama from Microsoft's package manager."
                 )
+            # Pull is disabled while busy and when the Model field is
+            # empty — pulling "" would hand Ollama a 400.
+            has_model = bool(self.model_ctrl.GetValue().strip())
+            self.pull_btn.Enable(has_model and not self._busy)
         self.Layout()
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         self.test_btn.Enable(not busy)
         self.download_btn.Enable(not busy)
+        self.pull_btn.Enable(not busy)
         self._refresh_actions()
 
     def _append_status(self, line: str) -> None:
@@ -1531,3 +1557,43 @@ class LlmSettingsDialog(wx.Dialog):
         self._append_status(
             f"Opened {ollama_install.OLLAMA_DOWNLOAD_URL} in your browser."
         )
+
+    def _on_pull_model(self, event):
+        from . import ollama_install
+
+        model = self.model_ctrl.GetValue().strip()
+        if not model:
+            return
+        endpoint = self.endpoint_ctrl.GetValue().strip()
+
+        self._append_status(f"Pull requested: {model}")
+        self._set_busy(True)
+
+        def worker():
+            ok = ollama_install.pull_ollama_model(
+                endpoint=endpoint,
+                model=model,
+                progress_callback=lambda line: wx.CallAfter(
+                    self._append_status, line,
+                ),
+            )
+            wx.CallAfter(self._on_pull_done, ok, model)
+
+        import threading
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_pull_done(self, ok: bool, model: str) -> None:
+        if not self._alive:
+            return
+        if ok:
+            self._append_status(
+                f"  '{model}' is now installed. Save the dialog to use "
+                "it as your LLM model."
+            )
+        else:
+            self._append_status(
+                f"  Pull of '{model}' did not complete. Check the model "
+                "name (browse https://ollama.com/library) and that the "
+                "Ollama daemon is running."
+            )
+        self._set_busy(False)

@@ -177,10 +177,155 @@ def winget_unavailable_reason() -> str:
     return ""
 
 
+_OLLAMA_PULL_TIMEOUT_S = 30.0
+"""Read timeout per chunk of the streaming pull response. The full
+download can take many minutes on a slow link, but each chunk should
+land within seconds — a long stall means the connection wedged."""
+
+
+def pull_ollama_model(
+    *,
+    endpoint: str,
+    model: str,
+    progress_callback: Callable[[str], None] | None = None,
+    timeout: float = _OLLAMA_PULL_TIMEOUT_S,
+) -> bool:
+    """Stream ``POST <endpoint>/api/pull`` and surface human-readable
+    progress to ``progress_callback``. Returns ``True`` on success.
+
+    Ollama's pull API is line-delimited JSON: a manifest line, then a
+    sequence of ``{"status": "downloading", "digest": ..., "total":
+    N, "completed": M}`` updates per layer, then a success line.
+    Raw byte counts are noisy (200+ updates a second) so we
+    deduplicate: only emit when the phase string changes or the
+    percentage crosses a 5-point boundary. The result is a status log
+    that reads like installer output rather than a fire hose."""
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    log = progress_callback or (lambda _line: None)
+
+    base = (endpoint or "").strip().rstrip("/") or "http://localhost:11434"
+    url = f"{base}/api/pull"
+    payload = _json.dumps({"model": model, "stream": True}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    log(f"Pulling {model} from {base}...")
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        log(
+            f"  Pull rejected (HTTP {exc.code}): "
+            f"{detail or exc.reason}"
+        )
+        return False
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        log(f"  Endpoint unreachable: {exc}. Start Ollama and try again.")
+        return False
+
+    return _consume_ollama_pull_stream(resp, log)
+
+
+def _consume_ollama_pull_stream(
+    resp,
+    log: Callable[[str], None],
+) -> bool:
+    """Drain a streaming ``/api/pull`` response into ``log`` and return
+    whether the pull succeeded.
+
+    Split out so tests can drive it with a fake response that yields
+    line-delimited JSON without spinning up a real Ollama daemon. The
+    deduplication logic — only emit on phase change or 5% step — lives
+    here too so the same shaping that ships in the GUI is what we
+    pin in tests.
+    """
+    import json as _json
+
+    last_status = ""
+    last_pct_bucket = -1
+    saw_success = False
+
+    with resp:
+        for raw in resp:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                event = _json.loads(line)
+            except ValueError:
+                # Server sent something that isn't a JSON line — log
+                # the raw text rather than crashing the pull.
+                log(f"  {line}")
+                continue
+
+            if not isinstance(event, dict):
+                continue
+
+            if event.get("error"):
+                log(f"  Error: {event['error']}")
+                return False
+
+            status = str(event.get("status") or "").strip()
+            total = event.get("total")
+            completed = event.get("completed")
+
+            if status == "success":
+                saw_success = True
+                log("  success")
+                continue
+
+            if (
+                isinstance(total, int)
+                and isinstance(completed, int)
+                and total > 0
+            ):
+                pct = int(completed * 100 / total)
+                pct_bucket = pct - (pct % 5)
+                if status != last_status or pct_bucket != last_pct_bucket:
+                    log(
+                        f"  {status}: {pct}% "
+                        f"({_human_bytes(completed)} / {_human_bytes(total)})"
+                    )
+                    last_status = status
+                    last_pct_bucket = pct_bucket
+            elif status and status != last_status:
+                log(f"  {status}")
+                last_status = status
+                last_pct_bucket = -1
+
+    return saw_success
+
+
+def _human_bytes(n: int) -> str:
+    """Compact size formatter for the pull progress log — the layer
+    sizes range from a few MB (manifests) to several GB (model
+    weights). Always rounded to one decimal so the log column lines
+    up reasonably."""
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(n)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f}{unit}" if unit != "B" else f"{int(size)}B"
+        size /= 1024
+    return f"{size:.1f}{units[-1]}"
+
+
 __all__ = [
     "OLLAMA_DOWNLOAD_URL",
     "WINGET_PACKAGE_ID",
     "install_ollama_via_winget",
+    "pull_ollama_model",
     "winget_install_command",
     "winget_supported",
     "winget_unavailable_reason",

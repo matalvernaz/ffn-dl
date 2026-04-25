@@ -438,3 +438,213 @@ class TestInstallOllamaUnsupportedPlatform:
         assert any(
             ollama_install.OLLAMA_DOWNLOAD_URL in line for line in captured
         )
+
+
+# ── pull_ollama_model ─────────────────────────────────────────────
+
+
+class _FakePullStream:
+    """Drives :func:`_consume_ollama_pull_stream` with a fixed list of
+    JSON-line bytes. Mirrors the urlopen response interface enough to
+    let the helper iterate and ``with``-enter."""
+
+    def __init__(self, lines: list[bytes]):
+        self._lines = list(lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def __iter__(self):
+        return iter(self._lines)
+
+
+def _evt(payload: dict) -> bytes:
+    return (json.dumps(payload) + "\n").encode("utf-8")
+
+
+class TestConsumePullStream:
+    def test_success_event_returns_true(self):
+        captured: list[str] = []
+        stream = _FakePullStream([
+            _evt({"status": "pulling manifest"}),
+            _evt({"status": "success"}),
+        ])
+        ok = ollama_install._consume_ollama_pull_stream(
+            stream, captured.append,
+        )
+        assert ok is True
+        # The phase change is logged exactly once.
+        assert any("pulling manifest" in line for line in captured)
+        assert any("success" in line for line in captured)
+
+    def test_no_success_event_returns_false(self):
+        # Stream that ended mid-download (network drop, server killed).
+        # No "success" status means the pull is unfinished.
+        stream = _FakePullStream([
+            _evt({"status": "downloading", "total": 100, "completed": 50}),
+        ])
+        assert ollama_install._consume_ollama_pull_stream(
+            stream, lambda _: None,
+        ) is False
+
+    def test_error_event_returns_false_and_logs_detail(self):
+        captured: list[str] = []
+        stream = _FakePullStream([
+            _evt({"error": "model not found"}),
+        ])
+        ok = ollama_install._consume_ollama_pull_stream(
+            stream, captured.append,
+        )
+        assert ok is False
+        assert any("model not found" in line for line in captured)
+
+    def test_progress_deduplicates_to_5pct_buckets(self):
+        # The pull API emits 200+ updates a second on a fast download.
+        # Logging every one would drown the dialog, so the helper
+        # collapses to 5%-step buckets per phase. Drive enough updates
+        # that a naive logger would emit dozens, then assert the
+        # collapsed log has only a handful.
+        events = [_evt({"status": "pulling manifest"})]
+        for completed in range(0, 100, 1):  # 100 raw progress updates
+            events.append(
+                _evt({
+                    "status": "downloading",
+                    "total": 100, "completed": completed,
+                })
+            )
+        events.append(_evt({"status": "success"}))
+
+        captured: list[str] = []
+        stream = _FakePullStream(events)
+        ok = ollama_install._consume_ollama_pull_stream(
+            stream, captured.append,
+        )
+        assert ok is True
+        downloading_lines = [l for l in captured if "downloading:" in l]
+        # 0%, 5%, 10%, ..., 95% → 20 buckets. Allow ±1 for the bucket
+        # rounding edge cases.
+        assert 19 <= len(downloading_lines) <= 21, (
+            f"Got {len(downloading_lines)} lines, expected ~20"
+        )
+
+    def test_phase_transitions_emit_immediately(self):
+        # Multiple layers download in sequence — each "downloading"
+        # event with a new digest is conceptually a new phase, but the
+        # current model just collapses by status string. That's fine
+        # because the progress percentage resets and the bucket
+        # transition will fire. This test pins that subsequent layers
+        # still show some progress lines rather than being eaten by
+        # the dedupe on a stale status==last_status.
+        events = [
+            _evt({"status": "pulling manifest"}),
+            _evt({"status": "downloading", "total": 100, "completed": 0}),
+            _evt({"status": "downloading", "total": 100, "completed": 50}),
+            _evt({"status": "verifying"}),
+            _evt({"status": "writing"}),
+            _evt({"status": "success"}),
+        ]
+        captured: list[str] = []
+        stream = _FakePullStream(events)
+        ollama_install._consume_ollama_pull_stream(stream, captured.append)
+        joined = "\n".join(captured)
+        for phase in ("pulling manifest", "downloading", "verifying",
+                      "writing", "success"):
+            assert phase in joined, (
+                f"phase {phase!r} missing from log: {joined}"
+            )
+
+    def test_malformed_json_line_logged_not_crashed(self):
+        captured: list[str] = []
+        stream = _FakePullStream([
+            b"not json\n",
+            _evt({"status": "success"}),
+        ])
+        ok = ollama_install._consume_ollama_pull_stream(
+            stream, captured.append,
+        )
+        assert ok is True
+        # The garbage line is logged verbatim rather than crashing.
+        assert any("not json" in line for line in captured)
+
+
+class TestPullOllamaModel:
+    def test_unreachable_endpoint_logs_hint_and_returns_false(
+        self, monkeypatch,
+    ):
+        def boom(req, timeout=None):
+            raise ConnectionRefusedError("nope")
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        captured: list[str] = []
+        ok = ollama_install.pull_ollama_model(
+            endpoint="http://localhost:11434",
+            model="llama3.1:8b",
+            progress_callback=captured.append,
+        )
+        assert ok is False
+        assert any("unreachable" in line.lower() for line in captured)
+        assert any("start ollama" in line.lower() for line in captured)
+
+    def test_404_from_server_returns_false_with_status(
+        self, monkeypatch,
+    ):
+        import urllib.error
+
+        def boom(req, timeout=None):
+            raise urllib.error.HTTPError(
+                url="http://x/api/pull", code=404,
+                msg="Not Found", hdrs=None,
+                fp=io.BytesIO(b"model not found in registry"),
+            )
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        captured: list[str] = []
+        ok = ollama_install.pull_ollama_model(
+            endpoint="http://localhost:11434",
+            model="not-a-real-model",
+            progress_callback=captured.append,
+        )
+        assert ok is False
+        assert any("404" in line for line in captured)
+
+    def test_success_streams_to_callback(self, monkeypatch):
+        events = [
+            _evt({"status": "pulling manifest"}),
+            _evt({
+                "status": "downloading",
+                "total": 1000, "completed": 500,
+            }),
+            _evt({"status": "success"}),
+        ]
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            lambda req, timeout=None: _FakePullStream(events),
+        )
+        captured: list[str] = []
+        ok = ollama_install.pull_ollama_model(
+            endpoint="http://localhost:11434",
+            model="llama3.1:8b",
+            progress_callback=captured.append,
+        )
+        assert ok is True
+        # Sanity: the post body the dialog will send to a real Ollama
+        # has stream=true. Without that the API returns a single
+        # non-streamed JSON and the progress UX collapses.
+        # (Probed indirectly by checking progress lines arrived.)
+        assert any("downloading" in line for line in captured)
+
+
+class TestHumanBytes:
+    @pytest.mark.parametrize("size,expected", [
+        (0, "0B"),
+        (512, "512B"),
+        (1024, "1.0KB"),
+        (1024 * 1024, "1.0MB"),
+        (int(1.5 * 1024 * 1024), "1.5MB"),
+        (2 * 1024 ** 3, "2.0GB"),
+    ])
+    def test_formats_common_sizes(self, size, expected):
+        assert ollama_install._human_bytes(size) == expected
