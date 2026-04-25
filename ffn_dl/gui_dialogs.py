@@ -1185,10 +1185,11 @@ class LlmSettingsDialog(wx.Dialog):
 
     def __init__(self, parent, prefs):
         super().__init__(
-            parent, title="LLM attribution settings", size=(560, 360),
+            parent, title="LLM attribution settings", size=(620, 560),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
         self._prefs = prefs
+        self._busy = False
 
         from . import prefs as _p
         self._p = _p
@@ -1206,7 +1207,7 @@ class LlmSettingsDialog(wx.Dialog):
                 "required)."
             ),
         )
-        intro.Wrap(520)
+        intro.Wrap(580)
         sizer.Add(intro, 0, wx.ALL, pad)
 
         grid = wx.FlexGridSizer(rows=4, cols=2, hgap=8, vgap=6)
@@ -1250,8 +1251,45 @@ class LlmSettingsDialog(wx.Dialog):
         sizer.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
 
         self.hint = wx.StaticText(root, label="")
-        self.hint.Wrap(520)
+        self.hint.Wrap(580)
         sizer.Add(self.hint, 0, wx.ALL, pad)
+
+        # Action row: test the configured endpoint, install Ollama
+        # locally, or open the download page. The install / download
+        # pair is gated on provider==ollama in :meth:`_refresh_actions`
+        # so the buttons don't surface for users who picked a cloud
+        # provider.
+        actions = wx.BoxSizer(wx.HORIZONTAL)
+        self.test_btn = wx.Button(root, label="&Test connection")
+        self.test_btn.SetName("Test connection")
+        self.test_btn.Bind(wx.EVT_BUTTON, self._on_test_connection)
+        actions.Add(self.test_btn, 0, wx.RIGHT, pad)
+
+        self.install_btn = wx.Button(root, label="&Install Ollama")
+        self.install_btn.SetName("Install Ollama via winget")
+        self.install_btn.Bind(wx.EVT_BUTTON, self._on_install_ollama)
+        actions.Add(self.install_btn, 0, wx.RIGHT, pad)
+
+        self.download_btn = wx.Button(root, label="&Download Ollama…")
+        self.download_btn.SetName("Open Ollama download page")
+        self.download_btn.Bind(wx.EVT_BUTTON, self._on_download_ollama)
+        actions.Add(self.download_btn, 0)
+
+        sizer.Add(actions, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+
+        # Read-only multi-line log so screen readers can scrub through
+        # the "test connection" result or the streaming winget output.
+        # A wx.StaticText only announces on focus; a TextCtrl in
+        # READONLY mode is reliably picked up by NVDA.
+        log_label = wx.StaticText(root, label="Status:")
+        sizer.Add(log_label, 0, wx.LEFT | wx.TOP, pad)
+        self.status_ctrl = wx.TextCtrl(
+            root,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
+            size=(-1, 110),
+        )
+        self.status_ctrl.SetName("LLM action log")
+        sizer.Add(self.status_ctrl, 1, wx.EXPAND | wx.ALL, pad)
 
         btns = wx.StdDialogButtonSizer()
         save = wx.Button(root, wx.ID_OK, "&Save")
@@ -1270,6 +1308,7 @@ class LlmSettingsDialog(wx.Dialog):
         self.SetSizer(outer)
 
         self._load_prefs()
+        self._refresh_actions()
 
     def _load_prefs(self):
         provider = self._prefs.get(self._p.KEY_LLM_PROVIDER) or "ollama"
@@ -1291,6 +1330,7 @@ class LlmSettingsDialog(wx.Dialog):
 
     def _on_provider_change(self, event):
         self._refresh_hint()
+        self._refresh_actions()
 
     def _refresh_hint(self):
         provider = self._selected_provider()
@@ -1350,3 +1390,125 @@ class LlmSettingsDialog(wx.Dialog):
         self._prefs.set(self._p.KEY_LLM_API_KEY, api_key)
         self._prefs.set(self._p.KEY_LLM_ENDPOINT, endpoint)
         self.EndModal(wx.ID_OK)
+
+    # ── Actions: test / install / download ──────────────────────
+
+    def _refresh_actions(self) -> None:
+        """Show install/download only for Ollama, and grey out the
+        install button on platforms without winget so non-Windows
+        users get a coherent UI instead of a broken click."""
+        from . import ollama_install
+
+        is_ollama = self._selected_provider() == "ollama"
+        self.install_btn.Show(is_ollama)
+        self.download_btn.Show(is_ollama)
+
+        if is_ollama:
+            unavailable = ollama_install.winget_unavailable_reason()
+            if unavailable:
+                self.install_btn.Enable(False)
+                self.install_btn.SetToolTip(unavailable)
+            else:
+                self.install_btn.Enable(not self._busy)
+                self.install_btn.SetToolTip(
+                    "Run `winget install Ollama.Ollama` to download and "
+                    "install Ollama from Microsoft's package manager."
+                )
+        self.Layout()
+
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        self.test_btn.Enable(not busy)
+        self.download_btn.Enable(not busy)
+        self._refresh_actions()
+
+    def _append_status(self, line: str) -> None:
+        """Append a line to the read-only status log. Always called
+        on the GUI thread; worker threads marshal here via
+        ``wx.CallAfter``."""
+        self.status_ctrl.AppendText(line.rstrip() + "\n")
+
+    def _on_test_connection(self, event):
+        from . import attribution
+
+        provider = self._selected_provider()
+        endpoint = self.endpoint_ctrl.GetValue().strip()
+        api_key = self.api_key_ctrl.GetValue().strip()
+        self._append_status(f"Testing {provider} endpoint...")
+        self._set_busy(True)
+
+        def worker():
+            try:
+                result = attribution.probe_llm_endpoint(
+                    provider=provider,
+                    endpoint=endpoint,
+                    api_key=api_key,
+                )
+                wx.CallAfter(self._on_test_done, result)
+            except Exception as exc:  # noqa: BLE001 — surface any bug
+                wx.CallAfter(
+                    self._on_test_done,
+                    attribution.LLMProbeResult(
+                        ok=False,
+                        detail=f"Internal error during probe: {exc}",
+                    ),
+                )
+
+        import threading
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_test_done(self, result) -> None:
+        prefix = "OK" if result.ok else "FAIL"
+        self._append_status(f"  {prefix}: {result.detail}")
+        self._set_busy(False)
+
+    def _on_install_ollama(self, event):
+        from . import ollama_install
+
+        confirm = wx.MessageBox(
+            "Run `winget install Ollama.Ollama`?\n\n"
+            "Windows may show a User Account Control prompt to "
+            "authorise the install. After it finishes, click "
+            "'Test connection' to verify Ollama is running.",
+            "Install Ollama",
+            wx.YES_NO | wx.ICON_QUESTION, self,
+        )
+        if confirm != wx.YES:
+            return
+
+        self._append_status("Installing Ollama via winget...")
+        self._set_busy(True)
+
+        def worker():
+            ok = ollama_install.install_ollama_via_winget(
+                log_callback=lambda line: wx.CallAfter(
+                    self._append_status, line,
+                ),
+            )
+            wx.CallAfter(self._on_install_done, ok)
+
+        import threading
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_install_done(self, ok: bool) -> None:
+        if ok:
+            self._append_status(
+                "Install finished. Click 'Test connection' to confirm "
+                "Ollama is running, then `ollama pull <model>` from a "
+                "terminal to download a model."
+            )
+        else:
+            self._append_status(
+                "Install did not complete successfully. See the log "
+                "above for details, or use Download Ollama to get the "
+                "installer manually."
+            )
+        self._set_busy(False)
+
+    def _on_download_ollama(self, event):
+        from . import ollama_install
+
+        wx.LaunchDefaultBrowser(ollama_install.OLLAMA_DOWNLOAD_URL)
+        self._append_status(
+            f"Opened {ollama_install.OLLAMA_DOWNLOAD_URL} in your browser."
+        )

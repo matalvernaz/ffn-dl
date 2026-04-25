@@ -1480,6 +1480,176 @@ def _llm_call(
     return (choices[0].get("message") or {}).get("content", "")
 
 
+_LLM_PROBE_TIMEOUT_S = 5.0
+"""Connect/read timeout for the "is this endpoint up?" probe used by
+the LLM settings dialog. Short enough that a wrong/dead URL doesn't
+make the user wait the way a real classifier call would."""
+
+
+class LLMProbeResult:
+    """Outcome of :func:`probe_llm_endpoint`.
+
+    ``ok`` is True when the endpoint replied 2xx to its inventory
+    surface (Ollama ``/api/tags``, OpenAI/compatible ``/models``,
+    Anthropic ``/models``). Cloud providers also need the API key for
+    that call to succeed, so ``ok=False`` with ``status==401`` is the
+    "key is wrong" signal — distinct from ``status is None`` (endpoint
+    unreachable / DNS / timeout).
+    """
+
+    __slots__ = ("ok", "detail", "status", "models")
+
+    def __init__(
+        self,
+        *,
+        ok: bool,
+        detail: str,
+        status: int | None = None,
+        models: list[str] | None = None,
+    ):
+        self.ok = ok
+        self.detail = detail
+        self.status = status
+        self.models = models
+
+
+def probe_llm_endpoint(
+    *,
+    provider: str,
+    endpoint: str | None,
+    api_key: str | None = None,
+    timeout: float = _LLM_PROBE_TIMEOUT_S,
+) -> LLMProbeResult:
+    """Ping the configured LLM endpoint's inventory surface and report
+    whether it's actually reachable, authenticated, and serving models.
+
+    Used by the GUI's "Test connection" button so a user with their
+    Ollama daemon offline (or an API key typo) finds out immediately
+    instead of after kicking off a 100-chapter download. Pure helper —
+    no GUI deps, no logging side effects, safe to call from a worker
+    thread.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    base = _llm_normalize_endpoint(provider, endpoint)
+    if not base:
+        return LLMProbeResult(
+            ok=False,
+            detail=(
+                "Endpoint is empty. Set Endpoint to your provider's "
+                "base URL (e.g. https://api.groq.com/openai/v1)."
+            ),
+        )
+
+    headers: dict[str, str] = {}
+    if provider == "ollama":
+        url = f"{base}/api/tags"
+        models_key = "models"
+    elif provider == "anthropic":
+        url = f"{base}/models"
+        if not api_key:
+            return LLMProbeResult(
+                ok=False,
+                detail="Anthropic requires an API key for the probe.",
+            )
+        headers["x-api-key"] = api_key
+        headers["anthropic-version"] = "2023-06-01"
+        models_key = "data"
+    else:  # openai / openai-compatible
+        url = f"{base}/models"
+        if provider == "openai" and not api_key:
+            return LLMProbeResult(
+                ok=False,
+                detail="OpenAI requires an API key for the probe.",
+            )
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        models_key = "data"
+
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return LLMProbeResult(
+                ok=False,
+                status=exc.code,
+                detail=(
+                    f"Authentication rejected by {provider} "
+                    f"(HTTP {exc.code}) — check the API key."
+                ),
+            )
+        return LLMProbeResult(
+            ok=False,
+            status=exc.code,
+            detail=f"Server replied HTTP {exc.code}: {exc.reason}",
+        )
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        if provider == "ollama":
+            hint = (
+                " — is the Ollama daemon running? Use the Install "
+                "Ollama button below if it isn't installed."
+            )
+        else:
+            hint = ""
+        return LLMProbeResult(
+            ok=False,
+            detail=f"Endpoint unreachable: {exc}{hint}",
+        )
+
+    try:
+        parsed = _json.loads(body)
+    except ValueError:
+        return LLMProbeResult(
+            ok=True,
+            status=status,
+            detail=(
+                f"Endpoint responded HTTP {status} but the body wasn't "
+                f"JSON ({len(body)} bytes). Probably reachable."
+            ),
+        )
+
+    raw_models = parsed.get(models_key) if isinstance(parsed, dict) else None
+    model_names: list[str] = []
+    if isinstance(raw_models, list):
+        for m in raw_models:
+            if isinstance(m, dict):
+                # Ollama: {"name": "llama3.1:8b", ...}
+                # OpenAI/Anthropic: {"id": "gpt-4o-mini", ...}
+                name = m.get("name") or m.get("id")
+                if isinstance(name, str):
+                    model_names.append(name)
+            elif isinstance(m, str):
+                model_names.append(m)
+
+    if model_names:
+        detail = (
+            f"Connected to {provider}. {len(model_names)} model(s) "
+            f"available: {', '.join(model_names[:5])}"
+            + ("…" if len(model_names) > 5 else "")
+        )
+    else:
+        detail = (
+            f"Connected to {provider}, but no models are installed. "
+            + (
+                "Run `ollama pull llama3.1:8b` (or any other model) "
+                "from a terminal to download one."
+                if provider == "ollama"
+                else "Check the provider dashboard for available models."
+            )
+        )
+    return LLMProbeResult(
+        ok=True,
+        status=status,
+        detail=detail,
+        models=model_names,
+    )
+
+
 def _llm_parse_speaker_map(reply: str) -> dict[str, dict]:
     """Pull a ``{"1": {"speaker": "Name", "emotion": "..."}}`` mapping
     out of the LLM reply.
