@@ -637,6 +637,80 @@ class TestPullOllamaModel:
         assert any("downloading" in line for line in captured)
 
 
+class TestComputeModelChoices:
+    """Pure data-shaping for the dialog's Model combo dropdown."""
+
+    def test_preserves_curated_order_via_sort(self):
+        result = attribution.compute_model_choices(
+            curated=["llama3.1:8b", "phi3.5:3.8b"],
+            extra=[],
+            current="",
+        )
+        # Case-insensitive alphabetical → llama before phi.
+        assert result == ["llama3.1:8b", "phi3.5:3.8b"]
+
+    def test_extra_models_merged_uniquely(self):
+        result = attribution.compute_model_choices(
+            curated=["llama3.1:8b"],
+            extra=["llama3.1:8b", "qwen2.5:14b"],  # duplicate filtered
+            current="",
+        )
+        assert result == ["llama3.1:8b", "qwen2.5:14b"]
+
+    def test_current_typed_value_appears_even_if_uncurated(self):
+        # The user typed a custom Ollama tag — it must survive the
+        # merge so they don't have to retype after a probe re-renders
+        # the dropdown.
+        result = attribution.compute_model_choices(
+            curated=["llama3.1:8b"],
+            extra=[],
+            current="my-custom:latest",
+        )
+        assert "my-custom:latest" in result
+        assert "llama3.1:8b" in result
+
+    def test_blank_current_is_no_op(self):
+        # Empty string mustn't appear as a phantom dropdown entry.
+        result = attribution.compute_model_choices(
+            curated=["llama3.1:8b"],
+            extra=[],
+            current="",
+        )
+        assert "" not in result
+
+    def test_whitespace_current_treated_as_blank(self):
+        result = attribution.compute_model_choices(
+            curated=["llama3.1:8b"],
+            extra=[],
+            current="   ",
+        )
+        assert "   " not in result
+        assert result == ["llama3.1:8b"]
+
+    def test_case_insensitive_sort(self):
+        # Two models that differ only in capitalisation should land
+        # adjacent rather than at opposite ends of the dropdown.
+        result = attribution.compute_model_choices(
+            curated=["Zephyr:7b", "alpaca:7b"],
+            extra=[],
+            current="",
+        )
+        # Case-insensitive: "alpaca" before "Zephyr".
+        assert result == ["alpaca:7b", "Zephyr:7b"]
+
+    def test_filters_empty_strings_in_inputs(self):
+        # Defensive: probe might hand back a list with a "" element
+        # if a provider's response contains a malformed entry. Skip
+        # those rather than letting an empty dropdown row through.
+        result = attribution.compute_model_choices(
+            curated=["llama3.1:8b", ""],
+            extra=["", "qwen2.5:7b"],
+            current="",
+        )
+        assert "" not in result
+        assert result == ["llama3.1:8b", "qwen2.5:7b"]
+
+
 class TestHumanBytes:
     @pytest.mark.parametrize("size,expected", [
         (0, "0B"),

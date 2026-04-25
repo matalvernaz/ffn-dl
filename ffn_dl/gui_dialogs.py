@@ -1183,6 +1183,37 @@ class LlmSettingsDialog(wx.Dialog):
         "openai-compatible": "",
     }
 
+    # Curated starter list of models per provider. Picked for the
+    # tasks ffn-dl uses an LLM for (author's-note classification +
+    # audiobook speaker attribution): both want fast, instruction-
+    # tuned models with reliable JSON output. Ollama list spans 2GB
+    # to 9GB so the user can match their hardware. The dropdown is
+    # editable, so this is just a starting suggestion — users can
+    # always type a different name. The list is augmented at runtime
+    # by whatever models the probe finds (already installed for
+    # Ollama; available on the account for cloud providers).
+    _CURATED_MODELS = {
+        "ollama": [
+            "llama3.1:8b",       # 4.7 GB — solid all-rounder, the default
+            "llama3.2:3b",       # 2.0 GB — faster, smaller machines
+            "qwen2.5:7b",        # 4.4 GB — strong JSON output
+            "phi3.5:3.8b",       # 2.2 GB — fastest, good on CPU
+            "mistral:7b",        # 4.1 GB — classic baseline
+            "gemma2:9b",         # 5.4 GB — Google's tune
+        ],
+        "openai": [
+            "gpt-4o-mini",       # cheap + fast, the default for ffn-dl tasks
+            "gpt-4o",
+            "gpt-4-turbo",
+        ],
+        "anthropic": [
+            "claude-haiku-4-5",
+            "claude-sonnet-4-6",
+            "claude-opus-4-7",
+        ],
+        "openai-compatible": [],  # too vendor-specific to curate
+    }
+
     def __init__(self, parent, prefs):
         super().__init__(
             parent, title="LLM attribution settings", size=(620, 560),
@@ -1233,12 +1264,21 @@ class LlmSettingsDialog(wx.Dialog):
             wx.StaticText(root, label="&Model:"),
             0, wx.ALIGN_CENTER_VERTICAL,
         )
-        self.model_ctrl = wx.TextCtrl(root)
+        # Editable combo: curated list per provider so users have a
+        # sensible starting set without having to know any model
+        # names off the top of their head, but still typeable so a
+        # custom Ollama tag or a brand-new OpenAI release works
+        # without an ffn-dl update. Probe results merge in as the
+        # user clicks Test connection so the dropdown gradually
+        # reflects what's actually available in their environment.
+        self.model_ctrl = wx.ComboBox(root, style=wx.CB_DROPDOWN)
         self.model_ctrl.SetName("Model name")
         # Pull-model button enables/disables based on whether a name
         # is present, so refresh on every keystroke. EVT_TEXT fires
-        # for both typing and programmatic ``SetValue``.
+        # for both typing and ``SetValue``; EVT_COMBOBOX fires when
+        # the user picks from the dropdown.
         self.model_ctrl.Bind(wx.EVT_TEXT, self._on_model_change)
+        self.model_ctrl.Bind(wx.EVT_COMBOBOX, self._on_model_change)
         grid.Add(self.model_ctrl, 1, wx.EXPAND)
 
         grid.Add(
@@ -1337,10 +1377,39 @@ class LlmSettingsDialog(wx.Dialog):
         except ValueError:
             idx = 0
         self.provider_ctrl.SetSelection(idx)
-        self.model_ctrl.SetValue(self._prefs.get(self._p.KEY_LLM_MODEL) or "")
+        saved_model = self._prefs.get(self._p.KEY_LLM_MODEL) or ""
+        self._populate_model_choices(provider, current=saved_model)
         self.api_key_ctrl.SetValue(self._prefs.get(self._p.KEY_LLM_API_KEY) or "")
         self.endpoint_ctrl.SetValue(self._prefs.get(self._p.KEY_LLM_ENDPOINT) or "")
         self._refresh_hint()
+
+    def _populate_model_choices(
+        self,
+        provider: str,
+        *,
+        current: str | None = None,
+        extra: list[str] | None = None,
+    ) -> None:
+        """Refresh the Model combo's dropdown for ``provider``.
+
+        Delegates the merge/sort to
+        :func:`attribution.compute_model_choices` so the data shaping
+        is unit-testable without a running wx instance, then pushes
+        the result into the wx widget."""
+        from . import attribution
+
+        if current is None:
+            current = self.model_ctrl.GetValue().strip()
+
+        choices = attribution.compute_model_choices(
+            curated=self._CURATED_MODELS.get(provider, []),
+            extra=extra or [],
+            current=current,
+        )
+        self.model_ctrl.Set(choices)
+        # ``Set`` clears the textfield as a side effect on some wx
+        # ports, so explicitly restore what the user had typed.
+        self.model_ctrl.SetValue(current)
 
     def _selected_provider(self):
         idx = self.provider_ctrl.GetSelection()
@@ -1349,6 +1418,12 @@ class LlmSettingsDialog(wx.Dialog):
         return self._PROVIDER_KEYS[idx]
 
     def _on_provider_change(self, event):
+        # Repopulate the model dropdown for the new provider's
+        # curated set. Cloud → Ollama or vice-versa swaps the entire
+        # list of suggestions; we keep whatever the user already
+        # typed so a "saved before, switching providers to compare"
+        # workflow doesn't lose state.
+        self._populate_model_choices(self._selected_provider())
         self._refresh_hint()
         self._refresh_actions()
 
@@ -1503,6 +1578,15 @@ class LlmSettingsDialog(wx.Dialog):
             return
         prefix = "OK" if result.ok else "FAIL"
         self._append_status(f"  {prefix}: {result.detail}")
+        # Successful probe → fold the discovered model names into the
+        # Model dropdown so the user can pick from what's actually
+        # installed/available without retyping. "Available" means:
+        # already-pulled for Ollama, on-account for cloud providers.
+        if result.ok and result.models:
+            self._populate_model_choices(
+                self._selected_provider(),
+                extra=result.models,
+            )
         self._set_busy(False)
 
     def _on_install_ollama(self, event):
@@ -1589,6 +1673,13 @@ class LlmSettingsDialog(wx.Dialog):
             self._append_status(
                 f"  '{model}' is now installed. Save the dialog to use "
                 "it as your LLM model."
+            )
+            # Make sure the freshly-pulled model is in the dropdown
+            # for the next time the user opens it (it would already be
+            # there if they typed/picked it, but this also catches the
+            # case of a pull invoked via some future automation path).
+            self._populate_model_choices(
+                self._selected_provider(), extra=[model],
             )
         else:
             self._append_status(

@@ -1650,6 +1650,37 @@ def probe_llm_endpoint(
     )
 
 
+def compute_model_choices(
+    *,
+    curated: list[str],
+    extra: list[str],
+    current: str,
+) -> list[str]:
+    """Merge curated model suggestions, probe-discovered models, and
+    the user's currently-typed value into a single de-duplicated,
+    case-insensitively sorted list for the LLM settings dialog's
+    Model combo box.
+
+    Pure on lists/strings so the dropdown's content shaping can be
+    tested without spinning up wx. The ``current`` value is preserved
+    even when blank (no-op) so a user mid-type doesn't lose their
+    entry just because a background probe returned. Case-insensitive
+    sorting keeps ``Llama3.1`` and ``llama3.1`` adjacent in the
+    dropdown rather than at opposite ends.
+    """
+    seen: dict[str, None] = {}
+    for name in curated:
+        if name:
+            seen[name] = None
+    for name in extra:
+        if name:
+            seen[name] = None
+    current = (current or "").strip()
+    if current:
+        seen[current] = None
+    return sorted(seen.keys(), key=str.lower)
+
+
 def _llm_parse_speaker_map(reply: str) -> dict[str, dict]:
     """Pull a ``{"1": {"speaker": "Name", "emotion": "..."}}`` mapping
     out of the LLM reply.
