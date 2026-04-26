@@ -27,10 +27,22 @@ def _emit(progress: Callable[[str], None] | None, line: str) -> None:
     progress) is invisible to a postmortem of ``ffn-dl.log``. Routing
     through one helper keeps the two streams in sync — the on-screen
     text and the on-disk log say the same thing in the same order.
+
+    When ``progress`` is set, the line is already on its way to the
+    user (GUI status pane or CLI stdout). The ``ui_already_emitted``
+    marker on the log record tells display-side handlers (the GUI's
+    ``_WxLogHandler`` in particular) to skip it so it doesn't appear
+    twice. File handlers ignore the marker and capture the line as
+    normal.
     """
     if progress:
         progress(line)
-    logger.info(line.lstrip())
+        logger.info(
+            "%s", line.lstrip(),
+            extra={"ui_already_emitted": True},
+        )
+    else:
+        logger.info("%s", line.lstrip())
 
 
 def _safe_filename(name):

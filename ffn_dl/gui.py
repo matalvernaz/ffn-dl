@@ -54,6 +54,13 @@ class _WxLogHandler(logging.Handler):
         self._target = target
 
     def emit(self, record):
+        # Lines mirrored to the file logger by ``exporters._emit`` are
+        # already on their way to the GUI status pane via the progress
+        # callback — skip them here so the user doesn't see every
+        # ``[llm-an]`` (and similar) line twice. File handlers don't
+        # check this flag, so the on-disk transcript is still complete.
+        if getattr(record, "ui_already_emitted", False):
+            return
         try:
             msg = self.format(record)
         except Exception:

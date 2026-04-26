@@ -87,10 +87,18 @@ def install_ollama_via_winget(
     # Send every line to the user-facing callback AND the file logger
     # so a "what happened during install?" debug pass can read the
     # whole transcript out of ffn-dl.log without the GUI being open.
+    # When the callback is wired (the dialog hands us one), tag the
+    # log record so the GUI's wx-handler doesn't echo the line a
+    # second time into the status pane.
     def log(line: str) -> None:
         if log_callback:
             log_callback(line)
-        logger.info("ollama-install: %s", line)
+            logger.info(
+                "ollama-install: %s", line,
+                extra={"ui_already_emitted": True},
+            )
+        else:
+            logger.info("ollama-install: %s", line)
 
     if not winget_supported():
         logger.info("ollama-install: winget unsupported on this platform")
@@ -226,7 +234,12 @@ def pull_ollama_model(
     def log(line: str) -> None:
         if progress_callback:
             progress_callback(line)
-        logger.info("ollama-pull: %s", line)
+            logger.info(
+                "ollama-pull: %s", line,
+                extra={"ui_already_emitted": True},
+            )
+        else:
+            logger.info("ollama-pull: %s", line)
 
     base = (endpoint or "").strip().rstrip("/") or "http://localhost:11434"
     url = f"{base}/api/pull"
