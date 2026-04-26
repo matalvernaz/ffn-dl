@@ -201,6 +201,213 @@ class TestStructuralNoteStripping:
         assert self._strip(html).count("<p>") == 2
 
 
+class TestChapterHeaderCutoff:
+    """Common-sense rule: a standalone "Chapter N" / "Chapter Three" /
+    "Prologue" header in the top half of the chapter is a reliable
+    boundary — everything before it is fic-front-matter (disclaimers,
+    "I own nothing"). The Si Vis Pacem fic uses spelled-out numerals
+    ("Chapter One:") with a fic-title prefix; the digit-only banner
+    regex used by the existing structural pass missed those."""
+
+    def _strip(self, html):
+        from ffn_dl.exporters import strip_note_paragraphs
+        return strip_note_paragraphs(html)
+
+    def test_strips_disclaimer_before_chapter_header(self):
+        # Real Si Vis Pacem chapter 1 shape.
+        html = (
+            "<p>I own nothing.</p>"
+            "<p>Si Vis Pacem, Para Bellum</p>"
+            "<p>-Chapter One:</p>"
+            "<p>Harry Potter leaned back in his seat.</p>"
+            "<p>Hermione frowned at him.</p>"
+            "<p>The train rolled north.</p>"
+            "<p>The Hogwarts Express crossed the bridge.</p>"
+        )
+        out = self._strip(html)
+        assert "I own nothing" not in out
+        assert "Para Bellum" not in out
+        assert "Chapter One" not in out
+        # Story prose preserved.
+        assert "Harry Potter leaned back" in out
+        assert "Hermione frowned" in out
+
+    def test_strips_through_digit_chapter_banner(self):
+        html = (
+            "<p>Disclaimer.</p>"
+            "<p>Chapter 5</p>"
+            "<p>Story content here.</p>"
+            "<p>More content.</p>"
+            "<p>Closing line.</p>"
+            "<p>Final paragraph.</p>"
+        )
+        out = self._strip(html)
+        assert "Disclaimer" not in out
+        assert "Chapter 5" not in out
+        assert "Story content here" in out
+
+    def test_strips_through_prologue_header(self):
+        html = (
+            "<p>I own nothing.</p>"
+            "<p>Prologue</p>"
+            "<p>The story begins.</p>"
+            "<p>Two characters meet.</p>"
+            "<p>They speak.</p>"
+            "<p>They part.</p>"
+        )
+        out = self._strip(html)
+        assert "I own nothing" not in out
+        assert "Prologue" not in out
+        assert "The story begins" in out
+
+    def test_does_not_strip_chapter_word_in_prose(self):
+        # A long paragraph mentioning "chapter five of his life" must
+        # NOT trigger the cutoff — length cap blocks it.
+        html = (
+            "<p>This is the first sentence of the story.</p>"
+            "<p>This was the start of chapter five of his life, "
+            "and the long paragraph kept going to make sure the "
+            "length cap rejects it as a banner candidate.</p>"
+            "<p>He sighed and closed his eyes.</p>"
+            "<p>The room was quiet.</p>"
+        )
+        out = self._strip(html)
+        # All three paragraphs preserved.
+        assert "first sentence" in out
+        assert "chapter five of his life" in out
+        assert "He sighed" in out
+
+    def test_does_not_strip_when_banner_in_bottom_half(self):
+        # Hypothetical: a paragraph reading "Chapter 1" appears in
+        # the bottom half (e.g. a flashback's title). Top-half gate
+        # protects the chapter — no cutoff fires.
+        html = (
+            "<p>The first paragraph.</p>"
+            "<p>The second paragraph.</p>"
+            "<p>The third paragraph.</p>"
+            "<p>The fourth paragraph.</p>"
+            "<p>The fifth paragraph.</p>"
+            "<p>Chapter 1</p>"
+            "<p>The seventh paragraph.</p>"
+        )
+        out = self._strip(html)
+        # Banner is at index 5 of 7, not in top half — no cutoff.
+        assert "first paragraph" in out
+        assert "Chapter 1" in out
+
+
+class TestEndMarkerCutoff:
+    """Mirror of the chapter-header rule: a standalone "-End", "Fin",
+    "TBC" paragraph in the bottom half cuts everything from there
+    onward as back-matter."""
+
+    def _strip(self, html):
+        from ffn_dl.exporters import strip_note_paragraphs
+        return strip_note_paragraphs(html)
+
+    def test_strips_outro_after_end_marker(self):
+        # Si Vis Pacem chapter 42 shape.
+        html = (
+            "<p>The crowd roared as Hermione stood over her opponent.</p>"
+            "<p>'Should we tell him to stop?' she wondered.</p>"
+            "<p>'You think that guy cares?' her partner replied.</p>"
+            "<p>-End</p>"
+            "<p>Author's quickie drunken rambling. I don't like dentists.</p>"
+            "<p>I've broken toes, fingers, noses and ribs.</p>"
+            "<p>Love you. Fuck you. Goodnight!</p>"
+            "<p>-Uncle Jack</p>"
+        )
+        out = self._strip(html)
+        assert "crowd roared" in out
+        assert "Should we tell" in out
+        assert "-End" not in out
+        assert "drunken rambling" not in out
+        assert "broken toes" not in out
+        assert "Uncle Jack" not in out
+
+    def test_strips_fin_marker(self):
+        html = (
+            "<p>Para one.</p><p>Para two.</p>"
+            "<p>Para three.</p><p>Para four.</p>"
+            "<p>Para five.</p><p>Para six.</p>"
+            "<p>The final scene.</p>"
+            "<p>Fin.</p>"
+            "<p>This was a fun story to write!</p>"
+            "<p>See you in the sequel.</p>"
+        )
+        out = self._strip(html)
+        assert "final scene" in out
+        assert "Fin." not in out
+        assert "fun story to write" not in out
+        assert "see you in the sequel" not in out.lower()
+
+    def test_strips_tbc_marker(self):
+        html = (
+            "<p>One.</p><p>Two.</p><p>Three.</p><p>Four.</p>"
+            "<p>The cliffhanger lands.</p>"
+            "<p>TBC</p>"
+            "<p>Catch you next week, lovely readers!</p>"
+        )
+        out = self._strip(html)
+        assert "cliffhanger lands" in out
+        assert "TBC" not in out
+        assert "lovely readers" not in out
+
+    def test_does_not_strip_end_marker_in_top_half(self):
+        # An "End." in the top half (rare — flashback ending early)
+        # must not cause the rest of the chapter to disappear.
+        html = (
+            "<p>End.</p>"
+            "<p>The story actually starts here.</p>"
+            "<p>Plenty of content follows.</p>"
+            "<p>And more.</p>"
+            "<p>And still more.</p>"
+            "<p>Even more content for length.</p>"
+        )
+        out = self._strip(html)
+        # End. is in top half — bottom-half gate blocks the cutoff.
+        # Story content survives intact.
+        assert "story actually starts here" in out
+        assert "Plenty of content" in out
+
+    def test_does_not_strip_end_word_in_prose(self):
+        # A long paragraph mentioning "the end of an era" mustn't
+        # trigger the cutoff — length cap blocks it.
+        html = (
+            "<p>One.</p><p>Two.</p><p>Three.</p><p>Four.</p>"
+            "<p>It was the end of an era for the kingdom and the "
+            "long-paragraph form of this sentence ensures the "
+            "length cap rejects it as an end marker candidate.</p>"
+            "<p>The next chapter of his life began.</p>"
+        )
+        out = self._strip(html)
+        assert "end of an era" in out
+        assert "next chapter of his life" in out
+
+    def test_combined_chapter_header_and_end_marker(self):
+        # Both rules fire — strip leading disclaimer, strip trailing
+        # rambles, keep the prose between.
+        html = (
+            "<p>I own nothing.</p>"
+            "<p>Chapter 7</p>"
+            "<p>Story prose paragraph one.</p>"
+            "<p>Story prose paragraph two.</p>"
+            "<p>The climactic moment.</p>"
+            "<p>The resolution.</p>"
+            "<p>-End-</p>"
+            "<p>Author's notes section.</p>"
+            "<p>Patreon plug.</p>"
+        )
+        out = self._strip(html)
+        assert "I own nothing" not in out
+        assert "Chapter 7" not in out
+        assert "Story prose paragraph one" in out
+        assert "climactic moment" in out
+        assert "End" not in out
+        assert "Author's notes" not in out
+        assert "Patreon" not in out
+
+
 class TestNewLabelStripping:
     """Prefix-pass labels added in 2.2.4 to plug the leaks the regex
     used to miss in real FFN files (Disclaimer, Quick Note,

@@ -682,6 +682,76 @@ _END_BANNER_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+
+# Common-sense structural cutoffs.
+#
+# A *header* paragraph that names the chapter ("Chapter 1",
+# "Chapter One", "Prologue", "Si Vis Pacem - Chapter Three:") is a
+# reliable boundary: everything before it is fic-front-matter
+# (disclaimers, "I own nothing", author intros). An *end* paragraph
+# ("-End", "End of Chapter", "Fin", "TBC") is the mirror: everything
+# from it onward is back-matter (rambles, "thanks for reading",
+# Patreon plugs, sign-offs).
+#
+# Both regexes use ``re.search`` (not ``match``) and a length cap so
+# a paragraph reading "He turned to chapter five of his book." can't
+# masquerade as a banner. ``\d+|<spelled>`` covers FFN's mix of
+# digits and word numerals — the user reported "Si Vis Pacem -
+# Chapter One:" specifically, which the digit-only ``_TOP_BANNER_RE``
+# above missed.
+_CHAPTER_HEADER_RE = re.compile(
+    r"""\b(?:
+        chapter\s+
+        (?:
+            \d+
+            | one | two | three | four | five | six | seven | eight | nine | ten
+            | eleven | twelve | thirteen | fourteen | fifteen | sixteen
+            | seventeen | eighteen | nineteen | twenty
+            | twenty[-\s]?(?:one|two|three|four|five|six|seven|eight|nine)
+            | thirty | forty | fifty
+        )
+        | ch\.?\s*\d+
+        | prologue | epilogue
+        | part\s+\d+
+    )\b""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Length caps for the standalone-marker check. A real chapter header
+# rarely exceeds 100 chars; an end marker is even tighter — usually a
+# few characters. The caps keep mid-prose sentences ("the end of his
+# patience", "she ran into Chapter House") from triggering a strip.
+_CHAPTER_HEADER_MAX_LEN = 100
+_END_MARKER_MAX_LEN = 60
+
+
+def _is_chapter_header_paragraph(text: str) -> bool:
+    """``True`` when the paragraph's whole text is a chapter banner.
+
+    Two corroborating signals are required: the paragraph matches
+    the chapter-header regex AND it's short enough to be standalone
+    (story prose containing the words ``chapter five`` is much
+    longer than a banner). False positives here strip real prose, so
+    the gate is intentionally conservative.
+    """
+    s = (text or "").strip()
+    if not s or len(s) > _CHAPTER_HEADER_MAX_LEN:
+        return False
+    return bool(_CHAPTER_HEADER_RE.search(s))
+
+
+def _is_end_marker_paragraph(text: str) -> bool:
+    """``True`` when the paragraph's whole text is an end-of-chapter
+    marker. Same two-signal logic as the chapter header check, with
+    a tighter length cap because outros are usually a few characters
+    (``-End``, ``Fin``, ``TBC``). Reuses ``_END_BANNER_RE`` so the
+    existing bottom-structural pass and this new one stay in
+    lockstep on what counts as an end signal."""
+    s = (text or "").strip()
+    if not s or len(s) > _END_MARKER_MAX_LEN:
+        return False
+    return bool(_END_BANNER_RE.match(s))
+
 # Phrases that almost always appear in an author's note and virtually
 # never appear in narrative prose. Multi-word where possible — single
 # words would misfire (``patron`` shows up in fantasy prose, ``review``
@@ -887,6 +957,27 @@ def strip_note_paragraphs(html: str) -> str:
 
     top_drop_end = -1  # last index the top pass consumed (-1 = untouched)
 
+    # Pass 2-pre (head): chapter-banner cutoff. If the chapter has a
+    # standalone "Chapter N" / "Chapter Three" / "Prologue" header
+    # paragraph in its top half, everything before and including
+    # that header is fic-front-matter (disclaimers, "I own nothing",
+    # author intros). Strip it. Two-signal gate: header-regex match
+    # AND positional (top half), so a flashback titled "Chapter Five"
+    # mid-prose can't trigger a chapter-gutting strip.
+    n_top = len(top_level)
+    if n_top >= 4:
+        head_limit = n_top // 2
+        for i, item in enumerate(top_level[:head_limit]):
+            kind, node = item
+            if kind != "tag":
+                continue
+            text = node.get_text(" ", strip=True)
+            if text and _is_chapter_header_paragraph(text):
+                for it in top_level[: i + 1]:
+                    _drop(it)
+                top_drop_end = i
+                break
+
     # Pass 2a: top structural — divider + Chapter banner + note signal.
     if divider_indexes:
         first = divider_indexes[0]
@@ -951,6 +1042,41 @@ def strip_note_paragraphs(html: str) -> str:
                             outro_start = last - 1
                 for item in top_level[outro_start:]:
                     _drop(item)
+
+    # Pass 4 (tail): end-marker cutoff. If the chapter has a
+    # standalone "-End" / "Fin" / "TBC" paragraph past the first
+    # 25%, everything from there onward is back-matter — outro
+    # rambles, "thanks for reading", Patreon plugs, sign-offs.
+    # Two-signal gate: end-marker regex match AND positional
+    # (past the first quarter), so a sentence like "the end of an
+    # era" near the start can't trigger.
+    #
+    # Forward walk so the *first* marker past the floor wins: the
+    # marker is a structural separator the author placed before
+    # their A/N, and the A/N itself can contain phrases the regex
+    # would also match (e.g. "to be continued in the sequel").
+    # Cutting at the first match keeps the entire post-marker A/N
+    # block in the strip.
+    #
+    # 25% (vs. the chapter-header rule's 50%) because end markers
+    # appear naturally in the trailing region of any chapter while
+    # chapter headers MUST be near the top to be banners — looser
+    # gate is safe for the tail, would over-fire on a leading
+    # flashback labelled "Chapter Five".
+    if n_top >= 4:
+        bottom_floor = max(1, n_top // 4)
+        for i in range(bottom_floor, n_top):
+            kind, node = top_level[i]
+            if kind != "tag":
+                continue
+            # Skip nodes already dropped by an earlier pass.
+            if not getattr(node, "name", None):
+                continue
+            text = node.get_text(" ", strip=True)
+            if text and _is_end_marker_paragraph(text):
+                for it in top_level[i:]:
+                    _drop(it)
+                break
 
     return str(soup)
 
