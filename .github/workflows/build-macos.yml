@@ -1,11 +1,11 @@
 name: Build macOS Binary
 
-# Produces a portable macOS arm64 binary (ffn-dl folder, tar.gz
-# bundled) for each v-tag release. Apple-Silicon only — Intel Mac
-# users install via pip. Accessibility: wxPython on macOS wraps
-# native Cocoa widgets, which VoiceOver reads the same way it
-# reads any macOS app; the CLI is clean text and works in any
-# VoiceOver'd Terminal session.
+# Produces a clickable macOS arm64 ``.app`` bundle for each v-tag
+# release. Apple-Silicon only — Intel Mac users install via pip.
+# Accessibility: wxPython on macOS wraps native Cocoa widgets, which
+# VoiceOver reads the same way it reads any macOS app; CLI users can
+# still invoke the binary inside the bundle directly
+# (``ffn-dl.app/Contents/MacOS/ffn-dl --url ...``).
 #
 # The build is unsigned — users hit Gatekeeper on first launch.
 # Code-signing + notarization would need a paid Apple Developer
@@ -57,12 +57,20 @@ jobs:
           pip install ".[all]"
           pip install pyinstaller
 
-      - name: Build executable
-        # --collect-submodules ffn_dl scoops up every submodule
-        # under the package so new files land in the binary
-        # without maintaining a hidden-import list.
+      - name: Build app bundle
+        # ``--windowed`` is the macOS-specific flag that wraps the
+        # ``--onedir`` output in a proper ``.app`` bundle so Finder
+        # treats it as an application: double-clickable, draggable
+        # to /Applications, no Terminal window pops up at launch.
+        # Without it, PyInstaller produces a bare directory of
+        # binaries that CLI users can run but GUI users can't open
+        # the normal way.
+        #
+        # ``--collect-submodules ffn_dl`` scoops up every submodule
+        # under the package so new files land in the bundle without
+        # maintaining a hidden-import list.
         run: |
-          pyinstaller --onedir --name ffn-dl --console \
+          pyinstaller --onedir --name ffn-dl --windowed \
             --add-binary "ffmpeg_bin/ffmpeg:." \
             --add-binary "ffmpeg_bin/ffprobe:." \
             --collect-submodules ffn_dl \
@@ -74,25 +82,30 @@ jobs:
             --collect-all wx \
             ffn_dl/__main__.py
 
-      - name: Smoke-test executable
-        run: dist/ffn-dl/ffn-dl --help
+      - name: Smoke-test bundle
+        # --windowed builds put the binary inside Contents/MacOS;
+        # CLI users will invoke it the same way.
+        run: dist/ffn-dl.app/Contents/MacOS/ffn-dl --help
 
       - name: Package
-        # tar.gz preserves the executable bit; unlike a zip on
-        # macOS, users can extract with the default Archive
-        # Utility and the binary stays runnable.
+        # ``ditto`` preserves macOS metadata (extended attributes,
+        # the executable bit, resource forks) that a plain ``zip``
+        # can mangle on .app bundles — without it the unzipped app
+        # sometimes refuses to launch with "damaged" errors before
+        # Gatekeeper even gets a chance to weigh in.
         run: |
-          cd dist && tar czf ffn-dl-macos-arm64.tar.gz ffn-dl
-          ls -la ffn-dl-macos-arm64.tar.gz
+          cd dist
+          ditto -c -k --keepParent --sequesterRsrc ffn-dl.app ffn-dl-macos-arm64.zip
+          ls -la ffn-dl-macos-arm64.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ffn-dl-macos-arm64
-          path: dist/ffn-dl-macos-arm64.tar.gz
+          path: dist/ffn-dl-macos-arm64.zip
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ffn-dl-macos-arm64.tar.gz
+          files: dist/ffn-dl-macos-arm64.zip
