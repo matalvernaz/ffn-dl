@@ -244,6 +244,19 @@ _OLLAMA_PULL_TIMEOUT_S = 30.0
 download can take many minutes on a slow link, but each chunk should
 land within seconds — a long stall means the connection wedged."""
 
+_OLLAMA_PULL_HEARTBEAT_TIMEOUTS = 4
+"""Number of consecutive read timeouts (~2 min at the 30s default)
+before re-emitting the current phase as a heartbeat. The
+``verifying sha256 digest`` step on an 8 GB model takes several
+minutes with no stream activity; without a heartbeat the user sees a
+frozen log and assumes the pull crashed."""
+
+_OLLAMA_PULL_MAX_SILENCE_TIMEOUTS = 40
+"""Hard ceiling on consecutive read timeouts (~20 min at the 30s
+default) before declaring the stream wedged and returning ``False``.
+Separates 'slow disk verifying a huge model' from 'connection
+genuinely dead' so we don't loop forever on a half-closed socket."""
+
 
 def pull_ollama_model(
     *,
@@ -317,7 +330,17 @@ def pull_ollama_model(
             log(f"  Endpoint unreachable: {exc}. Start Ollama and try again.")
             return False
 
-        ok = _consume_ollama_pull_stream(resp, log)
+        try:
+            ok = _consume_ollama_pull_stream(resp, log)
+        except (TimeoutError, OSError) as exc:
+            # The consumer absorbs per-chunk timeouts internally; this
+            # net only catches an outright socket error (connection
+            # reset, partial close, etc.) so the worker thread reports
+            # cleanly instead of dying silently and leaving the GUI
+            # stuck in its "busy" state.
+            logger.warning("ollama-pull: stream read failed: %s", exc)
+            log(f"  Stream read failed: {exc}")
+            return False
         logger.info("ollama-pull: finished ok=%s model=%s", ok, model)
         return ok
     finally:
@@ -327,6 +350,9 @@ def pull_ollama_model(
 def _consume_ollama_pull_stream(
     resp,
     log: Callable[[str], None],
+    *,
+    heartbeat_after: int = _OLLAMA_PULL_HEARTBEAT_TIMEOUTS,
+    max_silence: int = _OLLAMA_PULL_MAX_SILENCE_TIMEOUTS,
 ) -> bool:
     """Drain a streaming ``/api/pull`` response into ``log`` and return
     whether the pull succeeded.
@@ -336,15 +362,49 @@ def _consume_ollama_pull_stream(
     deduplication logic — only emit on phase change or 5% step — lives
     here too so the same shaping that ships in the GUI is what we
     pin in tests.
+
+    Reads via ``readline()`` rather than ``for raw in resp`` so a
+    per-chunk socket timeout doesn't poison the iterator. Phases like
+    ``verifying sha256 digest`` emit one status line then go silent
+    for the full hash duration — minutes on a multi-GB model on slow
+    storage — which blows past the 30s read timeout repeatedly. We
+    treat each timeout as a heartbeat tick, re-emitting the current
+    phase every ``heartbeat_after`` ticks so the user sees the
+    dialog is alive, and only declare the stream dead after
+    ``max_silence`` consecutive ticks.
     """
     import json as _json
+    import socket as _socket
 
     last_status = ""
     last_pct_bucket = -1
     saw_success = False
+    consecutive_timeouts = 0
 
     with resp:
-        for raw in resp:
+        while True:
+            try:
+                raw = resp.readline()
+            except (TimeoutError, _socket.timeout):
+                consecutive_timeouts += 1
+                if consecutive_timeouts >= max_silence:
+                    log(
+                        f"  Stream stalled "
+                        f"({int(max_silence * _OLLAMA_PULL_TIMEOUT_S)}s "
+                        "without progress) — aborting."
+                    )
+                    return False
+                if (
+                    consecutive_timeouts % heartbeat_after == 0
+                    and last_status
+                ):
+                    log(f"  still {last_status}...")
+                continue
+
+            if not raw:
+                break  # EOF
+            consecutive_timeouts = 0
+
             line = raw.decode("utf-8", errors="replace").strip()
             if not line:
                 continue

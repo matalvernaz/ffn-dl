@@ -446,10 +446,18 @@ class TestInstallOllamaUnsupportedPlatform:
 class _FakePullStream:
     """Drives :func:`_consume_ollama_pull_stream` with a fixed list of
     JSON-line bytes. Mirrors the urlopen response interface enough to
-    let the helper iterate and ``with``-enter."""
+    let the helper iterate and ``with``-enter.
 
-    def __init__(self, lines: list[bytes]):
+    Items in ``lines`` may be either ``bytes`` (a normal chunk) or a
+    callable taking no arguments (called when ``readline`` reaches it
+    — used to inject ``socket.timeout`` mid-stream so we can pin the
+    consumer's heartbeat / silence-cap behaviour without spinning up
+    a real network).
+    """
+
+    def __init__(self, lines):
         self._lines = list(lines)
+        self._idx = 0
 
     def __enter__(self):
         return self
@@ -457,8 +465,14 @@ class _FakePullStream:
     def __exit__(self, *_):
         return False
 
-    def __iter__(self):
-        return iter(self._lines)
+    def readline(self) -> bytes:
+        if self._idx >= len(self._lines):
+            return b""  # EOF — matches http.client.HTTPResponse semantics
+        item = self._lines[self._idx]
+        self._idx += 1
+        if callable(item):
+            return item()  # may raise (e.g. socket.timeout)
+        return item
 
 
 def _evt(payload: dict) -> bytes:
@@ -568,6 +582,59 @@ class TestConsumePullStream:
         assert ok is True
         # The garbage line is logged verbatim rather than crashing.
         assert any("not json" in line for line in captured)
+
+    def test_read_timeout_does_not_kill_stream(self):
+        # The bug this guards: ``verifying sha256 digest`` emits one
+        # status line then Ollama goes silent for the duration of the
+        # hash. On a multi-GB model on slow storage that's minutes —
+        # well past the 30s read timeout. Before the fix a
+        # ``socket.timeout`` from ``readline()`` escaped the consumer
+        # and killed the worker thread silently. Now the consumer
+        # absorbs the timeout, waits for the next chunk, and finishes
+        # cleanly when ``success`` arrives.
+        import socket
+        captured: list[str] = []
+        stream = _FakePullStream([
+            _evt({"status": "verifying sha256 digest"}),
+            lambda: (_ for _ in ()).throw(socket.timeout("read timeout")),
+            lambda: (_ for _ in ()).throw(socket.timeout("read timeout")),
+            _evt({"status": "success"}),
+        ])
+        ok = ollama_install._consume_ollama_pull_stream(
+            stream, captured.append,
+            heartbeat_after=2,  # second timeout triggers a heartbeat
+            max_silence=10,
+        )
+        assert ok is True
+        assert any("success" in line for line in captured)
+        # The 2nd consecutive timeout should re-emit the phase as
+        # reassurance that the dialog is alive.
+        assert any(
+            "still verifying sha256 digest" in line for line in captured
+        )
+
+    def test_silence_cap_aborts_with_clear_message(self):
+        # If timeouts keep coming with no further data — actual dead
+        # connection rather than slow verify — we eventually give up
+        # rather than looping forever, and surface a message the user
+        # can act on instead of a frozen log.
+        import socket
+        captured: list[str] = []
+        timeouts = [
+            (lambda: (_ for _ in ()).throw(socket.timeout("read timeout")))
+            for _ in range(5)
+        ]
+        stream = _FakePullStream([
+            _evt({"status": "verifying sha256 digest"}),
+            *timeouts,
+        ])
+        ok = ollama_install._consume_ollama_pull_stream(
+            stream, captured.append,
+            heartbeat_after=10,  # don't trigger heartbeats in this test
+            max_silence=3,
+        )
+        assert ok is False
+        assert any("stalled" in line.lower() for line in captured)
 
 
 class TestActivePullsRegistry:
