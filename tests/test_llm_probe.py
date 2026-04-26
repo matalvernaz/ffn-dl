@@ -637,6 +637,59 @@ class TestPullOllamaModel:
         assert any("downloading" in line for line in captured)
 
 
+class TestLlmProviderPrefKeys:
+    """Per-provider pref-key computation. The dialog uses these to
+    archive each provider's (model, api_key, endpoint) separately so
+    switching the provider dropdown doesn't clobber the previous
+    provider's saved credentials."""
+
+    def test_keys_for_each_supported_provider(self):
+        from ffn_dl.prefs import llm_provider_pref_keys
+        for provider in ("ollama", "openai", "anthropic"):
+            model_k, api_k, ep_k = llm_provider_pref_keys(provider)
+            assert model_k == f"llm_{provider}_model"
+            assert api_k == f"llm_{provider}_api_key"
+            assert ep_k == f"llm_{provider}_endpoint"
+
+    def test_hyphenated_provider_slugified(self):
+        # ``openai-compatible`` must produce wx.Config-safe key
+        # names — hyphens have no semantic meaning in pref keys, so
+        # collapse to underscores.
+        from ffn_dl.prefs import llm_provider_pref_keys
+        keys = llm_provider_pref_keys("openai-compatible")
+        assert keys == (
+            "llm_openai_compatible_model",
+            "llm_openai_compatible_api_key",
+            "llm_openai_compatible_endpoint",
+        )
+
+    def test_uppercase_provider_lowercased(self):
+        from ffn_dl.prefs import llm_provider_pref_keys
+        keys = llm_provider_pref_keys("OpenAI")
+        assert keys[0] == "llm_openai_model"
+
+    def test_empty_provider_falls_back_to_default_slug(self):
+        # Defensive: never produce the bare keys ``llm__model`` etc.
+        # — those would collide across "no provider" instances.
+        from ffn_dl.prefs import llm_provider_pref_keys
+        keys = llm_provider_pref_keys("")
+        assert keys == (
+            "llm_default_model",
+            "llm_default_api_key",
+            "llm_default_endpoint",
+        )
+
+    def test_keys_are_distinct_across_providers(self):
+        from ffn_dl.prefs import llm_provider_pref_keys
+        all_keys = set()
+        for provider in (
+            "ollama", "openai", "anthropic", "openai-compatible",
+        ):
+            all_keys.update(llm_provider_pref_keys(provider))
+        # 4 providers * 3 keys each = 12 distinct keys.
+        assert len(all_keys) == 12
+
+
 class TestComputeModelChoices:
     """Pure data-shaping for the dialog's Model combo dropdown."""
 

@@ -8,6 +8,34 @@ behaves the same as it always has. Either way the accessor methods
 below stay identical.
 """
 
+import re as _re
+
+
+def llm_provider_pref_keys(provider: str) -> tuple[str, str, str]:
+    """Compute the per-provider ``(model, api_key, endpoint)`` pref
+    keys used by the LLM settings dialog to keep each provider's
+    credentials separate.
+
+    The active provider's values are still mirrored into the legacy
+    ``llm_model`` / ``llm_api_key`` / ``llm_endpoint`` keys that the
+    rest of the app reads — these per-provider keys are an *archive*
+    so a user with both an OpenAI and an Anthropic key doesn't lose
+    one when switching the dropdown.
+
+    Provider names are slugified (``openai-compatible`` →
+    ``openai_compatible``) so wx.Config sees stable, separator-free
+    key names regardless of how the provider id is spelled. Pure
+    function on a string so it's testable without wx.
+    """
+    slug = _re.sub(r"[^a-z0-9]+", "_", provider.lower()).strip("_")
+    if not slug:
+        slug = "default"
+    return (
+        f"llm_{slug}_model",
+        f"llm_{slug}_api_key",
+        f"llm_{slug}_endpoint",
+    )
+
 KEY_NAME_TEMPLATE = "name_template"
 KEY_FORMAT = "format"
 KEY_OUTPUT_DIR = "output_dir"

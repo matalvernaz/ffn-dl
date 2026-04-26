@@ -1400,11 +1400,53 @@ class LlmSettingsDialog(wx.Dialog):
         except ValueError:
             idx = 0
         self.provider_ctrl.SetSelection(idx)
-        saved_model = self._prefs.get(self._p.KEY_LLM_MODEL) or ""
-        self._populate_model_choices(provider, current=saved_model)
-        self.api_key_ctrl.SetValue(self._prefs.get(self._p.KEY_LLM_API_KEY) or "")
-        self.endpoint_ctrl.SetValue(self._prefs.get(self._p.KEY_LLM_ENDPOINT) or "")
+        # Track which provider is currently *displayed* in the dialog
+        # so ``_on_provider_change`` knows whose archive to stash to
+        # before loading the new selection's saved values.
+        self._displayed_provider = provider
+        self._load_provider_into_fields(provider)
         self._refresh_hint()
+
+    def _load_provider_into_fields(self, provider: str) -> None:
+        """Populate model / api-key / endpoint fields with the saved
+        values for ``provider``. Falls back to the legacy single-slot
+        prefs the first time a user opens this dialog after the
+        per-provider archive was added — so existing creds aren't
+        forgotten on upgrade."""
+        from .prefs import llm_provider_pref_keys
+        model_k, api_k, endpoint_k = llm_provider_pref_keys(provider)
+        model = self._prefs.get(model_k) or ""
+        api_key = self._prefs.get(api_k) or ""
+        endpoint = self._prefs.get(endpoint_k) or ""
+        # Migration fallback: only consult the legacy single-slot
+        # keys when the per-provider archive is empty AND the
+        # legacy prefs were saved for THIS provider — otherwise an
+        # OpenAI key would leak into an Anthropic dropdown.
+        legacy_provider = (
+            self._prefs.get(self._p.KEY_LLM_PROVIDER) or ""
+        ).strip()
+        if legacy_provider == provider:
+            if not model:
+                model = self._prefs.get(self._p.KEY_LLM_MODEL) or ""
+            if not api_key:
+                api_key = self._prefs.get(self._p.KEY_LLM_API_KEY) or ""
+            if not endpoint:
+                endpoint = self._prefs.get(self._p.KEY_LLM_ENDPOINT) or ""
+
+        self._populate_model_choices(provider, current=model)
+        self.api_key_ctrl.SetValue(api_key)
+        self.endpoint_ctrl.SetValue(endpoint)
+
+    def _stash_provider_from_fields(self, provider: str) -> None:
+        """Persist the dialog's current field values to ``provider``'s
+        per-provider archive without writing to the legacy active
+        slot. Called when the user is about to switch providers so
+        the outgoing provider's creds are remembered."""
+        from .prefs import llm_provider_pref_keys
+        model_k, api_k, endpoint_k = llm_provider_pref_keys(provider)
+        self._prefs.set(model_k, self.model_ctrl.GetValue().strip())
+        self._prefs.set(api_k, self.api_key_ctrl.GetValue().strip())
+        self._prefs.set(endpoint_k, self.endpoint_ctrl.GetValue().strip())
 
     def _populate_model_choices(
         self,
@@ -1441,12 +1483,18 @@ class LlmSettingsDialog(wx.Dialog):
         return self._PROVIDER_KEYS[idx]
 
     def _on_provider_change(self, event):
-        # Repopulate the model dropdown for the new provider's
-        # curated set. Cloud → Ollama or vice-versa swaps the entire
-        # list of suggestions; we keep whatever the user already
-        # typed so a "saved before, switching providers to compare"
-        # workflow doesn't lose state.
-        self._populate_model_choices(self._selected_provider())
+        # Stash the OUTGOING provider's currently-displayed values to
+        # its per-provider archive before swapping in the incoming
+        # provider's saved values. Without this, switching from
+        # OpenAI → Anthropic would either leak the OpenAI key into
+        # the Anthropic dropdown OR clobber it on the next Save —
+        # both real bugs Matt reported.
+        outgoing = getattr(self, "_displayed_provider", None)
+        new_provider = self._selected_provider()
+        if outgoing and outgoing != new_provider:
+            self._stash_provider_from_fields(outgoing)
+        self._displayed_provider = new_provider
+        self._load_provider_into_fields(new_provider)
         self._refresh_hint()
         self._refresh_actions()
 
@@ -1509,10 +1557,18 @@ class LlmSettingsDialog(wx.Dialog):
             )
             if choice != wx.YES:
                 return
+        # Active settings — what the rest of the app reads when
+        # making LLM calls. Always reflect the currently-selected
+        # provider on Save.
         self._prefs.set(self._p.KEY_LLM_PROVIDER, provider)
         self._prefs.set(self._p.KEY_LLM_MODEL, model)
         self._prefs.set(self._p.KEY_LLM_API_KEY, api_key)
         self._prefs.set(self._p.KEY_LLM_ENDPOINT, endpoint)
+        # Per-provider archive — keeps creds for non-active providers
+        # alive across switches. Without this, "I have my OpenAI key
+        # AND my Anthropic key" stops working as soon as the user
+        # picks one provider over the other.
+        self._stash_provider_from_fields(provider)
         self.EndModal(wx.ID_OK)
 
     # ── Actions: test / install / download ──────────────────────
