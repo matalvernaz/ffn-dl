@@ -23,9 +23,44 @@ import logging
 import shutil
 import subprocess
 import sys
+import threading
 from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+
+# Process-wide tally of currently-running ``pull_ollama_model`` calls
+# so the GUI can warn the user before closing a window or the whole
+# app while one is mid-flight. Closing the dialog the pull was kicked
+# off from doesn't actually stop the pull — the worker is a daemon
+# thread holding an open HTTP stream — but exiting the app does kill
+# the daemon mid-download, leaving the user with a partial weight
+# file Ollama then has to redo. The counter is the cheapest signal
+# the close-handlers can read; per-pull metadata isn't useful since
+# we never need to identify a specific pull.
+_active_pulls_lock = threading.Lock()
+_active_pull_count = 0
+
+
+def has_active_pulls() -> bool:
+    """``True`` while at least one ``pull_ollama_model`` call is
+    running. Read by the LLM settings dialog and the main frame's
+    close handler so both can prompt the user before tearing down
+    the GUI mid-pull."""
+    with _active_pulls_lock:
+        return _active_pull_count > 0
+
+
+def _enter_pull() -> None:
+    global _active_pull_count
+    with _active_pulls_lock:
+        _active_pull_count += 1
+
+
+def _exit_pull() -> None:
+    global _active_pull_count
+    with _active_pulls_lock:
+        _active_pull_count = max(0, _active_pull_count - 1)
 
 OLLAMA_DOWNLOAD_URL = "https://ollama.com/download"
 """Browser-fallback URL when ``winget`` isn't available — exposed so
@@ -253,31 +288,40 @@ def pull_ollama_model(
 
     logger.info("ollama-pull: model=%s endpoint=%s", model, base)
     log(f"Pulling {model} from {base}...")
-    try:
-        resp = urllib.request.urlopen(req, timeout=timeout)
-    except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8", errors="replace")[:500]
-        except Exception:
-            pass
-        logger.warning(
-            "ollama-pull: HTTP %s from %s — %s",
-            exc.code, url, detail or exc.reason,
-        )
-        log(
-            f"  Pull rejected (HTTP {exc.code}): "
-            f"{detail or exc.reason}"
-        )
-        return False
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        logger.warning("ollama-pull: endpoint unreachable: %s", exc)
-        log(f"  Endpoint unreachable: {exc}. Start Ollama and try again.")
-        return False
 
-    ok = _consume_ollama_pull_stream(resp, log)
-    logger.info("ollama-pull: finished ok=%s model=%s", ok, model)
-    return ok
+    # Register the pull with the global tally so close-handlers can
+    # prompt before tearing down the GUI. ``try/finally`` guarantees
+    # the counter releases on every exit path — early returns for
+    # HTTP / connection failures included.
+    _enter_pull()
+    try:
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:500]
+            except Exception:
+                pass
+            logger.warning(
+                "ollama-pull: HTTP %s from %s — %s",
+                exc.code, url, detail or exc.reason,
+            )
+            log(
+                f"  Pull rejected (HTTP {exc.code}): "
+                f"{detail or exc.reason}"
+            )
+            return False
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            logger.warning("ollama-pull: endpoint unreachable: %s", exc)
+            log(f"  Endpoint unreachable: {exc}. Start Ollama and try again.")
+            return False
+
+        ok = _consume_ollama_pull_stream(resp, log)
+        logger.info("ollama-pull: finished ok=%s model=%s", ok, model)
+        return ok
+    finally:
+        _exit_pull()
 
 
 def _consume_ollama_pull_stream(

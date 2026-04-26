@@ -1056,6 +1056,25 @@ class MainFrame(wx.Frame):
                 event.Veto()
                 return
 
+        # Same idea for an in-progress Ollama model pull. The pull
+        # worker is a daemon thread holding an open HTTP stream;
+        # exiting the app kills the thread, which leaves Ollama with
+        # a partial weight file it has to redo from scratch. Warn so
+        # the user can finish the pull first if they want to.
+        from . import ollama_install
+        if ollama_install.has_active_pulls():
+            choice = wx.MessageBox(
+                "An Ollama model is still downloading. Quitting "
+                "ffn-dl now will cancel the download and Ollama will "
+                "need to start over next time. Quit anyway?",
+                "Pull in progress",
+                wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+                self,
+            )
+            if choice != wx.YES:
+                event.Veto()
+                return
+
         # Snapshot each open search frame's state to prefs, then destroy
         # the frames. Destroy() doesn't fire EVT_CLOSE, so the explicit
         # save_state call is the only thing persisting their filters.

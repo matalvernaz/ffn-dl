@@ -570,6 +570,98 @@ class TestConsumePullStream:
         assert any("not json" in line for line in captured)
 
 
+class TestActivePullsRegistry:
+    """Process-wide tally that ``has_active_pulls()`` reports against
+    so the GUI can warn before tearing down windows mid-pull. The
+    pull function bumps the counter on entry and decrements on every
+    exit path (``try/finally``) so a failed connection doesn't leak
+    the counter and lock the user out of clean closes forever."""
+
+    def _reset(self):
+        # Direct access — the pull function mutates this module-level
+        # counter and tests need to start from zero regardless of
+        # what previous tests did.
+        ollama_install._active_pull_count = 0
+
+    def test_zero_when_no_pulls_running(self):
+        self._reset()
+        assert ollama_install.has_active_pulls() is False
+
+    def test_counter_increments_on_enter(self):
+        self._reset()
+        ollama_install._enter_pull()
+        try:
+            assert ollama_install.has_active_pulls() is True
+        finally:
+            ollama_install._exit_pull()
+
+    def test_counter_releases_on_exit(self):
+        self._reset()
+        ollama_install._enter_pull()
+        ollama_install._exit_pull()
+        assert ollama_install.has_active_pulls() is False
+
+    def test_nested_enters_track_correctly(self):
+        # Two simultaneous pulls (e.g. user kicked one off in two
+        # dialogs back-to-back via some hypothetical race) should
+        # report active until both have released.
+        self._reset()
+        ollama_install._enter_pull()
+        ollama_install._enter_pull()
+        ollama_install._exit_pull()
+        assert ollama_install.has_active_pulls() is True
+        ollama_install._exit_pull()
+        assert ollama_install.has_active_pulls() is False
+
+    def test_extra_exits_clamp_to_zero(self):
+        # Defensive: a buggy caller calling exit twice mustn't
+        # produce a negative counter that then needs two enters to
+        # reach "active" again.
+        self._reset()
+        ollama_install._exit_pull()
+        ollama_install._exit_pull()
+        assert ollama_install.has_active_pulls() is False
+        ollama_install._enter_pull()
+        assert ollama_install.has_active_pulls() is True
+        ollama_install._exit_pull()
+
+    def test_pull_function_releases_on_http_failure(self, monkeypatch):
+        # Real bug source: if the registry only releases on success,
+        # one failed pull leaves ``has_active_pulls()`` permanently
+        # True and the user gets a false-positive prompt every time
+        # they try to close the dialog after.
+        import urllib.error
+        self._reset()
+
+        def boom(req, timeout=None):
+            raise urllib.error.HTTPError(
+                url="http://x/api/pull", code=500, msg="x",
+                hdrs=None, fp=io.BytesIO(b""),
+            )
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        ollama_install.pull_ollama_model(
+            endpoint="http://localhost:11434",
+            model="m",
+            progress_callback=lambda _: None,
+        )
+        assert ollama_install.has_active_pulls() is False
+
+    def test_pull_function_releases_on_unreachable(self, monkeypatch):
+        self._reset()
+
+        def boom(req, timeout=None):
+            raise ConnectionRefusedError("nope")
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        ollama_install.pull_ollama_model(
+            endpoint="http://localhost:11434",
+            model="m",
+            progress_callback=lambda _: None,
+        )
+        assert ollama_install.has_active_pulls() is False
+
+
 class TestPullOllamaModel:
     def test_unreachable_endpoint_logs_hint_and_returns_false(
         self, monkeypatch,

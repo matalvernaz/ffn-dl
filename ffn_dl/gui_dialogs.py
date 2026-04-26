@@ -1384,6 +1384,10 @@ class LlmSettingsDialog(wx.Dialog):
         sizer.Add(btns, 0, wx.ALIGN_RIGHT | wx.ALL, pad)
 
         save.Bind(wx.EVT_BUTTON, self._on_save)
+        # Cancel normally short-circuits to ``EndModal(wx.ID_CANCEL)``
+        # without firing EVT_CLOSE — bind explicitly so the
+        # pull-in-progress warning fires for this exit path too.
+        cancel.Bind(wx.EVT_BUTTON, self._on_cancel)
 
         root.SetSizer(sizer)
         outer = wx.BoxSizer(wx.VERTICAL)
@@ -1538,6 +1542,8 @@ class LlmSettingsDialog(wx.Dialog):
         self.Layout()
 
     def _on_save(self, event):
+        if not self._confirm_close_during_pull():
+            return
         provider = self._selected_provider()
         model = self.model_ctrl.GetValue().strip()
         api_key = self.api_key_ctrl.GetValue().strip()
@@ -1616,12 +1622,49 @@ class LlmSettingsDialog(wx.Dialog):
             return
         self.status_ctrl.AppendText(line.rstrip() + "\n")
 
+    def _confirm_close_during_pull(self) -> bool:
+        """Return ``True`` when it's safe to close the dialog. When a
+        model pull is in progress, prompt — the daemon-thread worker
+        survives the dialog itself, but the user loses progress
+        visibility and a subsequent ffn-dl exit will abort the
+        download. The prompt names both implications so the user can
+        make an informed call.
+        """
+        from . import ollama_install
+        if not ollama_install.has_active_pulls():
+            return True
+        choice = wx.MessageBox(
+            "An Ollama model is still downloading. Closing this "
+            "dialog hides the progress display — the download "
+            "continues in the background, but quitting ffn-dl "
+            "before it finishes will cancel it. Close anyway?",
+            "Pull in progress",
+            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+            self,
+        )
+        return choice == wx.YES
+
     def _on_close(self, event):
-        """User closed the dialog — flip the alive flag so any worker
-        callbacks that haven't fired yet skip their GUI work instead
-        of touching destroyed widgets."""
+        """User closed the dialog via the X button / Alt+F4 / OS
+        shutdown. Warn if a pull is in progress, then flip the alive
+        flag so any worker callbacks that haven't fired yet skip
+        their GUI work instead of touching destroyed widgets."""
+        if not self._confirm_close_during_pull():
+            if hasattr(event, "Veto"):
+                event.Veto()
+            return
         self._alive = False
         event.Skip()
+
+    def _on_cancel(self, event):
+        """Explicit Cancel-button handler so the pull-in-progress
+        warning fires before the dialog ends. Without this binding
+        wx's default behaviour for ``wx.ID_CANCEL`` calls
+        ``EndModal`` directly, bypassing every guard we added."""
+        if not self._confirm_close_during_pull():
+            return
+        self._alive = False
+        self.EndModal(wx.ID_CANCEL)
 
     def _on_test_connection(self, event):
         from . import attribution
