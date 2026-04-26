@@ -79,6 +79,120 @@ def _llm_config():
     }
 
 
+# ── Parser robustness across schemas ──────────────────────────────
+
+
+class TestParseAnResponseSchemas:
+    """Real LLMs return creative JSON shapes ignoring the documented
+    ``{"1": true}`` schema. Each test below pins one of the shapes
+    seen in real ffn-dl logs (qwen2.5:7b, gpt-4o-mini, llama3.1)
+    against the same set of three input paragraphs where indices
+    0 and 2 are the A/Ns. The parser must extract those two indices
+    no matter which shape the model picks."""
+
+    PARAS = [
+        "Howdy. My name is Jack T. Cynical and welcome to my world.",
+        "Harry Potter leaned back in his seat and stared out the window.",
+        "Updates for this will be relatively sparse — one a month if I can.",
+    ]
+
+    def _parse(self, parsed):
+        return attribution._parse_an_response(parsed, self.PARAS)
+
+    def test_documented_format(self):
+        # The shape the prompt asks for. Has to keep working.
+        out = self._parse({"1": True, "2": False, "3": True})
+        assert out == {0, 2}
+
+    def test_nested_under_author_notes_with_text(self):
+        # qwen2.5:7b on this exact prompt — full text, no numbers.
+        out = self._parse({
+            "response": {
+                "author_notes": [
+                    {"text": "Howdy. My name is Jack T. Cynical and welcome to my world.",
+                     "type": "introduction"},
+                    {"text": "Updates for this will be relatively sparse — one a month if I can.",
+                     "type": "update_schedule"},
+                ],
+            },
+        })
+        assert out == {0, 2}
+
+    def test_notes_with_explicit_paragraph_numbers(self):
+        # gpt-4o-mini sometimes — paragraph numbers in a "number"
+        # field rather than as the dict key.
+        out = self._parse({
+            "chapter": 1,
+            "notes": [
+                {"number": 1, "content": "..."},
+                {"number": 3, "content": "..."},
+            ],
+        })
+        assert out == {0, 2}
+
+    def test_flagged_index_list(self):
+        # ``{"flagged": [1, 3]}`` — bare integers, 1-based.
+        out = self._parse({"flagged": [1, 3]})
+        assert out == {0, 2}
+
+    def test_string_index_list(self):
+        # Some models stringify the indices: ``["1", "3"]``.
+        out = self._parse({"a_n": ["1", "3"]})
+        assert out == {0, 2}
+
+    def test_text_match_with_truncation_ellipsis(self):
+        # Long paragraphs are truncated with "…" in the prompt; if the
+        # model echoes back the truncated form, prefix-matching has to
+        # still succeed.
+        long_para = (
+            "This is a long author's note that goes on for many words "
+            "and gets truncated at the prompt's 600-char boundary, "
+            "though for this test we just need a recognisable prefix."
+        )
+        out = attribution._parse_an_response(
+            {"author_notes": [
+                {"text": long_para[:60] + "…"},
+            ]},
+            [long_para],
+        )
+        assert out == {0}
+
+    def test_short_strings_dont_false_positive(self):
+        # Category labels ("introduction", "update_schedule") are
+        # short and the parser must NOT match them against story
+        # paragraphs — that'd flag random short prose paragraphs.
+        out = self._parse({
+            "labels": ["introduction", "update_schedule", "ownership"],
+        })
+        assert out == set()
+
+    def test_falls_through_to_text_match_when_no_numbers(self):
+        # Worst case: model returns a list of texts with no schema
+        # at all. Text-matching saves the day.
+        out = self._parse([
+            "Updates for this will be relatively sparse",
+            "Howdy. My name is Jack T. Cynical",
+        ])
+        assert out == {0, 2}
+
+    def test_empty_response_returns_empty_set(self):
+        assert self._parse({}) == set()
+        assert self._parse([]) == set()
+        assert self._parse({"foo": "bar"}) == set()
+
+    def test_documented_format_wins_when_both_shapes_present(self):
+        # If the documented shape is present, prefer it — text-matching
+        # is the broadest fallback and could over-flag if both ran.
+        out = self._parse({
+            "1": True, "2": False, "3": False,
+            "echo": "Updates for this will be relatively sparse — etc",
+        })
+        # Only paragraph 1 (index 0) should be flagged from the
+        # documented map; the echo of paragraph 3's text shouldn't
+        # also bring in index 2.
+        assert out == {0}
+
+
 # ── Cache wiring ──────────────────────────────────────────────────
 
 

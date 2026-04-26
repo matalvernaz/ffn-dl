@@ -2005,19 +2005,27 @@ def llm_cache_token(provider: str, model: str) -> str:
 
 
 _AN_SYSTEM_PROMPT = (
-    "You are an editor preparing fanfiction for an audiobook. The "
-    "user wants the actual story text, not author commentary. For "
-    "each numbered paragraph below, decide whether it is an 'author's "
-    "note' that should be skipped during narration — examples include: "
-    "thanks to beta readers, requests for reviews / kudos / favourites, "
-    "Patreon plugs, update schedules, disclaimers about ownership, "
-    "warnings the author wrote outside the story, links to "
-    "discord/tumblr, replies to reviews, or short translator's notes "
-    "explaining a foreign phrase. Story prose, dialogue, and in-world "
-    "footnotes are NOT author's notes even if they sound personal. "
-    "Respond with ONLY a JSON object whose keys are the paragraph "
-    'numbers (as strings) and values are booleans. Example: '
-    '{"1": true, "2": false, "3": false, "4": true}.'
+    "You are reading fanfiction and identifying author's notes vs "
+    "story content. Author's notes are out-of-story commentary "
+    "addressing the reader directly: greetings ('Howdy', 'Hi "
+    "everyone'), self-introductions ('My name is...'), thanks to "
+    "betas/readers, requests for reviews/favourites/kudos, Patreon "
+    "plugs, ownership disclaimers ('I don't own X', 'I own nothing'), "
+    "update schedules, links to discord/tumblr, replies to comments, "
+    "or chatty asides about the author's life. If a paragraph breaks "
+    "the fourth wall to address the reader as the AUTHOR (not as a "
+    "first-person narrator character), it's an author's note — even "
+    "if it's chatty or sounds like prose. In-world dialogue and "
+    "first-person narration by a story character are NOT author's "
+    "notes.\n\n"
+    "Output schema (REQUIRED, do not deviate):\n"
+    "Return a single flat JSON object. Each key is a paragraph "
+    "number as a string ('1', '2', ...). Each value is a boolean: "
+    "true = author's note, false = story content. Include every "
+    "paragraph number you were given. Do NOT wrap the answer in any "
+    "outer object, do NOT add fields for chapter title or word count, "
+    "and do NOT echo paragraph text. Example for four paragraphs:\n"
+    '{"1": true, "2": false, "3": false, "4": true}'
 )
 
 
@@ -2127,14 +2135,175 @@ def classify_authors_notes_via_llm(
         parsed = _json.loads(blob)
     except (ValueError, _json.JSONDecodeError):
         return set()
-    if not isinstance(parsed, dict):
-        return set()
+
+    flagged = _parse_an_response(parsed, paragraphs)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "LLM A/N parsed: %d flag(s) from %d paragraph(s)",
+            len(flagged), len(paragraphs),
+        )
+    return flagged
+
+
+# Keys models tend to use for the "this paragraph is N" field when
+# they wrap A/N entries in objects instead of returning the documented
+# ``{"1": true, ...}`` map. Lowercased once at module load so the
+# scan in :func:`_parse_an_response` is a cheap membership test.
+_AN_INDEX_KEYS = frozenset({
+    "number", "index", "idx", "paragraph", "paragraph_number",
+    "para", "para_number", "i", "n",
+})
+
+
+# Top-level keys models like to nest the A/N list under instead of
+# returning a flat map. Walked recursively, so any depth works as long
+# as one of these keys gates the actual list.
+_AN_LIST_KEYS = frozenset({
+    "author_notes", "authors_notes", "author_note", "notes", "note",
+    "flagged", "flags", "an", "ans", "a_n", "a_ns", "results",
+    "items", "entries", "data",
+})
+
+
+def _parse_an_response(parsed, paragraphs: list[str]) -> set[int]:
+    """Extract flagged paragraph indices from the LLM's parsed JSON.
+
+    The documented response shape is ``{"1": true, "2": false, ...}``,
+    but smaller / more "instruction-tuned" models routinely answer with
+    creative schemas instead — ``{"author_notes": [{"text": "..."}]}``,
+    ``{"notes": [{"number": 5}, ...]}``, ``{"response": {...}}``, and
+    so on. Without flexibility here a correctly-classified chapter
+    silently parses as "no A/N found", which is the bug Matt hit on
+    a 42-chapter fic with obvious A/Ns.
+
+    Five strategies, each tried in order; the first to yield any
+    matches wins. None of them is destructive — pure read of the
+    parsed structure. Order matters: the documented map is the
+    cheapest and least ambiguous, so try it first. Text matching is
+    last because it's the broadest.
+    """
+    # 1. Documented format: ``{"1": true, "2": false}``.
     flagged: set[int] = set()
-    for k, v in parsed.items():
+    if isinstance(parsed, dict):
+        for k, v in parsed.items():
+            try:
+                idx = int(str(k).strip()) - 1
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(paragraphs) and bool(v):
+                flagged.add(idx)
+    if flagged:
+        return flagged
+
+    # 2. Walk for nested ``{"number": N}`` / ``{"index": N}`` etc.
+    for idx in _walk_index_fields(parsed, len(paragraphs)):
+        flagged.add(idx)
+    if flagged:
+        return flagged
+
+    # 3. List of bare integers anywhere in the tree (``{"flagged":
+    #    [1, 5, 7]}``). Treat them as 1-based indices because the
+    #    prompt presents paragraphs that way.
+    for idx in _walk_int_lists(parsed, len(paragraphs)):
+        flagged.add(idx)
+    if flagged:
+        return flagged
+
+    # 4. List of bare strings anywhere in the tree, where each string
+    #    parses to an int (``["1", "5", "7"]``).
+    for s in _walk_strings(parsed):
         try:
-            idx = int(str(k).strip()) - 1
+            idx = int(s.strip()) - 1
         except (TypeError, ValueError):
             continue
-        if 0 <= idx < len(paragraphs) and bool(v):
+        if 0 <= idx < len(paragraphs):
             flagged.add(idx)
+    if flagged:
+        return flagged
+
+    # 5. Last-resort: text matching. Some models (qwen2.5:7b on this
+    #    prompt, gpt-4o-mini under certain conditions) return the
+    #    full paragraph TEXT they consider an A/N rather than its
+    #    number. Match each returned string against the prefix of
+    #    every input paragraph and flag the matches. Tolerant of
+    #    whitespace and the truncation ellipsis we add to long
+    #    paragraphs in the prompt.
+    para_prefixes = [
+        (i, _normalise_para(p)) for i, p in enumerate(paragraphs)
+    ]
+    for s in _walk_strings(parsed):
+        candidate = _normalise_para(s)
+        if len(candidate) < 30:
+            # Too short to be a confident match — risks false
+            # positives from category labels like "introduction".
+            continue
+        for idx, prefix in para_prefixes:
+            if not prefix:
+                continue
+            # Match by either direction's prefix because either
+            # value can be the longer one (the LLM may quote a
+            # truncated version of a long paragraph).
+            shorter = candidate if len(candidate) < len(prefix) else prefix
+            longer = prefix if len(candidate) < len(prefix) else candidate
+            if longer.startswith(shorter[:60]):
+                flagged.add(idx)
+                break
     return flagged
+
+
+def _walk_index_fields(obj, n_paragraphs: int):
+    """Yield zero-based indices found in any
+    ``{"number"/"index"/"paragraph": N}`` field anywhere in ``obj``."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str) and k.lower() in _AN_INDEX_KEYS:
+                try:
+                    idx = int(v) - 1
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    if 0 <= idx < n_paragraphs:
+                        yield idx
+            yield from _walk_index_fields(v, n_paragraphs)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk_index_fields(v, n_paragraphs)
+
+
+def _walk_int_lists(obj, n_paragraphs: int):
+    """Yield zero-based indices found in any list of bare integers
+    anywhere in ``obj``. Integers are interpreted as 1-based indices
+    because that's how the prompt numbers paragraphs."""
+    if isinstance(obj, list):
+        if all(isinstance(v, int) for v in obj):
+            for v in obj:
+                idx = v - 1
+                if 0 <= idx < n_paragraphs:
+                    yield idx
+            return
+        for v in obj:
+            yield from _walk_int_lists(v, n_paragraphs)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _walk_int_lists(v, n_paragraphs)
+
+
+def _walk_strings(obj):
+    """Yield every string value anywhere inside ``obj``."""
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _walk_strings(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk_strings(v)
+
+
+def _normalise_para(s: str) -> str:
+    """Collapse whitespace and strip the prompt's truncation ellipsis
+    so prefix-matching doesn't get tripped by trivial differences."""
+    s = (s or "").strip()
+    if s.endswith("…"):
+        s = s[:-1].rstrip()
+    return " ".join(s.split())
