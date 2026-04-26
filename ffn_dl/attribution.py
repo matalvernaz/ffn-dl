@@ -2063,6 +2063,23 @@ def classify_authors_notes_via_llm(
         "Paragraphs to classify (true = author's note, false = story "
         "content):\n\n" + "\n\n".join(numbered) + "\n\nReturn JSON only."
     )
+
+    # DEBUG-level transcript of the classifier input. Lets a user
+    # who's seeing "no A/N paragraphs found" on a fic with obvious
+    # author's notes diagnose without having to share the fic
+    # itself: grep the log for `LLM A/N input` and you can see the
+    # first ~80 chars of every paragraph the model was shown, in
+    # order. The truncation keeps the log manageable on long fics.
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "LLM A/N input: %d paragraph(s) for %s/%s",
+            len(paragraphs), provider, model,
+        )
+        for i, p in enumerate(paragraphs, 1):
+            preview = p.strip().replace("\n", " ")[:120]
+            logger.debug("LLM A/N input  [%d] (%d chars): %s",
+                         i, len(p), preview)
+
     try:
         reply = _llm_call(
             provider=provider, model=model,
@@ -2079,6 +2096,15 @@ def classify_authors_notes_via_llm(
     except Exception as exc:  # noqa: BLE001 — additive, never fail
         logger.warning("LLM author's-note classifier failed: %s", exc)
         return set()
+
+    # DEBUG-level transcript of the raw model reply. If the user is
+    # debugging "model returned empty" vs "model returned all-false"
+    # vs "model returned weird JSON", this is the differentiator.
+    # Capped at 1500 chars because some providers like to wrap their
+    # JSON in a chatty preamble.
+    if logger.isEnabledFor(logging.DEBUG):
+        snippet = (reply or "").replace("\n", " ")[:1500]
+        logger.debug("LLM A/N raw reply: %s", snippet)
 
     import json as _json
 
