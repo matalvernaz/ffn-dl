@@ -2288,6 +2288,71 @@ def _walk_int_lists(obj, n_paragraphs: int):
             yield from _walk_int_lists(v, n_paragraphs)
 
 
+def expand_an_block(flagged: set[int], n_paragraphs: int) -> set[int]:
+    """Expand the LLM-flagged set across the natural A/N boundaries
+    (chapter head and tail).
+
+    LLM classifiers reliably catch *some* paragraphs in a contiguous
+    A/N block but miss others — the model picks individual lines, it
+    doesn't reason about "this is the next sentence of the same
+    author commentary I just labelled". Authors in practice put A/Ns
+    in tight contiguous blocks at chapter start and chapter end, so
+    once the LLM has confirmed any A/N is present in those regions,
+    the surrounding paragraphs in the same region are nearly always
+    also A/N.
+
+    Safety gates (per Matt's destructive-heuristic policy):
+
+    * Two corroborating signals required — an LLM flag *and* a
+      boundary position. Mid-chapter flags don't expand.
+    * Hard cap: never produce a flagged set covering more than 50%
+      of the chapter. If expansion would breach that, return the
+      original set unchanged.
+    * No effect on chapters with fewer than 8 paragraphs (too short
+      for boundary heuristics to be meaningful).
+
+    Returns a new set; the input set is not mutated.
+    """
+    if not flagged or n_paragraphs < 8:
+        return set(flagged)
+
+    expanded = set(flagged)
+
+    # Trailing block — anchor the expansion if any flag landed in
+    # the bottom 20%, then sweep from the earliest flag in the
+    # bottom 30% to the chapter end. Two thresholds (20% / 30%)
+    # because authors sometimes start the outro with a "your reviews
+    # are great" line that the LLM catches alongside the main
+    # rambling block — the earliest flag inside the wider window
+    # is the better anchor.
+    bottom_anchor = int(n_paragraphs * 0.8)
+    bottom_window = int(n_paragraphs * 0.7)
+    if any(i >= bottom_anchor for i in flagged):
+        earliest = min(i for i in flagged if i >= bottom_window)
+        for i in range(earliest, n_paragraphs):
+            expanded.add(i)
+
+    # Leading block — same logic, mirrored. Authors front-load
+    # disclaimers and "I own nothing" lines in the top few
+    # paragraphs; if the LLM flagged any, sweep to whichever flag
+    # sits highest in the head window.
+    top_anchor = max(1, int(n_paragraphs * 0.05))
+    top_window = max(2, int(n_paragraphs * 0.15))
+    if any(i < top_anchor for i in flagged):
+        latest = max(i for i in flagged if i < top_window)
+        for i in range(0, latest + 1):
+            expanded.add(i)
+
+    # Hard cap — refuse to drop more than half the chapter, no
+    # matter how persuasive the heuristic seems. A user who chose
+    # "just strip the obvious A/Ns" is much better off with a few
+    # surviving notes than with a half-empty chapter.
+    if len(expanded) > n_paragraphs // 2:
+        return set(flagged)
+
+    return expanded
+
+
 def _walk_strings(obj):
     """Yield every string value anywhere inside ``obj``."""
     if isinstance(obj, str):

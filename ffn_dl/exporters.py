@@ -1210,6 +1210,23 @@ def strip_an_via_llm(
         cache[cache_key] = sorted(flagged)
         _llm_an_save_cache(cache_path, cache)
 
+    # Block expansion: the LLM picks individual paragraphs but A/Ns
+    # come in contiguous runs at chapter head/tail, so any flagged
+    # paragraph in those regions anchors a sweep of its neighbours.
+    # Bounded by a 50% cap so a runaway expansion can't gut a real
+    # chapter. See ``attribution.expand_an_block`` for the gates.
+    if flagged:
+        from . import attribution
+        before = len(flagged)
+        flagged = attribution.expand_an_block(flagged, len(paragraph_texts))
+        if len(flagged) > before:
+            _emit(
+                progress,
+                f"  [llm-an] {chapter_label}: expanded "
+                f"{before} LLM flag(s) into {len(flagged)} "
+                "paragraph(s) covering the head/tail A/N block",
+            )
+
     # Always emit the outcome so the user sees what the LLM actually
     # decided per chapter — the bare "classifying via …" line leaves
     # them wondering whether anything got stripped or the call was a
