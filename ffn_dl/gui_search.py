@@ -308,11 +308,17 @@ class SearchFrame(wx.Frame):
                 sizer.Add(row, 0, wx.EXPAND | wx.ALL, pad)
                 self.text_ctrls[mp_key] = ctrl
 
-        # Checkboxes
+        # Checkboxes. ``SetName`` is required for NVDA to read the
+        # widget reliably — wx exposes the visible ``label=`` as the
+        # accessible name on Linux/Mac but on Windows, the search
+        # frame's child-of-frame layout reads as unlabeled without an
+        # explicit name. Matches the pattern used for the Choice /
+        # TextCtrl filters above.
         if self.spec.get("checkboxes"):
             cb_row = wx.BoxSizer(wx.HORIZONTAL)
             for label, key in self.spec["checkboxes"]:
                 ctrl = wx.CheckBox(panel, label=label)
+                ctrl.SetName(label.replace("&", ""))
                 cb_row.Add(ctrl, 0, wx.RIGHT, 16)
                 self.checkbox_ctrls[key] = ctrl
             sizer.Add(cb_row, 0, wx.EXPAND | wx.ALL, pad)

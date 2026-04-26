@@ -211,6 +211,7 @@ class LibraryFrame(wx.Frame):
         self.force_recheck_chk = wx.CheckBox(
             panel, label="&Force recheck (bypass TTL)",
         )
+        self.force_recheck_chk.SetName("Force recheck — bypass TTL")
         self.force_recheck_chk.SetToolTip(
             "Ignore the recent-check TTL and the Complete/Abandoned "
             "skip — probe every indexed story against upstream even "
@@ -223,6 +224,9 @@ class LibraryFrame(wx.Frame):
 
         self.refetch_all_chk = wx.CheckBox(
             panel, label="Fres&h copies (re-download all chapters)",
+        )
+        self.refetch_all_chk.SetName(
+            "Fresh copies — re-download every chapter"
         )
         self.refetch_all_chk.SetToolTip(
             "Re-download every chapter from upstream instead of merging "

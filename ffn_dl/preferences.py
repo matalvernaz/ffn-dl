@@ -192,10 +192,16 @@ class PreferencesDialog(wx.Dialog):
         self.check_updates_ctrl = wx.CheckBox(
             panel, label="Check for &updates automatically on launch",
         )
+        self.check_updates_ctrl.SetName(
+            "Check for updates automatically on launch"
+        )
         sizer.Add(self.check_updates_ctrl, 0, wx.ALL, 6)
 
         self.confirm_close_ctrl = wx.CheckBox(
             panel, label="&Warn before closing during an active download",
+        )
+        self.confirm_close_ctrl.SetName(
+            "Warn before closing during an active download"
         )
         sizer.Add(self.confirm_close_ctrl, 0, wx.ALL, 6)
 
@@ -222,10 +228,17 @@ class PreferencesDialog(wx.Dialog):
                 "(* * * in text, a silence pause in audiobooks)"
             ),
         )
+        self.hr_stars_ctrl.SetName(
+            "Mark scene breaks clearly by default — asterisks in text "
+            "output, silence pause in audiobook output"
+        )
         sizer.Add(self.hr_stars_ctrl, 0, wx.ALL, 6)
 
         self.strip_notes_ctrl = wx.CheckBox(
             panel, label="&Strip author's notes (A/N paragraphs) by default",
+        )
+        self.strip_notes_ctrl.SetName(
+            "Strip author's notes by default"
         )
         sizer.Add(self.strip_notes_ctrl, 0, wx.ALL, 6)
 
@@ -417,6 +430,7 @@ class PreferencesDialog(wx.Dialog):
         self.log_to_file_ctrl = wx.CheckBox(
             panel, label="&Save log to file",
         )
+        self.log_to_file_ctrl.SetName("Save log to file")
         sizer.Add(self.log_to_file_ctrl, 0, wx.ALL, 6)
         self._add_help_text(
             sizer, panel,
