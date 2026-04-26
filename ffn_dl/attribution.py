@@ -50,15 +50,33 @@ logger = logging.getLogger(__name__)
 
 
 class LLMUnavailable(RuntimeError):
-    """The configured LLM endpoint refused the connection, timed out,
-    or wasn't resolvable.
+    """The configured LLM endpoint refused the connection or wasn't
+    resolvable — i.e. nothing is listening at the URL.
 
     Distinct from a ``RuntimeError`` raised on a malformed reply or a
     rejected HTTP status: those are per-call problems, but an
     unavailable endpoint is the same failure for every subsequent
     chapter in a download. Callers that loop over chapters can catch
     this once and stop trying — see the chapter loops in
-    ``ffn_dl.exporters``."""
+    ``ffn_dl.exporters``.
+
+    A request timeout raises the :class:`LLMTimeout` subclass instead;
+    chapter loops treat one timeout as transient (slow model on a
+    long input) and only trip the breaker after several consecutive
+    ones."""
+
+
+class LLMTimeout(LLMUnavailable):
+    """The LLM endpoint accepted the connection but didn't reply
+    within :data:`_LLM_REQUEST_TIMEOUT_S`.
+
+    Subclass of :class:`LLMUnavailable` so older catch sites that
+    treat any unreachable signal as a one-strike circuit-breaker trip
+    keep working. Newer callers (the chapter loop in
+    ``exporters._prepare_chapter_html_with_llm_fallback``) catch this
+    first and apply a consecutive-failure threshold — a single slow
+    chapter on a 14B local model isn't grounds for disabling the LLM
+    pass for the rest of the export."""
 
 
 # ── Registry ────────────────────────────────────────────────────────
@@ -1350,7 +1368,14 @@ def _refine_with_booknlp(segments, full_text, model_size="small"):
 # at the seam keep some surrounding context.
 _LLM_CHUNK_CHARS = 6000
 _LLM_CHUNK_OVERLAP_CHARS = 500
-_LLM_REQUEST_TIMEOUT_S = 180
+# Per-request timeout against the LLM endpoint. Sized for the slow
+# end of self-hosted setups: a 14B local model on CPU can spend
+# 3–4 minutes on a long chapter before the first token comes back.
+# At 180s we tripped the circuit breaker on real Ollama runs that
+# would have completed at ~210s; 300s gives that headroom while
+# still failing fast on a genuinely dead endpoint (which raises
+# ConnectionRefused/URLError synchronously, not via timeout).
+_LLM_REQUEST_TIMEOUT_S = 300
 # Cap how many quoted segments we ask the model to label in one request.
 # Even with plenty of context, asking for 200 labels at once reliably
 # truncates the response; 40 is a comfortable ceiling that matches a
@@ -1456,11 +1481,31 @@ def _llm_call(
         raise RuntimeError(
             f"LLM HTTP {exc.code} from {provider}: {detail or exc.reason}"
         ) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        # Connection refused, DNS failure, timeout — the endpoint isn't
-        # reachable at all. Distinct from HTTPError above (which means
-        # the server replied) because per-chapter loops want to give
-        # up after one of these instead of retrying 100+ times.
+    except TimeoutError as exc:
+        # Endpoint accepted the connection but the model didn't reply
+        # in time. Surfaced as the LLMTimeout subclass so the chapter
+        # loop can apply a consecutive-failure threshold instead of
+        # tripping on one slow chapter.
+        raise LLMTimeout(
+            f"LLM endpoint {url} timed out after {_LLM_REQUEST_TIMEOUT_S}s"
+        ) from exc
+    except (urllib.error.URLError, OSError) as exc:
+        # ``URLError`` wraps a transport failure; its ``reason`` may
+        # itself be a ``socket.timeout``, in which case we promote to
+        # LLMTimeout so the loop applies the timeout threshold rather
+        # than the unreachable-endpoint one-strike rule.
+        if isinstance(exc, urllib.error.URLError) and isinstance(
+            getattr(exc, "reason", None), TimeoutError,
+        ):
+            raise LLMTimeout(
+                f"LLM endpoint {url} timed out after "
+                f"{_LLM_REQUEST_TIMEOUT_S}s"
+            ) from exc
+        # Connection refused, DNS failure — the endpoint isn't
+        # reachable at all. Distinct from HTTPError above (which
+        # means the server replied) because per-chapter loops want
+        # to give up after one of these instead of retrying 100+
+        # times.
         raise LLMUnavailable(
             f"LLM endpoint {url} unreachable: {exc}"
         ) from exc

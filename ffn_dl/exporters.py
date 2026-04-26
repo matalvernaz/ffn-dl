@@ -220,6 +220,15 @@ def _prepare_chapter_html(
     return html
 
 
+# Consecutive ``LLMTimeout``s before the chapter loop disables the
+# LLM A/N pass for the remaining chapters. One timeout is treated as
+# transient — a 14B local model can spend a few minutes on an unusually
+# long chapter, but the model is fine for the next one. Three in a row
+# means something is genuinely wrong (model hung, GPU starved, OOM
+# killed) and we stop burning the per-chapter timeout budget.
+_LLM_AN_MAX_CONSECUTIVE_TIMEOUTS = 3
+
+
 def _prepare_chapter_html_with_llm_fallback(
     html: str,
     hr_as_stars: bool,
@@ -230,36 +239,98 @@ def _prepare_chapter_html_with_llm_fallback(
     story_id,
     chapter_number: int | None,
     progress: Callable[[str], None] | None,
-) -> tuple[str, bool]:
-    """Run the chapter pipeline; on a ``LLMUnavailable`` from the LLM
-    A/N pass, retry without the LLM and signal back so the caller can
-    skip the LLM for subsequent chapters.
+    consecutive_timeouts: int = 0,
+) -> tuple[str, bool, int]:
+    """Run the chapter pipeline; recover from LLM A/N failures.
 
-    Returns ``(prepared_html, llm_disabled)``. The chapter loops in
-    each ``export_*`` function pass the second element back into
-    their local ``llm_config`` so a 100-chapter story doesn't log
-    the same connection-refused warning 100 times when the user's
-    Ollama daemon is offline.
+    Returns ``(prepared_html, llm_disabled, consecutive_timeouts)``.
+
+    Failure handling differentiates by exception type:
+
+    * :class:`~ffn_dl.attribution.LLMUnavailable` (non-timeout) —
+      connection refused / DNS / no-listener. Trips the breaker on
+      the first hit: every remaining chapter would hit the same
+      wall, so we re-run this chapter without the LLM and return
+      ``llm_disabled=True``.
+    * :class:`~ffn_dl.attribution.LLMTimeout` — endpoint accepted
+      the connection but the model didn't reply in
+      :data:`~ffn_dl.attribution._LLM_REQUEST_TIMEOUT_S` seconds.
+      A single timeout is transient; we re-run this chapter without
+      the LLM but keep ``llm_disabled=False`` so the next chapter
+      retries. Only after
+      :data:`_LLM_AN_MAX_CONSECUTIVE_TIMEOUTS` consecutive timeouts
+      do we trip the breaker.
+
+    ``consecutive_timeouts`` is the running tally that the chapter
+    loop threads back in on each call. Successful classifications
+    reset it to zero (so a one-off slow chapter doesn't pollute the
+    count for the rest of the export).
     """
-    from .attribution import LLMUnavailable
+    from .attribution import LLMTimeout, LLMUnavailable
 
     try:
-        return (
-            _prepare_chapter_html(
-                html, hr_as_stars, strip_notes,
-                llm_config=llm_config,
-                site_name=site_name,
-                story_id=story_id,
-                chapter_number=chapter_number,
-                progress=progress,
-            ),
-            False,
+        prepared = _prepare_chapter_html(
+            html, hr_as_stars, strip_notes,
+            llm_config=llm_config,
+            site_name=site_name,
+            story_id=story_id,
+            chapter_number=chapter_number,
+            progress=progress,
         )
+        # Reset the timeout streak on any success — including
+        # success after the LLM was already disabled, which
+        # harmlessly returns 0.
+        return prepared, False, 0
+    except LLMTimeout as exc:
+        new_streak = consecutive_timeouts + 1
+        chapter_label = (
+            f"chapter {chapter_number}"
+            if chapter_number is not None
+            else "chapter"
+        )
+        # Always re-run *this* chapter without the LLM so the
+        # regex-stripped content still lands in the export.
+        fallback = _prepare_chapter_html(
+            html, hr_as_stars, strip_notes,
+            llm_config=None,
+            site_name=site_name,
+            story_id=story_id,
+            chapter_number=chapter_number,
+            progress=progress,
+        )
+        if new_streak >= _LLM_AN_MAX_CONSECUTIVE_TIMEOUTS:
+            # Streak crossed the threshold — treat as a genuine
+            # outage and disable for the remainder of the export.
+            logger.warning(
+                "LLM A/N: %d consecutive timeouts (%s); "
+                "disabled for remaining chapters in this run",
+                new_streak, exc,
+            )
+            _emit(
+                progress,
+                f"  [llm-an] {chapter_label}: {new_streak} consecutive "
+                f"timeouts ({exc}); skipping LLM for remaining chapters",
+            )
+            return fallback, True, new_streak
+        logger.info(
+            "LLM A/N: timeout on %s (%s); skipping LLM on this "
+            "chapter, will retry on the next one (%d/%d)",
+            chapter_label, exc, new_streak,
+            _LLM_AN_MAX_CONSECUTIVE_TIMEOUTS,
+        )
+        _emit(
+            progress,
+            f"  [llm-an] {chapter_label}: timeout ({exc}); "
+            f"skipping LLM on this chapter, retrying on the next "
+            f"({new_streak}/{_LLM_AN_MAX_CONSECUTIVE_TIMEOUTS})",
+        )
+        return fallback, False, new_streak
     except LLMUnavailable as exc:
-        # Circuit breaker fires here. Log loud (warning, not info) so
-        # a "why didn't my A/N strip work?" postmortem on the file
-        # log surfaces this in a single grep, even when the user is
-        # running with the default INFO log level.
+        # Endpoint truly down (connection refused / DNS / no
+        # listener). Log loud (warning, not info) so a "why didn't
+        # my A/N strip work?" postmortem on the file log surfaces
+        # this in a single grep, even when the user is running with
+        # the default INFO log level.
         logger.warning(
             "LLM A/N: endpoint unreachable (%s); disabled for remaining "
             "chapters in this run",
@@ -280,6 +351,7 @@ def _prepare_chapter_html_with_llm_fallback(
                 progress=progress,
             ),
             True,
+            0,
         )
 
 
@@ -305,13 +377,17 @@ def export_txt(
     for label, value in _meta_fields(story):
         buf.write(f"{label}: {value}\n")
     buf.write("=" * 60 + "\n")
+    consecutive_timeouts = 0
     for ch in story.chapters:
         buf.write(f"\n\n--- {ch.title} ---\n\n")
-        html, llm_disabled = _prepare_chapter_html_with_llm_fallback(
-            ch.html, hr_as_stars=False, strip_notes=strip_notes,
-            llm_config=llm_config,
-            site_name=site_name, story_id=story.id,
-            chapter_number=ch.number, progress=progress,
+        html, llm_disabled, consecutive_timeouts = (
+            _prepare_chapter_html_with_llm_fallback(
+                ch.html, hr_as_stars=False, strip_notes=strip_notes,
+                llm_config=llm_config,
+                site_name=site_name, story_id=story.id,
+                chapter_number=ch.number, progress=progress,
+                consecutive_timeouts=consecutive_timeouts,
+            )
         )
         if llm_disabled:
             llm_config = None
@@ -389,16 +465,20 @@ def export_html(
         buf.write(f'<li><a href="#chapter-{i}">{escape(ch.title)}</a></li>\n')
     buf.write("</ol>\n</nav>\n<hr>\n")
 
+    consecutive_timeouts = 0
     for i, ch in enumerate(story.chapters, 1):
         ch_title = escape(ch.title)
         buf.write(f'<div class="chapter" id="chapter-{i}"><h2>{ch_title}</h2>\n')
-        chapter_html, llm_disabled = _prepare_chapter_html_with_llm_fallback(
-            ch.html, hr_as_stars, strip_notes,
-            llm_config=llm_config,
-            site_name=site_name,
-            story_id=story.id,
-            chapter_number=ch.number,
-            progress=progress,
+        chapter_html, llm_disabled, consecutive_timeouts = (
+            _prepare_chapter_html_with_llm_fallback(
+                ch.html, hr_as_stars, strip_notes,
+                llm_config=llm_config,
+                site_name=site_name,
+                story_id=story.id,
+                chapter_number=ch.number,
+                progress=progress,
+                consecutive_timeouts=consecutive_timeouts,
+            )
         )
         if llm_disabled:
             llm_config = None
@@ -1503,6 +1583,7 @@ def export_epub(
     book.add_item(title_page)
 
     epub_chapters = []
+    consecutive_timeouts = 0
     for ch in story.chapters:
         ec = epub.EpubHtml(
             title=ch.title,
@@ -1510,13 +1591,16 @@ def export_epub(
             lang="en",
         )
         heading = escape(ch.title)
-        chapter_html, llm_disabled = _prepare_chapter_html_with_llm_fallback(
-            ch.html, hr_as_stars, strip_notes,
-            llm_config=llm_config,
-            site_name=site_prefix,
-            story_id=story.id,
-            chapter_number=ch.number,
-            progress=progress,
+        chapter_html, llm_disabled, consecutive_timeouts = (
+            _prepare_chapter_html_with_llm_fallback(
+                ch.html, hr_as_stars, strip_notes,
+                llm_config=llm_config,
+                site_name=site_prefix,
+                story_id=story.id,
+                chapter_number=ch.number,
+                progress=progress,
+                consecutive_timeouts=consecutive_timeouts,
+            )
         )
         if llm_disabled:
             llm_config = None

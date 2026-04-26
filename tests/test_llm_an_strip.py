@@ -980,3 +980,229 @@ class TestExportLoopCircuitBreaker:
         body = path.read_text(encoding="utf-8")
         # All three chapters' content survives.
         assert body.count("Para one of chapter") == 3
+
+
+# ── Timeout circuit breaker (consecutive-failure threshold) ──────
+
+
+class TestLlmCallTimeoutClassification:
+    """``_llm_call`` distinguishes a request timeout (slow model on a
+    long input) from a connection failure (nothing listening). Only
+    the latter is a one-strike circuit-breaker trip; timeouts surface
+    as the :class:`LLMTimeout` subclass so the chapter loop applies a
+    consecutive-failure threshold instead."""
+
+    def test_bare_timeout_error_raises_llm_timeout(self, monkeypatch):
+        def boom(req, timeout=None):
+            raise TimeoutError("read timed out")
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        with pytest.raises(attribution.LLMTimeout):
+            attribution._llm_call(
+                provider="ollama", model="m", api_key="",
+                endpoint="http://127.0.0.1:11434",
+                system_prompt="", user_prompt="",
+            )
+
+    def test_url_error_wrapping_timeout_raises_llm_timeout(self, monkeypatch):
+        # urllib often wraps a socket timeout inside URLError. The
+        # adapter has to peek at .reason and still classify as a
+        # timeout — otherwise this path tripped the breaker on a
+        # single slow chapter (the exact bug from the user's log).
+        import urllib.error
+
+        def boom(req, timeout=None):
+            raise urllib.error.URLError(TimeoutError("timed out"))
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        with pytest.raises(attribution.LLMTimeout):
+            attribution._llm_call(
+                provider="ollama", model="m", api_key="",
+                endpoint="http://127.0.0.1:11434",
+                system_prompt="", user_prompt="",
+            )
+
+    def test_llm_timeout_is_subclass_of_unavailable(self):
+        # Backwards compatibility for older ``except LLMUnavailable``
+        # call sites — they keep tripping on timeouts even when the
+        # adapter has classified a timeout specifically. Newer call
+        # sites that want the threshold path catch ``LLMTimeout``
+        # before ``LLMUnavailable``.
+        assert issubclass(attribution.LLMTimeout, attribution.LLMUnavailable)
+
+
+class TestExportLoopTimeoutThreshold:
+    """A single LLM timeout is transient on local models — a 14B model
+    on CPU can spend several minutes on one long chapter, and the
+    classifier is fine for the next one. The chapter loop only trips
+    the breaker after :data:`_LLM_AN_MAX_CONSECUTIVE_TIMEOUTS`
+    consecutive timeouts."""
+
+    def _multi_chapter_story(self, n: int):
+        from ffn_dl.models import Chapter, Story
+        s = Story(
+            id=1,
+            title="T",
+            author="A",
+            summary="",
+            url="https://www.fanfiction.net/s/1",
+        )
+        # Each chapter gets unique paragraph text so the per-content
+        # cache key differs — otherwise a single classified chapter
+        # would satisfy the rest from cache and the test wouldn't
+        # exercise the per-chapter LLM call path. Plain prose only:
+        # words like "Chapter N" trigger the regex pre-pass and
+        # strip the paragraphs below the LLM threshold.
+        words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+                 "golf", "hotel", "india", "juliet"]
+        for i in range(1, n + 1):
+            tag = words[(i - 1) % len(words)]
+            s.chapters.append(Chapter(
+                number=i,
+                title=f"Ch {i}",
+                html=(
+                    f"<p>The {tag} morning was bright and clear.</p>"
+                    f"<p>The {tag} river ran swift past the village.</p>"
+                    f"<p>The {tag} hawk circled overhead in silence.</p>"
+                    f"<p>The {tag} cart wheeled away down the lane.</p>"
+                ),
+            ))
+        return s
+
+    def test_one_timeout_does_not_disable_for_remaining_chapters(
+        self, tmp_path, monkeypatch,
+    ):
+        """First chapter times out, rest succeed. The loop must keep
+        the LLM enabled for chapters 2..N — that was the regression
+        from the user's log where one slow chapter killed A/N
+        stripping for the rest of the story."""
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        calls: list = []
+
+        def fake_call(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise attribution.LLMTimeout("timed out")
+            return json.dumps(
+                {"1": False, "2": False, "3": False, "4": False},
+            )
+
+        monkeypatch.setattr(attribution, "_llm_call", fake_call)
+        story = self._multi_chapter_story(5)
+        progress_lines: list[str] = []
+        exporters.export_html(
+            story, output_dir=str(tmp_path),
+            strip_notes=True,
+            llm_config=_llm_config(),
+            progress=progress_lines.append,
+        )
+        # All five chapters tried the LLM; one timed out, four ran.
+        assert len(calls) == 5, (
+            "After a single timeout the loop must keep trying the LLM "
+            "on subsequent chapters"
+        )
+        # No "remaining chapters" disable line — that's reserved for
+        # the threshold trip and the unreachable case.
+        disable_lines = [
+            l for l in progress_lines
+            if "skipping LLM for remaining chapters" in l
+        ]
+        assert disable_lines == []
+
+    def test_threshold_consecutive_timeouts_trip_the_breaker(
+        self, tmp_path, monkeypatch,
+    ):
+        """N consecutive timeouts trip the breaker. After the trip
+        no more LLM calls go out for the remaining chapters — same
+        end state as an unreachable endpoint, just gated behind a
+        higher bar."""
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        threshold = exporters._LLM_AN_MAX_CONSECUTIVE_TIMEOUTS
+        calls: list = []
+
+        def boom(**kwargs):
+            calls.append(kwargs)
+            raise attribution.LLMTimeout("timed out")
+
+        monkeypatch.setattr(attribution, "_llm_call", boom)
+        story = self._multi_chapter_story(threshold + 5)
+        progress_lines: list[str] = []
+        exporters.export_html(
+            story, output_dir=str(tmp_path),
+            strip_notes=True,
+            llm_config=_llm_config(),
+            progress=progress_lines.append,
+        )
+        assert len(calls) == threshold, (
+            "Breaker should trip after exactly "
+            f"{threshold} consecutive timeouts"
+        )
+        # The disable notice fires once on the trip.
+        disable_lines = [
+            l for l in progress_lines
+            if "skipping LLM for remaining chapters" in l
+        ]
+        assert len(disable_lines) == 1
+
+    def test_success_resets_the_timeout_streak(
+        self, tmp_path, monkeypatch,
+    ):
+        """Two timeouts, a success, then more timeouts — the success
+        resets the streak so the breaker doesn't trip on a total of
+        N timeouts spread across the story; only N *in a row*."""
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        threshold = exporters._LLM_AN_MAX_CONSECUTIVE_TIMEOUTS
+        # Pattern: timeout, timeout, success, timeout, timeout — total
+        # of four timeouts but the longest streak is two. Story is
+        # six chapters so we'd expect six LLM calls if the breaker
+        # never trips.
+        outcomes = ["timeout", "timeout", "success", "timeout", "timeout", "success"]
+        assert len(outcomes) >= threshold + 2  # so the test is meaningful
+        calls: list = []
+
+        def fake_call(**kwargs):
+            outcome = outcomes[len(calls)]
+            calls.append(outcome)
+            if outcome == "timeout":
+                raise attribution.LLMTimeout("timed out")
+            return json.dumps(
+                {"1": False, "2": False, "3": False, "4": False},
+            )
+
+        monkeypatch.setattr(attribution, "_llm_call", fake_call)
+        story = self._multi_chapter_story(len(outcomes))
+        exporters.export_html(
+            story, output_dir=str(tmp_path),
+            strip_notes=True,
+            llm_config=_llm_config(),
+        )
+        assert len(calls) == len(outcomes), (
+            "A success between timeouts must reset the streak so the "
+            "breaker only trips on N consecutive failures"
+        )
+
+    def test_unreachable_still_one_strike_after_timeout_subclassing(
+        self, tmp_path, monkeypatch,
+    ):
+        """Even though LLMTimeout subclasses LLMUnavailable, a plain
+        LLMUnavailable (connection refused / DNS) must still trip on
+        the first hit — that's the original bug fix and the threshold
+        only applies to genuine timeouts."""
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        calls: list = []
+
+        def boom(**kwargs):
+            calls.append(kwargs)
+            raise attribution.LLMUnavailable("refused")
+
+        monkeypatch.setattr(attribution, "_llm_call", boom)
+        story = self._multi_chapter_story(5)
+        exporters.export_html(
+            story, output_dir=str(tmp_path),
+            strip_notes=True,
+            llm_config=_llm_config(),
+        )
+        assert len(calls) == 1, (
+            "Connection-refused failures must still be one-strike — "
+            "the threshold only applies to LLMTimeout"
+        )
