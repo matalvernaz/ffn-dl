@@ -322,12 +322,12 @@ class SearchFrame(wx.Frame):
             wx.StaticText(panel, label="&Results:"),
             0, wx.LEFT | wx.TOP, pad,
         )
-        # Multi-select + native checkboxes. Each Title cell also carries a
-        # leading ``[x] `` / ``[ ] `` prefix that mirrors the tick state —
-        # the wxPython ListCtrl checkbox's MSAA reporting is unreliable
-        # with NVDA (same issue as the CheckListBox pattern noted in
-        # CLAUDE.md), so the prefix is the source of truth a screen
-        # reader actually hears. Space toggles the focused row.
+        # Multi-select + native checkboxes. ``EnableCheckBoxes(True)``
+        # gives every row a real MSAA-reported tick that NVDA reads
+        # natively — no leading "[x] " text mirror, since duplicating
+        # the state in the title made the screen reader announce
+        # "checked, x, Title" on every row. Space toggles the
+        # focused row.
         self.results_ctrl = wx.ListCtrl(
             panel,
             style=wx.LC_REPORT | wx.BORDER_SUNKEN,
@@ -766,12 +766,9 @@ class SearchFrame(wx.Frame):
         if failed:
             self._log("  failures — " + "; ".join(failed))
 
-    # Screen-reader affordance: the Title cell always shows the
-    # current tick state so NVDA reads "[x] …" / "[ ] …" as part of
-    # the row instead of relying on the MSAA checkbox announcement
-    # that is known to be flaky.
-    _CHECKED_PREFIX = "[x] "
-    _UNCHECKED_PREFIX = "[ ] "
+    # NVDA reads the native ListCtrl checkbox state, so the title is
+    # just the title — no "[x] " / "[ ] " text mirror, which used to
+    # produce duplicate "checked, x, Title" announcements.
 
     @staticmethod
     def _result_title(r):
@@ -782,18 +779,16 @@ class SearchFrame(wx.Frame):
 
     @classmethod
     def _prefixed_title(cls, r, *, checked: bool) -> str:
-        prefix = cls._CHECKED_PREFIX if checked else cls._UNCHECKED_PREFIX
-        return prefix + cls._result_title(r)
+        # ``checked`` kept in the signature for symmetry — the title
+        # no longer changes based on tick state, native MSAA carries
+        # that information instead.
+        return cls._result_title(r)
 
     def _refresh_title_prefix(self, row: int) -> None:
         if not (0 <= row < len(self.results)):
             return
         self.results_ctrl.SetItem(
-            row, 0,
-            self._prefixed_title(
-                self.results[row],
-                checked=self.results_ctrl.IsItemChecked(row),
-            ),
+            row, 0, self._prefixed_title(self.results[row], checked=False),
         )
 
     def _checked_rows(self) -> list[int]:

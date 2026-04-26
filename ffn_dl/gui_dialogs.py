@@ -310,11 +310,12 @@ class StoryPickerDialog(wx.Dialog):
 
         self.list_ctrl = wx.CheckListBox(panel, choices=[])
         self.list_ctrl.SetName("Stories to download")
-        # wx.CheckListBox's MSAA check-state reporting is unreliable with
-        # NVDA on Windows — prepend "[x] " / "[ ] " to every label so the
-        # state is read out as part of the item text. EVT_CHECKLISTBOX
-        # refreshes the prefix on toggle; EVT_LISTBOX updates the summary
-        # pane as the user arrows through.
+        # NVDA reads ``CheckListBox`` checkbox state natively on
+        # current wxPython, so we no longer prepend a "[x] " / "[ ] "
+        # text mirror — duplicating it made the screen reader say
+        # "checked, x, Title" on every row. EVT_CHECKLISTBOX still
+        # fires to update the summary pane; EVT_LISTBOX tracks
+        # arrow-key navigation.
         self.list_ctrl.Bind(wx.EVT_CHECKLISTBOX, self._on_item_toggled)
         self.list_ctrl.Bind(wx.EVT_LISTBOX, self._on_item_focus_changed)
         sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.ALL, 8)
@@ -354,6 +355,12 @@ class StoryPickerDialog(wx.Dialog):
 
         panel.SetSizer(sizer)
         self._refresh()
+        # Focus the list, not the Sort combo. The list IS the work
+        # the user opened the dialog to do; tabbing into Sort is
+        # always a detour. ``CallAfter`` defers the focus call past
+        # any wx-internal "give the dialog its default focus" logic
+        # that would otherwise run after our SetFocus.
+        wx.CallAfter(self.list_ctrl.SetFocus)
 
     @staticmethod
     def _as_int(value):
@@ -364,10 +371,12 @@ class StoryPickerDialog(wx.Dialog):
         return int(m.group(0)) if m else 0
 
     def _label(self, w, checked=False):
-        # Leading "[x] " / "[ ] " so NVDA reads the state as part of the
-        # item; the native MSAA state is unreliable in CheckListBox.
-        prefix = "[x] " if checked else "[ ] "
-        parts = [prefix, w.get("title", "") or "(untitled)"]
+        # No "[x] " / "[ ] " text prefix — NVDA reads the native
+        # CheckListBox state on its own; doubling it here made the
+        # screen reader announce "checked, x, Title" on every row.
+        # ``checked`` is still accepted as a parameter so callers
+        # don't need a refactor; we just don't render it.
+        parts = [w.get("title", "") or "(untitled)"]
         meta = []
         if w.get("author"):
             meta.append(f"by {w['author']}")
@@ -525,11 +534,11 @@ class MultiPickerDialog(wx.Dialog):
     """Tick-list picker for categorical filters (Royal Road genres, tags,
     content warnings, etc.).
 
-    Same NVDA trick as StoryPickerDialog — every row label is rewritten
-    with a literal `[x] ` / `[ ] ` prefix on toggle so the check state
-    is part of the readable item text. The dialog returns the ordered
-    list of picked *labels* (not slugs); callers can resolve labels to
-    whatever canonical form they store.
+    NVDA reads ``CheckListBox`` checkbox state natively on current
+    wxPython, so the dialog uses plain labels — no "[x] " / "[ ] "
+    text prefix. The dialog returns the ordered list of picked
+    *labels* (not slugs); callers can resolve labels to whatever
+    canonical form they store.
     """
 
     def __init__(self, parent, title, options, initial=()):
@@ -602,10 +611,18 @@ class MultiPickerDialog(wx.Dialog):
         self._checks = list(self._initial_checks)
         self._visible_map = list(range(len(self._labels)))
         self._refresh()
+        # Land on the list rather than the filter textbox. Same
+        # reasoning as StoryPickerDialog: the list is the dialog's
+        # primary surface, and the filter is a tool for narrowing
+        # it — reachable by Tab when the user wants it.
+        wx.CallAfter(self.list_ctrl.SetFocus)
 
     def _label_text(self, idx, checked):
-        prefix = "[x] " if checked else "[ ] "
-        return prefix + self._labels[idx]
+        # Native CheckListBox state announcement is reliable now;
+        # see the StoryPickerDialog ``_label`` comment for context.
+        # ``checked`` kept in the signature for symmetry — toggling
+        # no longer rewrites the label text, only the native state.
+        return self._labels[idx]
 
     def _refresh(self):
         self.list_ctrl.Set([
