@@ -68,7 +68,7 @@ class LLMUnavailable(RuntimeError):
 
 class LLMTimeout(LLMUnavailable):
     """The LLM endpoint accepted the connection but didn't reply
-    within :data:`_LLM_REQUEST_TIMEOUT_S`.
+    within :func:`_llm_request_timeout_s` seconds.
 
     Subclass of :class:`LLMUnavailable` so older catch sites that
     treat any unreachable signal as a one-strike circuit-breaker trip
@@ -1375,7 +1375,34 @@ _LLM_CHUNK_OVERLAP_CHARS = 500
 # would have completed at ~210s; 300s gives that headroom while
 # still failing fast on a genuinely dead endpoint (which raises
 # ConnectionRefused/URLError synchronously, not via timeout).
-_LLM_REQUEST_TIMEOUT_S = 300
+_LLM_REQUEST_TIMEOUT_DEFAULT_S = 300
+
+
+def _llm_request_timeout_s() -> int:
+    """Active per-request LLM timeout, in seconds. Reads
+    ``FFN_DL_LLM_TIMEOUT_S`` from the environment so users on slow
+    hardware can extend the deadline without editing source — set it
+    to e.g. ``600`` for a 14B model on CPU. Falls back to
+    :data:`_LLM_REQUEST_TIMEOUT_DEFAULT_S` when the variable is
+    unset, blank, non-numeric, or non-positive."""
+    raw = os.environ.get("FFN_DL_LLM_TIMEOUT_S", "").strip()
+    if not raw:
+        return _LLM_REQUEST_TIMEOUT_DEFAULT_S
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        logger.warning(
+            "FFN_DL_LLM_TIMEOUT_S=%r is not a number; using default %ds",
+            raw, _LLM_REQUEST_TIMEOUT_DEFAULT_S,
+        )
+        return _LLM_REQUEST_TIMEOUT_DEFAULT_S
+    if value <= 0:
+        logger.warning(
+            "FFN_DL_LLM_TIMEOUT_S=%r is not positive; using default %ds",
+            raw, _LLM_REQUEST_TIMEOUT_DEFAULT_S,
+        )
+        return _LLM_REQUEST_TIMEOUT_DEFAULT_S
+    return value
 # Cap how many quoted segments we ask the model to label in one request.
 # Even with plenty of context, asking for 200 labels at once reliably
 # truncates the response; 40 is a comfortable ceiling that matches a
@@ -1411,6 +1438,63 @@ def _llm_normalize_endpoint(provider: str, endpoint: str | None) -> str:
     if not base:
         base = _llm_default_endpoint(provider)
     return base
+
+
+_OLLAMA_RUNTIME_PROBE_TIMEOUT_S = 3.0
+
+
+def _llm_ollama_runtime(endpoint: str, model: str) -> str | None:
+    """Best-effort probe of whether Ollama is running ``model`` on GPU
+    or CPU. Queries ``/api/ps`` and compares ``size_vram`` to ``size``
+    on the matching entry: VRAM == total → ``"GPU"``, VRAM == 0 →
+    ``"CPU"``, partial → ``"partial GPU (NN%)"``.
+
+    Returns ``None`` when the model isn't loaded yet (first chat call
+    hasn't run), the endpoint isn't reachable, or the response shape
+    is unexpected. Strictly informational — failures are silent so a
+    flaky probe never blocks classification."""
+    base = (endpoint or "").rstrip("/")
+    if not base:
+        return None
+    url = f"{base}/api/ps"
+    try:
+        import json as _json
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(
+            req, timeout=_OLLAMA_RUNTIME_PROBE_TIMEOUT_S,
+        ) as resp:
+            payload = _json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        return None
+    target = (model or "").strip()
+    entry = None
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("model") or "")
+        if name == target or name.split(":", 1)[0] == target.split(":", 1)[0]:
+            entry = item
+            break
+    if entry is None:
+        return None
+    try:
+        size = int(entry.get("size") or 0)
+        size_vram = int(entry.get("size_vram") or 0)
+    except (TypeError, ValueError):
+        return None
+    if size <= 0:
+        return None
+    if size_vram <= 0:
+        return "CPU"
+    if size_vram >= size:
+        return "GPU"
+    pct = round(100 * size_vram / size)
+    return f"partial GPU ({pct}%)"
 
 
 def _llm_call(
@@ -1498,7 +1582,8 @@ def _llm_call(
     data = _json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=_LLM_REQUEST_TIMEOUT_S) as resp:
+        request_timeout = _llm_request_timeout_s()
+        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         # Surface server-provided error text — most providers ship the
@@ -1517,7 +1602,7 @@ def _llm_call(
         # loop can apply a consecutive-failure threshold instead of
         # tripping on one slow chapter.
         raise LLMTimeout(
-            f"LLM endpoint {url} timed out after {_LLM_REQUEST_TIMEOUT_S}s"
+            f"LLM endpoint {url} timed out after {request_timeout}s"
         ) from exc
     except (urllib.error.URLError, OSError) as exc:
         # ``URLError`` wraps a transport failure; its ``reason`` may
@@ -1529,7 +1614,7 @@ def _llm_call(
         ):
             raise LLMTimeout(
                 f"LLM endpoint {url} timed out after "
-                f"{_LLM_REQUEST_TIMEOUT_S}s"
+                f"{request_timeout}s"
             ) from exc
         # Connection refused, DNS failure — the endpoint isn't
         # reachable at all. Distinct from HTTPError above (which

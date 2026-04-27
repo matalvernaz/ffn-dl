@@ -254,7 +254,7 @@ def _prepare_chapter_html_with_llm_fallback(
       ``llm_disabled=True``.
     * :class:`~ffn_dl.attribution.LLMTimeout` — endpoint accepted
       the connection but the model didn't reply in
-      :data:`~ffn_dl.attribution._LLM_REQUEST_TIMEOUT_S` seconds.
+      :func:`~ffn_dl.attribution._llm_request_timeout_s` seconds.
       A single timeout is transient; we re-run this chapter without
       the LLM but keep ``llm_disabled=False`` so the next chapter
       retries. Only after
@@ -1406,9 +1406,20 @@ def strip_an_via_llm(
         _emit(progress, f"  [llm-an] {chapter_label}: cache hit")
     else:
         from . import attribution
+        suffix = ""
+        timeout_s = attribution._llm_request_timeout_s()
+        suffix += f" (timeout {timeout_s}s"
+        if provider == "ollama":
+            endpoint = attribution._llm_normalize_endpoint(
+                provider, llm_config.get("endpoint"),
+            )
+            runtime = attribution._llm_ollama_runtime(endpoint, model)
+            if runtime:
+                suffix += f", {runtime}"
+        suffix += ")"
         _emit(
             progress,
-            f"  [llm-an] {chapter_label}: classifying via {provider}/{model}",
+            f"  [llm-an] {chapter_label}: classifying via {provider}/{model}{suffix}",
         )
         first = attribution.classify_authors_notes_via_llm(
             paragraph_texts, llm_config=llm_config,

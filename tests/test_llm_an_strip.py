@@ -1333,3 +1333,191 @@ class TestExportLoopTimeoutThreshold:
             "Connection-refused failures must still be one-strike — "
             "the threshold only applies to LLMTimeout"
         )
+
+
+class TestLlmRequestTimeoutEnvOverride:
+    """``FFN_DL_LLM_TIMEOUT_S`` lets users on slow hardware extend the
+    per-request deadline without editing source. The default 300s is
+    sized for a 14B model on CPU, but a *long* chapter on the same
+    hardware can still time out — bumping to 600 or 900 fixes those
+    runs. Garbage values must fall back to the default rather than
+    silently disabling the timeout (urllib treats ``timeout=0`` as
+    non-blocking, which would break every call)."""
+
+    def test_unset_returns_default(self, monkeypatch):
+        monkeypatch.delenv("FFN_DL_LLM_TIMEOUT_S", raising=False)
+        assert (
+            attribution._llm_request_timeout_s()
+            == attribution._LLM_REQUEST_TIMEOUT_DEFAULT_S
+        )
+
+    def test_blank_returns_default(self, monkeypatch):
+        monkeypatch.setenv("FFN_DL_LLM_TIMEOUT_S", "   ")
+        assert (
+            attribution._llm_request_timeout_s()
+            == attribution._LLM_REQUEST_TIMEOUT_DEFAULT_S
+        )
+
+    def test_positive_int_overrides(self, monkeypatch):
+        monkeypatch.setenv("FFN_DL_LLM_TIMEOUT_S", "900")
+        assert attribution._llm_request_timeout_s() == 900
+
+    def test_positive_float_truncates_to_int(self, monkeypatch):
+        # urllib.request.urlopen accepts floats, but staying int keeps
+        # log lines tidy and matches every other timeout in the file.
+        monkeypatch.setenv("FFN_DL_LLM_TIMEOUT_S", "450.7")
+        assert attribution._llm_request_timeout_s() == 450
+
+    def test_non_numeric_falls_back(self, monkeypatch):
+        monkeypatch.setenv("FFN_DL_LLM_TIMEOUT_S", "forever")
+        assert (
+            attribution._llm_request_timeout_s()
+            == attribution._LLM_REQUEST_TIMEOUT_DEFAULT_S
+        )
+
+    def test_zero_falls_back(self, monkeypatch):
+        # Zero or negative would either disable timeouts (urllib's
+        # non-blocking mode) or raise — neither matches "longer
+        # deadline", so we ignore the value.
+        monkeypatch.setenv("FFN_DL_LLM_TIMEOUT_S", "0")
+        assert (
+            attribution._llm_request_timeout_s()
+            == attribution._LLM_REQUEST_TIMEOUT_DEFAULT_S
+        )
+
+    def test_negative_falls_back(self, monkeypatch):
+        monkeypatch.setenv("FFN_DL_LLM_TIMEOUT_S", "-30")
+        assert (
+            attribution._llm_request_timeout_s()
+            == attribution._LLM_REQUEST_TIMEOUT_DEFAULT_S
+        )
+
+    def test_call_uses_active_timeout(self, monkeypatch):
+        # End-to-end check: the env value flows through ``_llm_call``
+        # to urllib's ``timeout=`` argument. Without this, a refactor
+        # could resurrect the hardcoded 300 and the unit tests above
+        # would still pass.
+        seen = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+            def read(self):
+                return b'{"message":{"content":"{}"}}'
+
+        def fake_urlopen(req, timeout=None):
+            seen["timeout"] = timeout
+            return _Resp()
+
+        monkeypatch.setenv("FFN_DL_LLM_TIMEOUT_S", "777")
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        attribution._llm_call(
+            provider="ollama", model="m", api_key="",
+            endpoint="http://127.0.0.1:11434",
+            system_prompt="", user_prompt="",
+        )
+        assert seen["timeout"] == 777
+
+
+class TestOllamaRuntimeProbe:
+    """``_llm_ollama_runtime`` reports whether the user's local Ollama
+    is running the requested model on GPU or CPU, so the classifier
+    log line can answer "is it worth switching?" at a glance. Strictly
+    informational — the probe must never block or fail loudly."""
+
+    def _stub_ps(self, monkeypatch, payload):
+        import json as _json
+
+        class _Resp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+            def read(self):
+                return _json.dumps(payload).encode("utf-8")
+
+        def fake_urlopen(req, timeout=None):
+            return _Resp()
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    def test_full_gpu(self, monkeypatch):
+        self._stub_ps(monkeypatch, {"models": [
+            {"name": "qwen2.5:14b", "size": 9_000_000_000,
+             "size_vram": 9_000_000_000},
+        ]})
+        assert (
+            attribution._llm_ollama_runtime(
+                "http://127.0.0.1:11434", "qwen2.5:14b",
+            )
+            == "GPU"
+        )
+
+    def test_full_cpu(self, monkeypatch):
+        self._stub_ps(monkeypatch, {"models": [
+            {"name": "qwen2.5:14b", "size": 9_000_000_000, "size_vram": 0},
+        ]})
+        assert (
+            attribution._llm_ollama_runtime(
+                "http://127.0.0.1:11434", "qwen2.5:14b",
+            )
+            == "CPU"
+        )
+
+    def test_partial_gpu_reports_percentage(self, monkeypatch):
+        self._stub_ps(monkeypatch, {"models": [
+            {"name": "qwen2.5:14b", "size": 10_000_000_000,
+             "size_vram": 7_500_000_000},
+        ]})
+        assert (
+            attribution._llm_ollama_runtime(
+                "http://127.0.0.1:11434", "qwen2.5:14b",
+            )
+            == "partial GPU (75%)"
+        )
+
+    def test_model_not_loaded_returns_none(self, monkeypatch):
+        # Before the first /api/chat, /api/ps returns an empty list.
+        # Returning None lets the caller skip the runtime tag rather
+        # than show stale info.
+        self._stub_ps(monkeypatch, {"models": []})
+        assert (
+            attribution._llm_ollama_runtime(
+                "http://127.0.0.1:11434", "qwen2.5:14b",
+            )
+            is None
+        )
+
+    def test_endpoint_unreachable_returns_none(self, monkeypatch):
+        import urllib.error
+
+        def boom(req, timeout=None):
+            raise urllib.error.URLError("unreachable")
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        assert (
+            attribution._llm_ollama_runtime(
+                "http://127.0.0.1:11434", "qwen2.5:14b",
+            )
+            is None
+        )
+
+    def test_blank_endpoint_returns_none(self):
+        assert attribution._llm_ollama_runtime("", "qwen2.5:14b") is None
+
+    def test_matches_on_base_name_when_tag_differs(self, monkeypatch):
+        # Some Ollama versions report the model without the tag in
+        # /api/ps; tolerate that rather than reporting "model not
+        # loaded" when it clearly is.
+        self._stub_ps(monkeypatch, {"models": [
+            {"name": "qwen2.5", "size": 9_000_000_000,
+             "size_vram": 9_000_000_000},
+        ]})
+        assert (
+            attribution._llm_ollama_runtime(
+                "http://127.0.0.1:11434", "qwen2.5:14b",
+            )
+            == "GPU"
+        )
