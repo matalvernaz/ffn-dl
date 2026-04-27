@@ -1416,10 +1416,33 @@ def _llm_normalize_endpoint(provider: str, endpoint: str | None) -> str:
 def _llm_call(
     *, provider: str, model: str, api_key: str | None,
     endpoint: str, system_prompt: str, user_prompt: str,
+    response_schema: dict | None = None,
 ) -> str:
     """One round-trip to the configured LLM. Returns the raw text reply
     (the caller is responsible for JSON-parsing it). Raises on transport
-    errors, non-2xx responses, or unsupported providers."""
+    errors, non-2xx responses, or unsupported providers.
+
+    ``response_schema`` is an optional JSON Schema describing the exact
+    shape the reply must take. When provided:
+
+    * **Ollama** (``format`` accepts a JSON Schema since v0.5) sends
+      the schema verbatim, which constrains the model's output at
+      decode time. This is the difference between qwen2.5:14b
+      respecting the prompt and qwen2.5:14b inventing its own
+      scene-summary schema.
+    * **OpenAI** and openai-compatible endpoints fall back to
+      ``response_format: {"type": "json_object"}`` — the strict
+      ``json_schema`` mode requires every property to be ``required``
+      and ``additionalProperties: false`` everywhere, which is too
+      brittle to maintain alongside the schema we'd generate. The
+      free-form ``json_object`` mode plus the parser fallbacks in
+      :func:`_parse_an_response` is sufficient for the providers we've
+      seen comply with the prompt.
+    * **Anthropic** ignores the schema (no native structured-output
+      support over the ``/messages`` endpoint at the time of writing);
+      the parser fallbacks handle the well-behaved JSON responses
+      Claude already produces.
+    """
     import json as _json
     import urllib.error
     import urllib.request
@@ -1428,10 +1451,17 @@ def _llm_call(
 
     if provider == "ollama":
         url = f"{endpoint}/api/chat"
+        # Ollama's ``format`` field accepts either the literal string
+        # ``"json"`` (any-JSON mode, the v0.4 behaviour) or a JSON
+        # Schema dict (constrained-decode mode, v0.5+). Older Ollama
+        # builds ignore the schema and fall through to free-form
+        # JSON, which the parser fallbacks still recover from — so
+        # passing the schema is safe across versions.
+        ollama_format: str | dict = response_schema if response_schema else "json"
         payload = {
             "model": model,
             "stream": False,
-            "format": "json",
+            "format": ollama_format,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -2133,6 +2163,23 @@ def classify_authors_notes_via_llm(
             logger.debug("LLM A/N input  [%d] (%d chars): %s",
                          i, len(p), preview)
 
+    # Build a JSON Schema that mirrors the documented response shape:
+    # one boolean per paragraph, keyed by 1-based index, no extra fields.
+    # ``additionalProperties: false`` blocks the
+    # ``{"content": {"-Platform Nine and Three-Quarters-": {...}}}``
+    # shape qwen2.5:14b returned on the FFN founders'-vault fic; the
+    # ``required`` enumeration forces a verdict on every paragraph
+    # rather than a partial reply that would silently strip nothing.
+    an_schema: dict = {
+        "type": "object",
+        "properties": {
+            str(i + 1): {"type": "boolean"}
+            for i in range(len(paragraphs))
+        },
+        "required": [str(i + 1) for i in range(len(paragraphs))],
+        "additionalProperties": False,
+    }
+
     try:
         reply = _llm_call(
             provider=provider, model=model,
@@ -2140,6 +2187,7 @@ def classify_authors_notes_via_llm(
             endpoint=endpoint,
             system_prompt=system_prompt_override or _AN_SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            response_schema=an_schema,
         )
     except LLMUnavailable:
         # Endpoint is down — propagate so the chapter-loop caller can

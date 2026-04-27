@@ -467,6 +467,99 @@ class TestNewLabelStripping:
         )
         assert self._strip(html).count("<p>") == 1
 
+    def test_strips_chapter_note_labels(self):
+        # The "Post Chapter Note:" / "Pre Chapter Note:" / "Chapter
+        # Note:" family. Originally surfaced on CharmedMilliE / Karry
+        # Master FFN fics where the author tags every tail-block A/N
+        # with this label. The regex needs to fire whether or not the
+        # post/pre/end prefix is present, and tolerate a hyphen.
+        for label in (
+            "Post Chapter Note: thanks for reading",
+            "Post-Chapter Note: thanks for reading",
+            "Pre Chapter Note: a quick word",
+            "Pre-Chapter Notes: a quick word",
+            "Chapter Note: brief remark",
+            "End Chapter Note: until next time",
+            "Final Chapter Notes: closing thoughts",
+            "Closing Chapter Note: see you soon",
+        ):
+            html = f"<p>{label}</p><p>The day continued normally.</p>"
+            out = self._strip(html)
+            assert label not in out, f"should strip: {label}"
+            assert "day continued" in out
+
+    def test_strips_authors_commentary_label(self):
+        for label in (
+            "Author's Commentary: I had fun writing this.",
+            "Authors Comments: see endnote",
+            "Author's Rambles: about the timeline",
+            "Author's Ramblings: on plot pacing",
+            "From the Author: scheduling note",
+        ):
+            html = f"<p>{label}</p><p>Story prose resumed.</p>"
+            out = self._strip(html)
+            assert label not in out, f"should strip: {label}"
+            assert "Story prose resumed." in out
+
+    def test_strips_postscript_and_edit_labels(self):
+        for label in (
+            "P.S.: forgot to mention",
+            "PS: forgot to mention",
+            "P.P.S.: one more thing",
+            "Edit: fixed the typo",
+            "EDIT: fixed the typo",
+            "Edited 9/29: added scene",
+            "ETA: added scene",
+            "Update: hiatus over",
+        ):
+            html = f"<p>{label}</p><p>The narrative continued.</p>"
+            out = self._strip(html)
+            assert label not in out, f"should strip: {label}"
+
+    def test_strips_warning_and_summary_labels(self):
+        # Warning / Trigger Warning / Summary / Recap — non-narrative
+        # author preambles. AO3 cross-posts in particular dump a
+        # ``Summary:`` paragraph into the body.
+        for label in (
+            "Warning: explicit content ahead.",
+            "Warnings: violence, language.",
+            "Trigger Warning: discussions of grief.",
+            "Summary: the final stand-off begins.",
+            "Recap: previously, Harry left the Dursleys.",
+        ):
+            html = f"<p>{label}</p><p>The chapter began in earnest.</p>"
+            out = self._strip(html)
+            assert label not in out, f"should strip: {label}"
+
+    def test_strips_side_foot_end_note_labels(self):
+        for label in (
+            "Side Note: minor detail",
+            "Sidenote: minor detail",
+            "Footnote: bibliographic ref",
+            "Foot Note: bibliographic ref",
+            "End Note: closing thought",
+            "Endnote: closing thought",
+        ):
+            html = f"<p>{label}</p><p>Prose followed.</p>"
+            out = self._strip(html)
+            assert label not in out, f"should strip: {label}"
+
+    def test_keeps_label_words_in_prose_without_separator(self):
+        # All the new labels still need a ``:`` / ``-`` separator to
+        # qualify. Sentences that merely contain the word survive.
+        for prose in (
+            "Editing notes from earlier sessions filled the page.",
+            "She took a side note from the margin and read it.",
+            "The summary statement caught his eye.",
+            "Recap of yesterday was painful.",
+            "Warning bells rang in the distance.",
+            "He sent a P.S. note attached to the parcel.",
+        ):
+            html = f"<p>{prose}</p>"
+            assert self._strip(html).count("<p>") == 1, (
+                f"prose without separator should survive: {prose}"
+            )
+
 
 class TestStructuralRelaxedPreDivider:
     """Pass 2b: pre-divider single-block disclaimer drop (added 2.2.4).

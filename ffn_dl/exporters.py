@@ -718,15 +718,45 @@ _AN_MARKER_RE = re.compile(
             | an(?=\s*[:\-—–])                 # "AN" when followed by a separator
             | author[’'`´]?s?\s+note            # Author's Note / Author Note
             | author[’'`´]?s?\s+n\.?            # Author's N. (rare)
+            | author[’'`´]?s?\s+comment(?:ary|s)?(?=\s*[:\-—–])  # "Author's Commentary:" / "Author's Comments:"
+            | author[’'`´]?s?\s+(?:ramble|rambles|rambling|ramblings)(?=\s*[:\-—–])  # "Author's Rambles:" / "Author's Ramblings:"
+            | from\s+the\s+author(?=\s*[:\-—–])  # "From the Author:"
             | disclaimer(?=\s*[:\-—–])         # "Disclaimer:" — extremely common
                                                 # FFN chapter prefix that the
                                                 # structural passes used to miss
                                                 # because the post-divider para
                                                 # was prose, not a Chapter banner.
             | quick\s+notes?(?=\s*[:\-—–])     # "Quick Note:" / "Quick Notes:"
+            | side[\s\-]?notes?(?=\s*[:\-—–])  # "Side Note:" / "Sidenote:"
+            | foot[\s\-]?notes?(?=\s*[:\-—–])  # "Footnote:" / "Foot Note:"
+            | end[\s\-]?notes?(?=\s*[:\-—–])   # "End Note:" / "Endnote:"
+            | (?:                              # Chapter-Note labels — "Post Chapter Note:",
+                                                # "Pre Chapter Note:", "End Chapter Note:",
+                                                # "Chapter Note:" (with optional
+                                                # post/pre/end/start/final/closing prefix
+                                                # and optional hyphen). Common FFN style:
+                                                # CharmedMilliE, Karry Master, etc. label
+                                                # the tail-block "Post Chapter Note:" which
+                                                # the bare A/N regex never caught.
+                (?:post|pre|end|start|opening|closing|final|ending)
+                [\s\-]+
+              )?
+              chapter[\s\-]+notes?(?=\s*[:\-—–])
             | announcement(?=\s*[:\-—–])       # "Announcement:"
+            | p\.?\s*s\.?(?=\s*[:\-—–])        # "P.S.:" / "PS:" / "P. S.:"
+            | p\.?\s*p\.?\s*s\.?(?=\s*[:\-—–]) # "P.P.S.:" / "PPS:"
+            | edit(?:ed)?(?:\s+\S{1,15})?(?=\s*[:\-—–])   # "Edit:", "EDIT:", "Edited 9/29:"
+            | eta(?=\s*[:\-—–])                # "ETA:" (Edited To Add — fanfic convention)
+            | update(?=\s*[:\-—–])             # "Update:" — chapter-prefix update notice
             | beta[’'`´]?d?\s+by               # "Beta'd by Name" / "Betaed by"
             | beta(?=\s*[:\-—–])               # "Beta:"
+            | warning[s]?(?=\s*[:\-—–])        # "Warning:" / "Warnings:"
+            | trigger\s+warning[s]?(?=\s*[:\-—–])  # "Trigger Warning:" / "Trigger Warnings:"
+            | summary(?=\s*[:\-—–])            # "Summary:" — AO3-style chapter summary
+                                                # (which is a non-narrative author block
+                                                # bundled into the body on cross-posts)
+            | recap(?=\s*[:\-—–])              # "Recap:" — when present as a labelled
+                                                # paragraph (vs. embedded recap prose)
         )
         [\s:\-—–)\]\.]*                        # trailing punctuation
     """,

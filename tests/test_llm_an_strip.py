@@ -55,12 +55,13 @@ def _stub_llm(monkeypatch, replies):
     calls: list[dict] = []
 
     def fake_call(*, provider, model, api_key, endpoint,
-                  system_prompt, user_prompt):
+                  system_prompt, user_prompt, response_schema=None):
         calls.append({
             "provider": provider,
             "model": model,
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
+            "response_schema": response_schema,
         })
         if not replies:
             return ""
@@ -191,6 +192,35 @@ class TestParseAnResponseSchemas:
         # documented map; the echo of paragraph 3's text shouldn't
         # also bring in index 2.
         assert out == {0}
+
+    def test_qwen_scene_summary_schema_returns_empty(self):
+        # Real qwen2.5:14b reply on the FFN founders'-vault fic
+        # (2026-04-26 ffn-dl.log:1342). The model ignored the prompt
+        # entirely and produced a scene-summary keyed by quoted
+        # dialogue snippets with ``{speaker, response, description}``
+        # sub-objects. None of the keys parse as paragraph numbers,
+        # the values are model-generated summaries (not paragraph
+        # text), and the dict keys aren't paragraph text either —
+        # so the parser must return ``set()`` rather than producing
+        # spurious flags via the text-match fallback. This is the
+        # input shape the new Ollama structured-output enforcement
+        # is designed to prevent.
+        out = self._parse({
+            "content": {
+                "-Platform Nine and Three-Quarters-": {
+                    "description": "Harry, now eleven years old, is "
+                                   "preparing to board the Hogwarts "
+                                   "Express for his first year.",
+                },
+                "You're coming home for Christmas, right Harry?": {
+                    "speaker": "Sirius",
+                    "response": "Harry rolls his eyes and reassures "
+                                "Sirius that he'll be coming home on "
+                                "most holidays.",
+                },
+            },
+        })
+        assert out == set()
 
 
 class TestExpandAnBlock:
@@ -873,6 +903,103 @@ class TestLlmCallTransportClassification:
                 system_prompt="", user_prompt="",
             )
         assert not isinstance(exc_info.value, attribution.LLMUnavailable)
+
+
+class TestLlmCallStructuredOutput:
+    """The ``response_schema`` plumbing on ``_llm_call``. Captured against
+    the Ollama path because that's the one constrained-decode actually
+    helps — qwen2.5:14b on the FFN founders'-vault fic produced a
+    scene-summary schema instead of the documented ``{"1": true}`` shape,
+    and forcing the schema at the API level is the difference between
+    that fic's tail A/Ns getting stripped and surviving."""
+
+    def _capture_payload(self, monkeypatch):
+        captured: dict = {}
+
+        class _Resp:
+            def __init__(self, body):
+                self._body = body
+            def read(self):
+                return self._body
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["headers"] = dict(req.header_items())
+            import json as _json
+            captured["payload"] = _json.loads(req.data.decode("utf-8"))
+            # A minimally valid Ollama chat reply so ``_llm_call``
+            # returns successfully.
+            return _Resp(
+                b'{"message": {"content": "{\\"1\\": true}"}}'
+            )
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        return captured
+
+    def test_ollama_passes_schema_dict_in_format(self, monkeypatch):
+        captured = self._capture_payload(monkeypatch)
+        schema = {
+            "type": "object",
+            "properties": {"1": {"type": "boolean"}},
+            "required": ["1"],
+            "additionalProperties": False,
+        }
+        attribution._llm_call(
+            provider="ollama", model="qwen2.5:14b", api_key="",
+            endpoint="http://127.0.0.1:11434",
+            system_prompt="sys", user_prompt="usr",
+            response_schema=schema,
+        )
+        # ``format`` must be the schema dict, not the literal "json"
+        # string — that's the change qwen needs to comply.
+        assert captured["payload"]["format"] == schema
+
+    def test_ollama_falls_back_to_json_string_without_schema(self, monkeypatch):
+        # Backwards compatibility: callers that don't opt in still get
+        # the v0.4-era any-JSON mode, so existing audiobook attribution
+        # callers (which don't constrain the shape) keep working.
+        captured = self._capture_payload(monkeypatch)
+        attribution._llm_call(
+            provider="ollama", model="m", api_key="",
+            endpoint="http://127.0.0.1:11434",
+            system_prompt="sys", user_prompt="usr",
+        )
+        assert captured["payload"]["format"] == "json"
+
+    def test_classify_authors_notes_builds_per_paragraph_schema(
+        self, monkeypatch,
+    ):
+        # The A/N classifier constructs a schema enumerating one
+        # boolean per input paragraph, with all keys required and no
+        # additional properties allowed. Without this, qwen2.5:14b
+        # invents its own scene-summary shape.
+        captured: dict = {}
+
+        def fake_call(*, provider, model, api_key, endpoint,
+                      system_prompt, user_prompt, response_schema=None):
+            captured["response_schema"] = response_schema
+            return '{"1": true, "2": false, "3": true}'
+
+        monkeypatch.setattr(attribution, "_llm_call", fake_call)
+        paragraphs = ["a", "b", "c"]
+        flagged = attribution.classify_authors_notes_via_llm(
+            paragraphs, llm_config=_llm_config(),
+        )
+        schema = captured["response_schema"]
+        assert schema is not None
+        assert schema["type"] == "object"
+        assert set(schema["properties"]) == {"1", "2", "3"}
+        assert all(
+            v == {"type": "boolean"}
+            for v in schema["properties"].values()
+        )
+        assert sorted(schema["required"]) == ["1", "2", "3"]
+        assert schema["additionalProperties"] is False
+        assert flagged == {0, 2}
 
 
 class TestExportLoopCircuitBreaker:

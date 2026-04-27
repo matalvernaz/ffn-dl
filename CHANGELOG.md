@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.2.26 — 2026-04-27
+
+### Fix
+
+- **LLM author's-note classifier no longer silently no-ops on
+  qwen2.5:14b (and similar smaller models).** A user run on a
+  76-chapter FFN fic produced "no A/N paragraphs found" on
+  every chapter despite obvious tail A/Ns ("Post Chapter
+  Note: …", "Karry Master OUT!"). Root cause: the model
+  ignored the prompt entirely and returned a *scene-summary*
+  JSON keyed by quoted dialogue snippets with
+  ``{speaker, response, description}`` sub-objects, instead of
+  the documented ``{"1": true, "2": false, ...}`` map. None of
+  the parser's five fallback strategies could recover that
+  shape, so zero flags came back. Ollama's ``format`` field
+  now receives an explicit JSON Schema (one boolean per
+  paragraph index, all keys required, no additional
+  properties) instead of the literal ``"json"`` string —
+  constrained-decode in Ollama 0.5+ guarantees the documented
+  shape, and older Ollama builds fall through to free-form
+  JSON which the parser fallbacks already cover. The
+  ``_parse_an_response`` regression test pins the qwen
+  scene-summary shape so the silent-no-op can't recur.
+
+- **Regex pre-pass now catches eight more A/N label families.**
+  Same fic also leaked because its tail-block label
+  ``Post Chapter Note:`` wasn't in ``_AN_MARKER_RE``. Added:
+  ``Post / Pre / End / Start / Opening / Closing / Final /
+  Ending Chapter Note(s):``, ``Author's Commentary /
+  Comments / Rambles / Ramblings:``, ``From the Author:``,
+  ``Side Note(s) / Sidenote:``, ``Footnote / Foot Note:``,
+  ``End Note / Endnote:``, ``P.S. / PS / P.P.S.:``,
+  ``Edit / EDIT / Edited <date>:``, ``ETA:``, ``Update:``,
+  ``Warning(s) / Trigger Warning(s):``, ``Summary:`` (AO3
+  cross-post body dump), ``Recap:``. Each label still
+  requires the ``:``/``-`` separator so a sentence merely
+  containing the word ("She took a side note from the
+  margin") survives untouched.
+
 ## 2.2.4 — 2026-04-25
 
 ### Add
