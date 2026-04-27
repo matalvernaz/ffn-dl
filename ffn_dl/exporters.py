@@ -1485,6 +1485,26 @@ def strip_an_via_llm(
         cache[cache_key] = sorted(flagged)
         _llm_an_save_cache(cache_path, cache)
 
+    # Boundary-only constraint for providers whose A/N classifier we
+    # don't trust mid-chapter (currently Ollama). Drops any LLM flag
+    # outside the head/tail windows BEFORE expand_an_block runs, so
+    # the expansion sweep can't anchor on a hallucinated mid-chapter
+    # flag. See ``attribution.constrain_an_to_boundaries``.
+    if flagged:
+        from . import attribution
+        if attribution.should_constrain_an_to_boundaries(provider):
+            before = len(flagged)
+            flagged = attribution.constrain_an_to_boundaries(
+                flagged, len(paragraph_texts),
+            )
+            if len(flagged) < before:
+                _emit(
+                    progress,
+                    f"  [llm-an] {chapter_label}: dropped "
+                    f"{before - len(flagged)} mid-chapter LLM flag(s) "
+                    f"({provider} boundary-only mode)",
+                )
+
     # Block expansion: the LLM picks individual paragraphs but A/Ns
     # come in contiguous runs at chapter head/tail, so any flagged
     # paragraph in those regions anchors a sweep of its neighbours.

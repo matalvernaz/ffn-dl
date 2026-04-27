@@ -777,6 +777,50 @@ def test_an_batch_size_for_provider_cloud_vs_local():
     assert cloud > local
 
 
+# ── Boundary-only A/N constraint (small Ollama models) ────────────
+
+
+def test_should_constrain_an_to_boundaries_only_for_ollama():
+    from ffn_dl import attribution
+
+    assert attribution.should_constrain_an_to_boundaries("ollama") is True
+    assert attribution.should_constrain_an_to_boundaries("anthropic") is False
+    assert attribution.should_constrain_an_to_boundaries("openai") is False
+    assert attribution.should_constrain_an_to_boundaries(
+        "openai-compatible"
+    ) is False
+
+
+def test_constrain_an_to_boundaries_drops_mid_chapter_flags():
+    """A 20-paragraph chapter has head=indices 0-2 and tail=indices
+    14-19 under the 15%/30% windows. Mid-chapter flags (3..13) must
+    be dropped; boundary flags must survive."""
+    from ffn_dl import attribution
+
+    flagged = {0, 1, 5, 7, 10, 14, 18}
+    out = attribution.constrain_an_to_boundaries(flagged, 20)
+    # Mid-chapter (5, 7, 10) gone; head (0, 1) + tail (14, 18) kept.
+    assert out == {0, 1, 14, 18}
+
+
+def test_constrain_an_to_boundaries_no_op_on_empty_or_short():
+    from ffn_dl import attribution
+
+    assert attribution.constrain_an_to_boundaries(set(), 50) == set()
+    # n_paragraphs <= 0 — guard against pathological input.
+    assert attribution.constrain_an_to_boundaries({0, 1}, 0) == {0, 1}
+
+
+def test_constrain_an_to_boundaries_returns_new_set():
+    """Mutation discipline — input set must not change."""
+    from ffn_dl import attribution
+
+    original = {0, 5, 18}
+    out = attribution.constrain_an_to_boundaries(original, 20)
+    out.add(99)
+    assert 99 not in original
+
+
 def test_piper_length_scale_from_rate():
     from ffn_dl.tts_providers import piper as _piper
 

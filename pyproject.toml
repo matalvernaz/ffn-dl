@@ -14,7 +14,7 @@ namespaces = false
 
 [project]
 name = "ffn-dl"
-version = "2.2.30"
+version = "2.2.31"
 description = "Cross-platform fanfiction + erotica downloader (FFN, AO3, FicWad, Royal Road, MediaMiner, Wattpad, Literotica, AFF, StoriesOnline, Nifty, SexStories, MCStories, Lushstories, Fictionmania, TGStorytime, Chyoa, Dark Wanderer, GreatFeet)"
 requires-python = ">=3.9"
 dependencies = [

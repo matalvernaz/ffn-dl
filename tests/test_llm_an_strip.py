@@ -83,6 +83,20 @@ def _llm_config():
     }
 
 
+def _cloud_llm_config():
+    """Cloud-provider config for tests that need to bypass the
+    Ollama-only boundary constraint (see
+    ``attribution.should_constrain_an_to_boundaries``). Use when the
+    test pins behaviour that's orthogonal to boundary-only mode and
+    flags mid-chapter paragraphs that would otherwise be dropped."""
+    return {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "api_key": "k",
+        "endpoint": "",
+    }
+
+
 # ── Parser robustness across schemas ──────────────────────────────
 
 
@@ -763,7 +777,7 @@ class TestStripAnViaLlmSanityCeiling:
         _stub_llm(monkeypatch, [json.dumps(first_flags), json.dumps(verify_flags)])
 
         out = exporters.strip_an_via_llm(
-            html, llm_config=_llm_config(),
+            html, llm_config=_cloud_llm_config(),
             site_name="ffn", story_id=301, chapter_number=1,
         )
         # 17 paragraphs flagged at exactly the ceiling → kept (not

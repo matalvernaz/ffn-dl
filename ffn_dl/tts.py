@@ -1742,6 +1742,19 @@ def _llm_strip_an_paragraphs(text: str, llm_config: dict | None) -> str:
     without burning LLM tokens. The LLM is the second pass that picks
     up the disguised cases — outros that don't reach the structural
     keyword gate, shout-outs in the middle of a chapter, etc.
+
+    Two safety passes run on the LLM output before paragraphs are
+    actually dropped — same gates the export path
+    (:func:`ffn_dl.exporters.strip_an_via_llm`) uses, so audiobook
+    listeners aren't more exposed than EPUB readers to a mis-classifying
+    model:
+
+    * Provider-aware boundary constraint — Ollama flags outside the
+      head/tail windows are dropped (small local models'
+      mid-chapter false positives are the dominant failure mode).
+    * Block expansion — once a flag lands in the natural head/tail
+      A/N region, sweep its neighbours so the listener doesn't hear
+      a half-stripped outro.
     """
     if not text or not llm_config:
         return text
@@ -1753,6 +1766,15 @@ def _llm_strip_an_paragraphs(text: str, llm_config: dict | None) -> str:
     flagged = attribution.classify_authors_notes_via_llm(
         paragraphs, llm_config=llm_config,
     )
+    if not flagged:
+        return text
+
+    provider = (llm_config.get("provider") or "")
+    if attribution.should_constrain_an_to_boundaries(provider):
+        flagged = attribution.constrain_an_to_boundaries(
+            flagged, len(paragraphs),
+        )
+    flagged = attribution.expand_an_block(flagged, len(paragraphs))
     if not flagged:
         return text
     kept = [p for i, p in enumerate(paragraphs) if i not in flagged]

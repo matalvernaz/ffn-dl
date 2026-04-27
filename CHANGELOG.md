@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.2.31 — 2026-04-27
+
+### Fix
+
+- **Boundary-only LLM A/N for Ollama — story content stops vanishing
+  from the middle of chapters.** Small local models (qwen2.5:7b,
+  llama3.1:8b) confidently mis-flag in-story narration as author
+  commentary on a non-trivial fraction of chapters, even with
+  temperature=0 and the constrained JSON schema. The old pipeline
+  honoured those flags and dropped real prose from the middle of
+  the audiobook / EPUB. The new ``constrain_an_to_boundaries`` pass
+  runs whenever the provider is Ollama and discards any LLM flag
+  outside the head (top 15%) and tail (bottom 30%) windows
+  *before* the existing block-expansion sweep runs — so the sweep
+  can't anchor on a hallucinated mid-chapter flag either.
+  Tradeoff: rare mid-chapter A/Ns (Patreon plugs in the middle of a
+  chapter, "edit:" insertions) won't be stripped on Ollama anymore;
+  the regex pre-pass still catches the labelled ones. Cloud
+  frontier models (Claude / GPT-4) classify mid-chapter prose
+  accurately enough to skip the constraint, so they still strip
+  mid-chapter A/Ns. Same proportions
+  (``_HEAD_BOUNDARY_FRAC`` / ``_TAIL_BOUNDARY_FRAC``) drive both
+  the new constraint and the existing ``expand_an_block`` so the
+  two passes agree on what counts as the chapter's boundary.
+
+- **Audiobook A/N strip now runs the same safety gate as the export
+  path.** ``tts._llm_strip_an_paragraphs`` was passing the LLM's
+  raw flag set straight to the paragraph dropper — no
+  ``expand_an_block`` sweep, no boundary constraint. Listeners
+  were strictly more exposed than EPUB readers to a
+  mis-classifying model. Both gates now run on the audiobook path
+  too.
+
+### Internal
+
+- New helpers in ``attribution``:
+  ``should_constrain_an_to_boundaries(provider)`` and
+  ``constrain_an_to_boundaries(flagged, n_paragraphs)``. Public so
+  the export and audiobook paths share the same implementation.
+- Added a ``_cloud_llm_config()`` test helper for the handful of
+  pre-existing tests that pin orthogonal behaviour with
+  mid-chapter flags — those tests now use a cloud provider config
+  to bypass the new boundary constraint.
+
 ## 2.2.30 — 2026-04-27
 
 ### Improve

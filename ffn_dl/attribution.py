@@ -2732,6 +2732,57 @@ def _walk_int_lists(obj, n_paragraphs: int):
             yield from _walk_int_lists(v, n_paragraphs)
 
 
+# Boundary windows used by both ``constrain_an_to_boundaries`` and
+# ``expand_an_block``. Same proportions in both places so the two
+# passes agree on what counts as the "head" and "tail" of a chapter.
+# Tail is wider than head because authors put longer outros than
+# disclaimers — Patreon plugs, beta thanks, "what did you think?"
+# blocks tend to bottom-load.
+_HEAD_BOUNDARY_FRAC = 0.15
+_TAIL_BOUNDARY_FRAC = 0.30
+
+
+def should_constrain_an_to_boundaries(provider: str) -> bool:
+    """True for providers whose LLM A/N classifier we don't trust to
+    distinguish in-story narration from author commentary in the
+    middle of a chapter.
+
+    Currently Ollama only. Small local models (qwen2.5:7b /
+    llama3.1:8b) confidently flag real prose as A/N on a non-trivial
+    fraction of chapters, and even with temperature=0 + the
+    constrained JSON schema the failure mode persists. Cloud frontier
+    models classify mid-chapter prose accurately, so the constraint
+    would only cost them recall on rare mid-chapter A/Ns.
+    """
+    return provider == "ollama"
+
+
+def constrain_an_to_boundaries(
+    flagged: set[int], n_paragraphs: int,
+) -> set[int]:
+    """Drop any flag that falls outside the head/tail boundary windows.
+
+    Used as a defense-in-depth gate on small Ollama models whose
+    primary failure mode on this task is mid-chapter false positives:
+    real story prose flagged as "author commentary", whole paragraphs
+    of plot vanishing from the middle of chapters. Restricting the
+    flagged set to the chapter's natural A/N regions (top
+    :data:`_HEAD_BOUNDARY_FRAC`, bottom :data:`_TAIL_BOUNDARY_FRAC`)
+    eliminates that failure entirely; the cost is missing rare
+    mid-chapter A/Ns (Patreon plugs in the middle of a chapter,
+    "edit:" insertions). Lost content beats invented content for
+    audiobook narration.
+
+    Returns a new set; the input is not mutated. No-op on empty input
+    or chapters too short for the windows to mean anything.
+    """
+    if not flagged or n_paragraphs <= 0:
+        return set(flagged)
+    head_end = max(2, int(n_paragraphs * _HEAD_BOUNDARY_FRAC))
+    tail_start = int(n_paragraphs * (1 - _TAIL_BOUNDARY_FRAC))
+    return {i for i in flagged if i < head_end or i >= tail_start}
+
+
 def expand_an_block(flagged: set[int], n_paragraphs: int) -> set[int]:
     """Expand the LLM-flagged set across the natural A/N boundaries
     (chapter head and tail).
