@@ -1205,6 +1205,21 @@ _LLM_AN_RUNAWAY_THRESHOLD = 0.40
 # pass because the verification prompt asks for high confidence only.
 _LLM_AN_VERIFY_THRESHOLD = 0.40
 
+# Hard ceiling on the post-verification flag rate. The verification
+# round normally trims a runaway first pass back to a sensible subset,
+# but on rare inputs the model agrees with its own hallucination and
+# returns the same flag set on both passes — a 95-paragraph chapter
+# came back 95/95 true on every round during the diagnostic that
+# produced this guard. When verification keeps more than this fraction
+# of the chapter we treat the LLM as having failed entirely on this
+# chapter and fall through to regex-only A/N stripping. Set higher
+# than the first-pass runaway threshold because verification has
+# already seen the suspect set once; if it still wants to drop more
+# than this much, it isn't a verification round, it's a second
+# rubber-stamp. Defense in depth on top of the per-batch chunking in
+# ``classify_authors_notes_via_llm``.
+_LLM_AN_VERIFY_KEEP_CEILING = 0.85
+
 # Don't bother classifying chapters with too few paragraphs — there's
 # nothing for a backstop to catch and the round-trip is pure latency.
 _LLM_AN_MIN_PARAGRAPHS = 4
@@ -1439,7 +1454,20 @@ def strip_an_via_llm(
             flagged = _llm_an_verify(
                 paragraph_texts, first, llm_config=llm_config,
             )
-            if not flagged:
+            keep_ratio = (
+                len(flagged) / len(paragraph_texts)
+                if paragraph_texts else 0.0
+            )
+            if flagged and keep_ratio > _LLM_AN_VERIFY_KEEP_CEILING:
+                _emit(
+                    progress,
+                    f"  [llm-an] {chapter_label}: verification kept "
+                    f"{len(flagged)}/{len(paragraph_texts)} flag(s) "
+                    f"({keep_ratio:.0%}); rejecting as runaway, "
+                    "falling back to regex",
+                )
+                flagged = set()
+            elif not flagged:
                 _emit(
                     progress,
                     f"  [llm-an] {chapter_label}: verification dropped "

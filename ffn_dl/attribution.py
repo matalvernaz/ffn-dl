@@ -1516,6 +1516,7 @@ def _llm_call(
     endpoint: str, system_prompt: str, user_prompt: str,
     response_schema: dict | None = None,
     request_timeout_s: int | None = None,
+    options: dict | None = None,
 ) -> str:
     """One round-trip to the configured LLM. Returns the raw text reply
     (the caller is responsible for JSON-parsing it). Raises on transport
@@ -1566,6 +1567,12 @@ def _llm_call(
                 {"role": "user", "content": user_prompt},
             ],
         }
+        # Sampling controls (e.g. ``{"temperature": 0}``). Ollama
+        # defaults to temperature 0.8 — fine for free-form generation
+        # but ruinous for a per-paragraph classification task where
+        # the same input should always produce the same labels.
+        if options:
+            payload["options"] = options
     elif provider == "anthropic":
         url = f"{endpoint}/messages"
         if not api_key:
@@ -2181,6 +2188,27 @@ def llm_cache_token(provider: str, model: str) -> str:
 # ── Author's-note classifier (LLM) ────────────────────────────────
 
 
+# Per-call paragraph cap. qwen2.5 (7b and 14b) is reliable up to ~60
+# paragraphs in one prompt and then collapses to "100% true" — at
+# 80+ paragraphs it flagged every single paragraph of a 95-paragraph
+# Harry Potter chapter as an author's note, including pure dialogue
+# and narration. Diagnosed on the FFN founders'-vault fic
+# (id 13772083); see the v2.2.29 changelog. 40 leaves a 1.5x safety
+# margin below the observed breakpoint and is small enough that
+# llama3.1:8b also classifies correctly within a batch. Above this
+# size we split the chapter into batches of this many paragraphs
+# and union the per-batch flag sets.
+_AN_BATCH_SIZE = 40
+
+# Sampling options for every A/N classifier call. Ollama defaults to
+# ``temperature=0.8`` which is far too random for a deterministic
+# classification task — the same chapter would yield different flag
+# sets across runs and the verification round could "agree with
+# itself" on a hallucination by chance. Pinning to 0 makes the
+# classifier reproducible and is a strict improvement on this task.
+_AN_LLM_OPTIONS = {"temperature": 0}
+
+
 _AN_SYSTEM_PROMPT = (
     "You are reading fanfiction and identifying author's notes vs "
     "story content. Author's notes are out-of-story commentary "
@@ -2218,6 +2246,14 @@ def classify_authors_notes_via_llm(
     regex pre-pass is the only A/N filter applied — i.e. the LLM
     backstop is purely additive.
 
+    Long chapters are split into batches of ``_AN_BATCH_SIZE``
+    paragraphs and the per-batch flag sets are unioned. Without
+    batching, qwen2.5 collapses to "every paragraph is an A/N" once
+    the prompt grows past ~60 paragraphs (see ``_AN_BATCH_SIZE``
+    docstring). The verification round inherits the same chunking
+    transparently because it routes back through this function with
+    a ``system_prompt_override``.
+
     ``system_prompt_override`` lets callers swap the default
     audiobook-flavoured prompt for a stricter one — used by the
     HTML-pipeline verification round, which re-asks the model with
@@ -2233,7 +2269,70 @@ def classify_authors_notes_via_llm(
     if not provider or not model:
         return set()
     endpoint = _llm_normalize_endpoint(provider, llm_config.get("endpoint"))
+    system_prompt = system_prompt_override or _AN_SYSTEM_PROMPT
+    api_key = llm_config.get("api_key")
+    request_timeout_s = llm_config.get("request_timeout_s")
 
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "LLM A/N input: %d paragraph(s) for %s/%s",
+            len(paragraphs), provider, model,
+        )
+        for i, p in enumerate(paragraphs, 1):
+            preview = p.strip().replace("\n", " ")[:120]
+            logger.debug("LLM A/N input  [%d] (%d chars): %s",
+                         i, len(p), preview)
+
+    flagged: set[int] = set()
+    total = len(paragraphs)
+    n_batches = (total + _AN_BATCH_SIZE - 1) // _AN_BATCH_SIZE
+    for batch_no, batch_start in enumerate(
+        range(0, total, _AN_BATCH_SIZE), start=1,
+    ):
+        batch = paragraphs[batch_start : batch_start + _AN_BATCH_SIZE]
+        if logger.isEnabledFor(logging.DEBUG) and n_batches > 1:
+            logger.debug(
+                "LLM A/N batch %d/%d: paragraphs %d-%d (%d items)",
+                batch_no, n_batches,
+                batch_start + 1, batch_start + len(batch), len(batch),
+            )
+        try:
+            batch_flags = _classify_an_batch(
+                batch,
+                provider=provider, model=model, endpoint=endpoint,
+                api_key=api_key, system_prompt=system_prompt,
+                request_timeout_s=request_timeout_s,
+            )
+        except LLMUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 — additive, never fail
+            logger.warning(
+                "LLM author's-note classifier failed on batch "
+                "%d/%d: %s", batch_no, n_batches, exc,
+            )
+            continue
+        for local_idx in batch_flags:
+            flagged.add(batch_start + local_idx)
+
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "LLM A/N parsed: %d flag(s) from %d paragraph(s) "
+            "across %d batch(es)",
+            len(flagged), total, n_batches,
+        )
+    return flagged
+
+
+def _classify_an_batch(
+    paragraphs: list[str], *,
+    provider: str, model: str, endpoint: str,
+    api_key: str | None, system_prompt: str,
+    request_timeout_s: int | None,
+) -> set[int]:
+    """One batched round-trip to the LLM. Returns 0-based indices
+    *within this batch* (not the original chapter); the caller is
+    responsible for offsetting them back to chapter coordinates.
+    """
     numbered = []
     # Truncate each paragraph to a reasonable length so a 5K-word
     # narration block doesn't dominate the prompt and crowd out the
@@ -2248,22 +2347,6 @@ def classify_authors_notes_via_llm(
         "Paragraphs to classify (true = author's note, false = story "
         "content):\n\n" + "\n\n".join(numbered) + "\n\nReturn JSON only."
     )
-
-    # DEBUG-level transcript of the classifier input. Lets a user
-    # who's seeing "no A/N paragraphs found" on a fic with obvious
-    # author's notes diagnose without having to share the fic
-    # itself: grep the log for `LLM A/N input` and you can see the
-    # first ~80 chars of every paragraph the model was shown, in
-    # order. The truncation keeps the log manageable on long fics.
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            "LLM A/N input: %d paragraph(s) for %s/%s",
-            len(paragraphs), provider, model,
-        )
-        for i, p in enumerate(paragraphs, 1):
-            preview = p.strip().replace("\n", " ")[:120]
-            logger.debug("LLM A/N input  [%d] (%d chars): %s",
-                         i, len(p), preview)
 
     # Build a JSON Schema that mirrors the documented response shape:
     # one boolean per paragraph, keyed by 1-based index, no extra fields.
@@ -2282,30 +2365,14 @@ def classify_authors_notes_via_llm(
         "additionalProperties": False,
     }
 
-    try:
-        reply = _llm_call(
-            provider=provider, model=model,
-            api_key=llm_config.get("api_key"),
-            endpoint=endpoint,
-            system_prompt=system_prompt_override or _AN_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            response_schema=an_schema,
-            request_timeout_s=llm_config.get("request_timeout_s"),
-        )
-    except LLMUnavailable:
-        # Endpoint is down — propagate so the chapter-loop caller can
-        # disable LLM for the rest of the run instead of retrying every
-        # chapter and spamming the same warning.
-        raise
-    except Exception as exc:  # noqa: BLE001 — additive, never fail
-        logger.warning("LLM author's-note classifier failed: %s", exc)
-        return set()
+    reply = _llm_call(
+        provider=provider, model=model, api_key=api_key,
+        endpoint=endpoint, system_prompt=system_prompt,
+        user_prompt=user_prompt, response_schema=an_schema,
+        request_timeout_s=request_timeout_s,
+        options=_AN_LLM_OPTIONS,
+    )
 
-    # DEBUG-level transcript of the raw model reply. If the user is
-    # debugging "model returned empty" vs "model returned all-false"
-    # vs "model returned weird JSON", this is the differentiator.
-    # Capped at 1500 chars because some providers like to wrap their
-    # JSON in a chatty preamble.
     if logger.isEnabledFor(logging.DEBUG):
         snippet = (reply or "").replace("\n", " ")[:1500]
         logger.debug("LLM A/N raw reply: %s", snippet)
@@ -2332,13 +2399,7 @@ def classify_authors_notes_via_llm(
     except (ValueError, _json.JSONDecodeError):
         return set()
 
-    flagged = _parse_an_response(parsed, paragraphs)
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            "LLM A/N parsed: %d flag(s) from %d paragraph(s)",
-            len(flagged), len(paragraphs),
-        )
-    return flagged
+    return _parse_an_response(parsed, paragraphs)
 
 
 # Keys models tend to use for the "this paragraph is N" field when

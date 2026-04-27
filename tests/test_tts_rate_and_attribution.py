@@ -744,7 +744,8 @@ def test_refine_with_llm_calls_provider_and_applies_labels(monkeypatch):
     ]
 
     def fake_call(*, provider, model, api_key, endpoint,
-                  system_prompt, user_prompt, request_timeout_s=None):
+                  system_prompt, user_prompt, request_timeout_s=None,
+                  response_schema=None, options=None):
         # Sanity-check the prompt contains the cast list and quotes.
         assert "Harry Potter" in user_prompt
         assert "Hello there" in user_prompt

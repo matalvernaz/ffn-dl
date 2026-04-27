@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.2.29 — 2026-04-27
+
+### Fix
+
+- **LLM author's-note classifier no longer flags every paragraph
+  on long chapters.** A user run on a 77-chapter FFN fic
+  ("Harry Potter and the Founders' Vault", id 13772083) had
+  qwen2.5:7b and qwen2.5:14b returning ``{"1": true, ..., "95":
+  true}`` on chapter 1 — every single paragraph flagged as an
+  author's note, including pure dialogue and narration. The
+  verification round saw the same prompt and rubber-stamped the
+  same answer, so the safety net didn't catch it. Diagnosis
+  pointed at *prompt-length attention collapse*: the same
+  paragraphs sent in a 20- or 40-paragraph window classified
+  correctly. The classifier now splits each chapter into batches
+  of 40 paragraphs (``_AN_BATCH_SIZE``) and unions the per-batch
+  flag sets. The verification round routes through the same
+  function so it inherits the chunking transparently.
+
+- **Ollama A/N calls now decode at temperature 0.** The classifier
+  was inheriting Ollama's default 0.8 sampling, which made the
+  flag set non-deterministic — the verification round could
+  "agree with itself" on a hallucination by chance and the same
+  chapter could yield different strip outcomes across runs. A
+  classification task wants deterministic decoding; pinning to 0
+  is a strict improvement and removes one of the variables that
+  made the founders'-vault bug intermittent.
+
+- **Sanity ceiling on the verification round.** Even with
+  per-batch chunking and deterministic decoding, a future model
+  or fic could still trigger a runaway both passes agree on. New
+  ``_LLM_AN_VERIFY_KEEP_CEILING`` (0.85): when verification
+  keeps more than 85% of the chapter's paragraphs flagged, the
+  LLM's verdict is rejected entirely and the chapter falls back
+  to regex-only A/N stripping. Logged so users can see why their
+  LLM run quietly de-graded.
+
+### Internal
+
+- ``attribution._llm_call`` accepts an ``options`` dict that the
+  Ollama transport forwards as ``payload["options"]``. Currently
+  used only by the A/N classifier (``_AN_LLM_OPTIONS``); other
+  callers continue to use Ollama defaults.
+
 ## 2.2.26 — 2026-04-27
 
 ### Fix

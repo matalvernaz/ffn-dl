@@ -56,7 +56,7 @@ def _stub_llm(monkeypatch, replies):
 
     def fake_call(*, provider, model, api_key, endpoint,
                   system_prompt, user_prompt, response_schema=None,
-                  request_timeout_s=None):
+                  request_timeout_s=None, options=None):
         calls.append({
             "provider": provider,
             "model": model,
@@ -64,6 +64,7 @@ def _stub_llm(monkeypatch, replies):
             "user_prompt": user_prompt,
             "response_schema": response_schema,
             "request_timeout_s": request_timeout_s,
+            "options": options,
         })
         if not replies:
             return ""
@@ -704,6 +705,103 @@ class TestStripAnViaLlmVerification:
         assert len(calls) == 2
 
 
+class TestStripAnViaLlmSanityCeiling:
+    """When verification keeps more than ``_LLM_AN_VERIFY_KEEP_CEILING``
+    of the chapter the LLM has agreed with its own hallucination —
+    drop everything and let the regex pre-pass be the only A/N
+    filter for this chapter. Defense in depth on top of per-chapter
+    batching: the diagnostic that motivated this guard saw qwen2.5
+    flag 95/95 paragraphs as A/N and the verification round agree.
+    """
+
+    def _make_html(self, n: int) -> str:
+        return "".join(f"<p>Story line {i}.</p>" for i in range(1, n + 1))
+
+    def test_verification_above_ceiling_clears_flags(
+        self, tmp_path, monkeypatch,
+    ):
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        n = 20
+        html = self._make_html(n)
+        # First pass: every paragraph flagged → over runaway threshold,
+        # triggers verification. Verification: rubber-stamps everything
+        # → 20/20 (100%) > 85% ceiling → flag set must be cleared.
+        first_reply = json.dumps({str(i): True for i in range(1, n + 1)})
+        verify_reply = json.dumps({str(i): True for i in range(1, n + 1)})
+        progress_lines: list[str] = []
+        _stub_llm(monkeypatch, [first_reply, verify_reply])
+
+        out = exporters.strip_an_via_llm(
+            html, llm_config=_llm_config(),
+            site_name="ffn", story_id=300, chapter_number=1,
+            progress=progress_lines.append,
+        )
+        # Every <p> survived because the LLM was rejected as runaway.
+        assert out.count("<p>") == n
+        assert "Story line 1" in out
+        assert "Story line 20" in out
+        # The runaway-rejection log line must explain WHY the LLM was
+        # ignored so users can diagnose without re-running.
+        assert any("rejecting as runaway" in line for line in progress_lines)
+        assert any("falling back to regex" in line for line in progress_lines)
+
+    def test_verification_at_ceiling_keeps_flags(
+        self, tmp_path, monkeypatch,
+    ):
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        # 20 paragraphs, verification keeps 17 = 85% (exactly at the
+        # ceiling, not above) → flags retained. Edge case to pin the
+        # comparison as ``>`` and not ``>=``.
+        n = 20
+        kept = 17
+        html = self._make_html(n)
+        first_flags = {str(i): i <= kept for i in range(1, n + 1)}
+        # Verification is asked about the flagged subset (1..kept,
+        # renumbered 1..kept inside the verify prompt). Confirm all of
+        # them.
+        verify_flags = {str(i): True for i in range(1, kept + 1)}
+        _stub_llm(monkeypatch, [json.dumps(first_flags), json.dumps(verify_flags)])
+
+        out = exporters.strip_an_via_llm(
+            html, llm_config=_llm_config(),
+            site_name="ffn", story_id=301, chapter_number=1,
+        )
+        # 17 paragraphs flagged at exactly the ceiling → kept (not
+        # rejected). Block expansion may sweep neighbours, but the
+        # number of stripped paragraphs must be at least the 17 the
+        # LLM actually flagged — and definitely not zero (which is
+        # what the runaway-clear path would produce).
+        stripped = n - out.count("<p>")
+        assert stripped >= kept, (
+            f"verification at ceiling must retain flags, "
+            f"got stripped={stripped} for kept={kept}"
+        )
+
+    def test_verification_below_ceiling_keeps_flags(
+        self, tmp_path, monkeypatch,
+    ):
+        _isolate_cache_dir(monkeypatch, tmp_path)
+        # First pass over-flags (triggers verification), verification
+        # keeps a moderate number well under the ceiling — normal
+        # behaviour, flags retained.
+        html = self._make_html(10)
+        # Flag 6/10 first pass (60%, over runaway threshold of 40%).
+        first = json.dumps({str(i): i <= 6 for i in range(1, 11)})
+        # Verification keeps 3/6 = 30% of chapter → way under ceiling.
+        verify = json.dumps({str(i): i <= 3 for i in range(1, 7)})
+        _stub_llm(monkeypatch, [first, verify])
+
+        out = exporters.strip_an_via_llm(
+            html, llm_config=_llm_config(),
+            site_name="ffn", story_id=302, chapter_number=1,
+        )
+        # 3 paragraphs were verified — they (plus any block-expansion
+        # neighbours) should be stripped, not the whole chapter and
+        # not nothing.
+        stripped = 10 - out.count("<p>")
+        assert 1 <= stripped <= 9
+
+
 # ── Failure modes ─────────────────────────────────────────────────
 
 
@@ -983,7 +1081,7 @@ class TestLlmCallStructuredOutput:
 
         def fake_call(*, provider, model, api_key, endpoint,
                       system_prompt, user_prompt, response_schema=None,
-                      request_timeout_s=None):
+                      request_timeout_s=None, options=None):
             captured["response_schema"] = response_schema
             return '{"1": true, "2": false, "3": true}'
 
@@ -1003,6 +1101,157 @@ class TestLlmCallStructuredOutput:
         assert sorted(schema["required"]) == ["1", "2", "3"]
         assert schema["additionalProperties"] is False
         assert flagged == {0, 2}
+
+
+class TestClassifyAuthorsNotesBatching:
+    """The classifier splits long chapters into ``_AN_BATCH_SIZE``
+    paragraph batches and unions the per-batch flag sets. Without this,
+    qwen2.5:7b on the FFN founders'-vault fic flagged 95/95 paragraphs
+    as A/N once the prompt grew past ~60 paragraphs — the same
+    paragraphs classified correctly when sent in a smaller window.
+    """
+
+    def test_chapter_at_batch_size_makes_one_call(self, monkeypatch):
+        size = attribution._AN_BATCH_SIZE
+        replies = [json.dumps({str(i): False for i in range(1, size + 1)})]
+        calls = _stub_llm(monkeypatch, replies)
+        flagged = attribution.classify_authors_notes_via_llm(
+            ["p"] * size, llm_config=_llm_config(),
+        )
+        assert len(calls) == 1
+        assert flagged == set()
+
+    def test_chapter_over_batch_size_makes_two_calls(self, monkeypatch):
+        size = attribution._AN_BATCH_SIZE + 1
+        # Each batch returns all-false; what matters is the call count.
+        first_size = attribution._AN_BATCH_SIZE
+        second_size = size - first_size
+        replies = [
+            json.dumps({str(i): False for i in range(1, first_size + 1)}),
+            json.dumps({str(i): False for i in range(1, second_size + 1)}),
+        ]
+        calls = _stub_llm(monkeypatch, replies)
+        flagged = attribution.classify_authors_notes_via_llm(
+            ["p"] * size, llm_config=_llm_config(),
+        )
+        assert len(calls) == 2
+        assert flagged == set()
+
+    def test_batched_indices_offset_to_chapter_coordinates(self, monkeypatch):
+        # 95-paragraph chapter (the FFN founders'-vault chapter 1).
+        # First batch: paragraphs 1-40, none flagged.
+        # Second batch: paragraphs 41-80, none flagged.
+        # Third batch: paragraphs 81-95 (15 items); the last three
+        # are the real A/N (Post Chapter Note / Hope you liked /
+        # Karry Master OUT) — local indices 13, 14, 15 → global
+        # 0-based 92, 93, 94.
+        n = 95
+        b = attribution._AN_BATCH_SIZE
+        first_size = b
+        second_size = b
+        third_size = n - 2 * b
+        third_flags = {str(i): i in (13, 14, 15) for i in range(1, third_size + 1)}
+        replies = [
+            json.dumps({str(i): False for i in range(1, first_size + 1)}),
+            json.dumps({str(i): False for i in range(1, second_size + 1)}),
+            json.dumps(third_flags),
+        ]
+        calls = _stub_llm(monkeypatch, replies)
+        flagged = attribution.classify_authors_notes_via_llm(
+            ["p"] * n, llm_config=_llm_config(),
+        )
+        assert len(calls) == 3
+        assert flagged == {92, 93, 94}
+
+    def test_batches_pass_temperature_zero_in_options(self, monkeypatch):
+        # Per-batch _llm_call must opt into deterministic decoding —
+        # ollama defaults to temp 0.8, and on a classification task
+        # that produces flag sets that vary run-to-run and let the
+        # verification round "agree with itself" on a hallucination.
+        n = attribution._AN_BATCH_SIZE * 2
+        replies = [
+            json.dumps({str(i): False for i in range(1, attribution._AN_BATCH_SIZE + 1)}),
+            json.dumps({str(i): False for i in range(1, attribution._AN_BATCH_SIZE + 1)}),
+        ]
+        calls = _stub_llm(monkeypatch, replies)
+        attribution.classify_authors_notes_via_llm(
+            ["p"] * n, llm_config=_llm_config(),
+        )
+        assert len(calls) == 2
+        for call in calls:
+            assert call["options"] == {"temperature": 0}
+
+    def test_per_batch_schema_matches_batch_size(self, monkeypatch):
+        # Last batch of an over-batch chapter has fewer paragraphs
+        # than ``_AN_BATCH_SIZE``; its schema must enumerate only the
+        # paragraphs it actually contains, not the full batch size,
+        # or constrained-decode rejects valid replies.
+        b = attribution._AN_BATCH_SIZE
+        n = b + 5  # 5 paragraphs in second batch
+        replies = [
+            json.dumps({str(i): False for i in range(1, b + 1)}),
+            json.dumps({str(i): False for i in range(1, 6)}),
+        ]
+        calls = _stub_llm(monkeypatch, replies)
+        attribution.classify_authors_notes_via_llm(
+            ["p"] * n, llm_config=_llm_config(),
+        )
+        assert len(calls[0]["response_schema"]["properties"]) == b
+        assert len(calls[1]["response_schema"]["properties"]) == 5
+        assert calls[1]["response_schema"]["properties"].keys() == {
+            "1", "2", "3", "4", "5",
+        }
+
+    def test_one_batch_failure_does_not_kill_other_batches(
+        self, monkeypatch,
+    ):
+        # If a non-Unavailable exception lands on one batch (parse
+        # failure, malformed JSON, etc.) the classifier degrades that
+        # batch to "no flags" but still classifies the remaining
+        # batches — losing 40 paragraphs of attention is better than
+        # losing the entire chapter.
+        b = attribution._AN_BATCH_SIZE
+        n = b * 2
+        replies = [
+            "not even close to JSON",  # batch 1: garbage → empty set
+            json.dumps({str(i): i == 7 for i in range(1, b + 1)}),
+            # batch 2 flags local index 7 → global 0-based b + 6
+        ]
+        calls = _stub_llm(monkeypatch, replies)
+        flagged = attribution.classify_authors_notes_via_llm(
+            ["p"] * n, llm_config=_llm_config(),
+        )
+        assert len(calls) == 2
+        assert flagged == {b + 6}
+
+    def test_unavailable_in_any_batch_propagates(self, monkeypatch):
+        # A dead endpoint must propagate LLMUnavailable so the
+        # chapter-loop circuit breaker can disable the LLM for the
+        # rest of the run; we don't want each subsequent batch
+        # spamming the same connection-refused warning.
+        from ffn_dl.attribution import LLMUnavailable
+        b = attribution._AN_BATCH_SIZE
+        n = b + 5
+
+        call_count = {"n": 0}
+
+        def fake_call(*, provider, model, api_key, endpoint,
+                      system_prompt, user_prompt, response_schema=None,
+                      request_timeout_s=None, options=None):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # Batch 1 succeeds.
+                return json.dumps({str(i): False for i in range(1, b + 1)})
+            # Batch 2 trips the unavailable path.
+            raise LLMUnavailable("endpoint down")
+
+        monkeypatch.setattr(attribution, "_llm_call", fake_call)
+        with pytest.raises(LLMUnavailable):
+            attribution.classify_authors_notes_via_llm(
+                ["p"] * n, llm_config=_llm_config(),
+            )
+        # Should not have retried after the unavailable exception.
+        assert call_count["n"] == 2
 
 
 class TestExportLoopCircuitBreaker:
