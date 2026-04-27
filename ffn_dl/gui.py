@@ -820,12 +820,22 @@ class MainFrame(wx.Frame):
         endpoint = (self.prefs.get(_p.KEY_LLM_ENDPOINT) or "").strip()
         if not model:
             return None
-        return {
+        config = {
             "provider": provider,
             "model": model,
             "api_key": api_key,
             "endpoint": endpoint,
         }
+        # 0 (the default) means "fall back to env var / built-in default";
+        # only forward an explicit user-set value so the env override still
+        # works for users who never opened the dialog.
+        try:
+            timeout_pref = int(self.prefs.get(_p.KEY_LLM_REQUEST_TIMEOUT_S) or 0)
+        except (TypeError, ValueError):
+            timeout_pref = 0
+        if timeout_pref > 0:
+            config["request_timeout_s"] = timeout_pref
+        return config
 
     def _on_attribution_change(self, event):
         self._refresh_attribution_status()

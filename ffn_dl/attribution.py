@@ -1378,13 +1378,27 @@ _LLM_CHUNK_OVERLAP_CHARS = 500
 _LLM_REQUEST_TIMEOUT_DEFAULT_S = 300
 
 
-def _llm_request_timeout_s() -> int:
-    """Active per-request LLM timeout, in seconds. Reads
-    ``FFN_DL_LLM_TIMEOUT_S`` from the environment so users on slow
-    hardware can extend the deadline without editing source — set it
-    to e.g. ``600`` for a 14B model on CPU. Falls back to
-    :data:`_LLM_REQUEST_TIMEOUT_DEFAULT_S` when the variable is
-    unset, blank, non-numeric, or non-positive."""
+def _llm_request_timeout_s(override: int | None = None) -> int:
+    """Active per-request LLM timeout, in seconds.
+
+    Resolution order, first positive value wins:
+
+    1. ``override`` — caller-supplied (GUI/CLI pref threaded through
+       ``llm_config['request_timeout_s']``).
+    2. ``FFN_DL_LLM_TIMEOUT_S`` environment variable, so users who
+       never opened the dialog can still extend the deadline without
+       editing source — set it to e.g. ``600`` for a 14B model on CPU.
+    3. :data:`_LLM_REQUEST_TIMEOUT_DEFAULT_S` (300s).
+
+    Non-positive or non-numeric values at any layer fall through to
+    the next."""
+    if override is not None:
+        try:
+            value = int(override)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
     raw = os.environ.get("FFN_DL_LLM_TIMEOUT_S", "").strip()
     if not raw:
         return _LLM_REQUEST_TIMEOUT_DEFAULT_S
@@ -1501,6 +1515,7 @@ def _llm_call(
     *, provider: str, model: str, api_key: str | None,
     endpoint: str, system_prompt: str, user_prompt: str,
     response_schema: dict | None = None,
+    request_timeout_s: int | None = None,
 ) -> str:
     """One round-trip to the configured LLM. Returns the raw text reply
     (the caller is responsible for JSON-parsing it). Raises on transport
@@ -1582,7 +1597,7 @@ def _llm_call(
     data = _json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        request_timeout = _llm_request_timeout_s()
+        request_timeout = _llm_request_timeout_s(request_timeout_s)
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
@@ -2007,6 +2022,7 @@ def _refine_with_llm(
     api_key: str | None = None,
     endpoint: str | None = None,
     character_list: Iterable[str] | None = None,
+    request_timeout_s: int | None = None,
 ):
     """Send chapter context + numbered quotes to an LLM and overwrite
     segment speakers with its labels.
@@ -2106,6 +2122,7 @@ def _refine_with_llm(
                 provider=provider, model=model, api_key=api_key,
                 endpoint=endpoint_url,
                 system_prompt=system_prompt, user_prompt=user_prompt,
+                request_timeout_s=request_timeout_s,
             )
             mapping = _llm_parse_speaker_map(reply)
             for n, (seg_i, _qpos) in enumerate(batch, 1):
@@ -2273,6 +2290,7 @@ def classify_authors_notes_via_llm(
             system_prompt=system_prompt_override or _AN_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             response_schema=an_schema,
+            request_timeout_s=llm_config.get("request_timeout_s"),
         )
     except LLMUnavailable:
         # Endpoint is down — propagate so the chapter-loop caller can

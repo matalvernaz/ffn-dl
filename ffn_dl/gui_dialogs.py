@@ -1270,7 +1270,7 @@ class LlmSettingsDialog(wx.Dialog):
         intro.Wrap(580)
         sizer.Add(intro, 0, wx.ALL, pad)
 
-        grid = wx.FlexGridSizer(rows=4, cols=2, hgap=8, vgap=6)
+        grid = wx.FlexGridSizer(rows=5, cols=2, hgap=8, vgap=6)
         grid.AddGrowableCol(1, 1)
 
         grid.Add(
@@ -1320,6 +1320,26 @@ class LlmSettingsDialog(wx.Dialog):
         self.endpoint_ctrl.SetName("Endpoint URL")
         self.endpoint_ctrl.SetHint("(blank = provider default)")
         grid.Add(self.endpoint_ctrl, 1, wx.EXPAND)
+
+        grid.Add(
+            wx.StaticText(root, label="Request &timeout (s):"),
+            0, wx.ALIGN_CENTER_VERTICAL,
+        )
+        # 0 means "use the FFN_DL_LLM_TIMEOUT_S env var, then the
+        # built-in 300s default". A 14B model on CPU or partial-GPU
+        # offload can spend 5+ minutes on a long chapter, so the
+        # range goes up to an hour for users on slow hardware.
+        self.timeout_ctrl = wx.SpinCtrl(
+            root, min=0, max=3600, initial=0,
+        )
+        self.timeout_ctrl.SetName("Request timeout in seconds")
+        self.timeout_ctrl.SetToolTip(
+            "Per-request timeout for LLM calls, in seconds. 0 means "
+            "use the default (300s) or the FFN_DL_LLM_TIMEOUT_S env "
+            "var. Bump to 600-900 if a 14B model on CPU or partial-"
+            "GPU offload is timing out on long chapters."
+        )
+        grid.Add(self.timeout_ctrl, 1, wx.EXPAND)
 
         sizer.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
 
@@ -1409,6 +1429,14 @@ class LlmSettingsDialog(wx.Dialog):
         # before loading the new selection's saved values.
         self._displayed_provider = provider
         self._load_provider_into_fields(provider)
+        # Timeout is provider-agnostic (it's a hardware concern, not a
+        # credentials one) so it lives in a single pref outside the
+        # per-provider archive.
+        try:
+            timeout = int(self._prefs.get(self._p.KEY_LLM_REQUEST_TIMEOUT_S) or 0)
+        except (TypeError, ValueError):
+            timeout = 0
+        self.timeout_ctrl.SetValue(max(0, min(3600, timeout)))
         self._refresh_hint()
 
     def _load_provider_into_fields(self, provider: str) -> None:
@@ -1570,6 +1598,10 @@ class LlmSettingsDialog(wx.Dialog):
         self._prefs.set(self._p.KEY_LLM_MODEL, model)
         self._prefs.set(self._p.KEY_LLM_API_KEY, api_key)
         self._prefs.set(self._p.KEY_LLM_ENDPOINT, endpoint)
+        self._prefs.set(
+            self._p.KEY_LLM_REQUEST_TIMEOUT_S,
+            int(self.timeout_ctrl.GetValue()),
+        )
         # Per-provider archive — keeps creds for non-active providers
         # alive across switches. Without this, "I have my OpenAI key
         # AND my Anthropic key" stops working as soon as the user

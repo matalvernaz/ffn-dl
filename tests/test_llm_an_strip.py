@@ -55,13 +55,15 @@ def _stub_llm(monkeypatch, replies):
     calls: list[dict] = []
 
     def fake_call(*, provider, model, api_key, endpoint,
-                  system_prompt, user_prompt, response_schema=None):
+                  system_prompt, user_prompt, response_schema=None,
+                  request_timeout_s=None):
         calls.append({
             "provider": provider,
             "model": model,
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
             "response_schema": response_schema,
+            "request_timeout_s": request_timeout_s,
         })
         if not replies:
             return ""
@@ -980,7 +982,8 @@ class TestLlmCallStructuredOutput:
         captured: dict = {}
 
         def fake_call(*, provider, model, api_key, endpoint,
-                      system_prompt, user_prompt, response_schema=None):
+                      system_prompt, user_prompt, response_schema=None,
+                      request_timeout_s=None):
             captured["response_schema"] = response_schema
             return '{"1": true, "2": false, "3": true}'
 
@@ -1417,6 +1420,71 @@ class TestLlmRequestTimeoutEnvOverride:
             provider="ollama", model="m", api_key="",
             endpoint="http://127.0.0.1:11434",
             system_prompt="", user_prompt="",
+        )
+        assert seen["timeout"] == 777
+
+
+class TestLlmRequestTimeoutOverride:
+    """The GUI/CLI can pass an explicit ``request_timeout_s`` through
+    ``llm_config`` to bypass the env var. Without this path, users on
+    slow hardware would have to set an environment variable to extend
+    the deadline — annoying on Windows, near-impossible inside a
+    frozen .exe."""
+
+    def test_override_beats_env(self, monkeypatch):
+        monkeypatch.setenv("FFN_DL_LLM_TIMEOUT_S", "450")
+        assert attribution._llm_request_timeout_s(900) == 900
+
+    def test_override_zero_falls_through_to_env(self, monkeypatch):
+        # 0 is the dialog's "no override" sentinel — must NOT be
+        # treated as "0-second timeout" (which urllib reads as
+        # non-blocking and would break every call).
+        monkeypatch.setenv("FFN_DL_LLM_TIMEOUT_S", "450")
+        assert attribution._llm_request_timeout_s(0) == 450
+
+    def test_override_negative_falls_through_to_default(self, monkeypatch):
+        monkeypatch.delenv("FFN_DL_LLM_TIMEOUT_S", raising=False)
+        assert (
+            attribution._llm_request_timeout_s(-30)
+            == attribution._LLM_REQUEST_TIMEOUT_DEFAULT_S
+        )
+
+    def test_override_non_numeric_falls_through(self, monkeypatch):
+        monkeypatch.delenv("FFN_DL_LLM_TIMEOUT_S", raising=False)
+        assert (
+            attribution._llm_request_timeout_s("forever")
+            == attribution._LLM_REQUEST_TIMEOUT_DEFAULT_S
+        )
+
+    def test_llm_config_override_threads_to_urlopen(self, monkeypatch):
+        # End-to-end: putting ``request_timeout_s`` into the llm_config
+        # dict has to flow through ``classify_authors_notes_via_llm``
+        # → ``_llm_call`` → ``urllib.request.urlopen``. A regression
+        # here would silently fall back to the env/default and the
+        # GUI setting would do nothing.
+        seen = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+            def read(self):
+                return b'{"message":{"content":"{\\"1\\":false}"}}'
+
+        def fake_urlopen(req, timeout=None):
+            seen["timeout"] = timeout
+            return _Resp()
+
+        monkeypatch.delenv("FFN_DL_LLM_TIMEOUT_S", raising=False)
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        attribution.classify_authors_notes_via_llm(
+            ["only paragraph"],
+            llm_config={
+                "provider": "ollama", "model": "m", "api_key": "",
+                "endpoint": "http://127.0.0.1:11434",
+                "request_timeout_s": 777,
+            },
         )
         assert seen["timeout"] == 777
 

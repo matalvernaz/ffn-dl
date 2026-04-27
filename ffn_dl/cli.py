@@ -112,12 +112,37 @@ def _llm_config_from_args(args: argparse.Namespace) -> dict | None:
     if not api_key:
         api_key = cli_prefs.get(_prefs_mod.KEY_LLM_API_KEY) or ""
 
-    return {
+    config = {
         "provider": provider,
         "model": model,
         "api_key": api_key,
         "endpoint": endpoint,
     }
+    timeout_s = _resolve_llm_timeout(args, cli_prefs, _prefs_mod)
+    if timeout_s > 0:
+        config["request_timeout_s"] = timeout_s
+    return config
+
+
+def _resolve_llm_timeout(args, cli_prefs, _prefs_mod) -> int:
+    """Resolve the per-request LLM timeout in seconds. Priority:
+    ``--llm-timeout-s`` CLI flag → saved GUI pref → 0 (which signals
+    attribution.py to fall back to ``FFN_DL_LLM_TIMEOUT_S`` then the
+    300s built-in default). Never raises on bad input — non-positive
+    or non-numeric values fall through as 0."""
+    raw = getattr(args, "llm_timeout_s", None)
+    if raw is not None:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    try:
+        pref = int(cli_prefs.get(_prefs_mod.KEY_LLM_REQUEST_TIMEOUT_S) or 0)
+    except (TypeError, ValueError):
+        pref = 0
+    return pref if pref > 0 else 0
 
 
 def _llm_strip_notes_config(args: argparse.Namespace) -> dict | None:
@@ -167,12 +192,16 @@ def _llm_strip_notes_config(args: argparse.Namespace) -> dict | None:
     if not api_key:
         api_key = cli_prefs.get(_prefs_mod.KEY_LLM_API_KEY) or ""
 
-    return {
+    config = {
         "provider": provider,
         "model": model,
         "api_key": api_key,
         "endpoint": endpoint,
     }
+    timeout_s = _resolve_llm_timeout(args, cli_prefs, _prefs_mod)
+    if timeout_s > 0:
+        config["request_timeout_s"] = timeout_s
+    return config
 
 
 def _scrape_author_stories(
@@ -3133,6 +3162,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "Override the LLM provider's base URL. Useful for "
             "self-hosted Ollama on another machine, or any "
             "OpenAI-compatible endpoint (Groq, OpenRouter, vLLM, ...)."
+        ),
+    )
+    parser.add_argument(
+        "--llm-timeout-s",
+        default=None,
+        type=int,
+        metavar="SECONDS",
+        help=(
+            "Per-request timeout for LLM calls. Bump to 600-900 if a "
+            "14B model on CPU or partial-GPU offload is timing out on "
+            "long chapters. Falls back to the GUI pref, then the env "
+            "var FFN_DL_LLM_TIMEOUT_S, then 300s."
         ),
     )
     parser.add_argument(

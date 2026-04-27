@@ -61,6 +61,13 @@ KEY_LLM_PROVIDER = "llm_provider"
 KEY_LLM_MODEL = "llm_model"
 KEY_LLM_API_KEY = "llm_api_key"
 KEY_LLM_ENDPOINT = "llm_endpoint"
+# Per-request timeout for LLM calls, in seconds. Sized for the slow end
+# of self-hosted setups: a 14B model on CPU (or partial GPU offload)
+# can spend 5+ minutes on a long chapter. 0 means "use the env var
+# FFN_DL_LLM_TIMEOUT_S, then the built-in 300s default" — anyone who
+# explicitly sets this in the GUI gets the value they typed regardless
+# of the env. Bound is enforced in the dialog (60-3600).
+KEY_LLM_REQUEST_TIMEOUT_S = "llm_request_timeout_s"
 # Comma-separated list of enabled TTS provider names. Empty == fall
 # back to "all installed providers" so a fresh install (just edge-tts)
 # behaves like 2.1.x. The audiobook generator pulls the union of every
@@ -139,6 +146,7 @@ DEFAULTS = {
     KEY_LLM_MODEL: "llama3.1:8b",
     KEY_LLM_API_KEY: "",
     KEY_LLM_ENDPOINT: "",
+    KEY_LLM_REQUEST_TIMEOUT_S: 0,
     KEY_TTS_PROVIDERS: "",
     KEY_LOG_LEVEL: "INFO",
     KEY_LOG_TO_FILE: False,
