@@ -36,6 +36,7 @@ __all__ = [
     "seed_pronunciations_via_llm",
     "suggest_narrator_via_llm",
     "pick_narrator_voice_for_profile",
+    "analyze_story_via_llm",
 ]
 
 
@@ -117,6 +118,7 @@ def seed_profiles_via_llm(
             endpoint=endpoint,
             system_prompt=_SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            cache_system=True,
         )
     except Exception as exc:  # noqa: BLE001 — never fail the render
         logger.warning("LLM character-profile seeding failed: %s", exc)
@@ -311,6 +313,7 @@ def seed_pronunciations_via_llm(
             endpoint=endpoint,
             system_prompt=_PRONUNCIATION_SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            cache_system=True,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("LLM pronunciation seeding failed: %s", exc)
@@ -407,6 +410,7 @@ def suggest_narrator_via_llm(
             endpoint=endpoint,
             system_prompt=_NARRATOR_SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            cache_system=True,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("LLM narrator-voice suggestion failed: %s", exc)
@@ -480,3 +484,221 @@ def pick_narrator_voice_for_profile(
         if v.language.lower() == target_lang:
             return v.id
     return fallback
+
+
+# ── Unified per-story analysis ────────────────────────────────────
+
+
+_UNIFIED_SYSTEM_PROMPT = (
+    "You are an expert at preparing fanfiction for audiobook "
+    "narration. From the story excerpt and character list provided, "
+    "produce three analyses in a single JSON response.\n\n"
+    "1. 'profiles': for each character name listed, infer "
+    "{gender: 'male'|'female'|'neutral', "
+    "age: 'child'|'teen'|'young adult'|'adult'|'elder', "
+    "accent: BCP-47 locale code (e.g. 'en-GB' for most Hogwarts "
+    "characters, 'en-GB' for Hagrid (West Country), 'fr-FR' for "
+    "Fleur Delacour, 'en-US' for American characters, 'en-IE' for "
+    "Irish, 'en-IN' for Indian, 'en-AU' for Australian — or 'any' "
+    "if you genuinely have no signal), "
+    "tone: short free-form descriptor like 'warm rural', 'crisp "
+    "posh', 'gruff', 'sardonic'}.\n\n"
+    "2. 'pronunciations': map of original spelling -> phonetic "
+    "respelling for words a TTS engine will mangle (made-up "
+    "character names like 'Hermione' or 'Daenerys', fandom terms "
+    "like 'Quidditch' or 'Avada Kedavra', foreign loanwords, place "
+    "names). Use plain English letters with hyphens between "
+    "syllables; capitalize the stressed syllable; do NOT use IPA. "
+    "Skip ordinary English words and obvious names any TTS would "
+    "handle (Harry, Ron, Tom, John). Cap at 25 entries.\n\n"
+    "3. 'narrator': single object {gender, accent, tone, "
+    "rationale: '<one-sentence why>'} recommending a narrator voice "
+    "that fits the story's tone (dark / cozy / dramatic / "
+    "lighthearted / literary / pulpy / etc.). Default to 'en-GB' "
+    "for British-coded fandoms (Harry Potter, Sherlock, Doctor "
+    "Who) and 'en-US' otherwise unless the text clearly points "
+    "elsewhere.\n\n"
+    "Respond with ONLY a single JSON object with exactly three "
+    "top-level keys, no extra fields:\n"
+    '{"profiles": {...}, "pronunciations": {...}, "narrator": {...}}.'
+)
+
+
+def _empty_analysis() -> dict:
+    """Shape callers can structurally destructure even on failure —
+    saves every call site from re-checking for None / KeyError."""
+    return {"profiles": {}, "pronunciations": {}, "narrator": None}
+
+
+def analyze_story_via_llm(
+    *, character_list: list[str],
+    full_text: str,
+    llm_config: dict,
+) -> dict:
+    """One LLM round-trip producing profile + pronunciation +
+    narrator analysis.
+
+    Replaces the three prior calls (:func:`seed_profiles_via_llm`,
+    :func:`seed_pronunciations_via_llm`,
+    :func:`suggest_narrator_via_llm`) with a single request that
+    returns:
+
+        {
+            "profiles":       {<name>: {gender, age, accent, tone}, ...},
+            "pronunciations": {<word>: <phonetic respelling>, ...},
+            "narrator":       {gender, accent, tone, rationale}
+                              | None,
+        }
+
+    All three sections share the same 40 KB story excerpt and
+    character list, so collapsing them removes two redundant
+    round-trips per story (and on Anthropic / OpenAI removes two
+    duplicate copies of the excerpt from the bill).
+
+    Returns :func:`_empty_analysis` on any failure so callers can
+    treat the result as load-bearing without guarding every key.
+    """
+    if not llm_config:
+        return _empty_analysis()
+    try:
+        from .attribution import _llm_call, _llm_normalize_endpoint
+    except ImportError:
+        return _empty_analysis()
+
+    provider = llm_config.get("provider", "")
+    model = llm_config.get("model", "")
+    if not provider or not model:
+        return _empty_analysis()
+    endpoint = _llm_normalize_endpoint(provider, llm_config.get("endpoint"))
+
+    sample = _truncate_sample(full_text)
+    cast_lines = "\n".join(f"- {n}" for n in character_list) or "(none)"
+    user_prompt = (
+        "Character list (use these names exactly as keys in "
+        "'profiles'; also treat them as candidates for "
+        "'pronunciations'):\n"
+        + cast_lines
+        + "\n\nStory excerpt (read for canon-character cues, "
+        "fandom terms, place names, foreign words, and overall "
+        "tone):\n"
+        + sample
+        + "\n\nReturn JSON only."
+    )
+    try:
+        reply = _llm_call(
+            provider=provider, model=model,
+            api_key=llm_config.get("api_key"),
+            endpoint=endpoint,
+            system_prompt=_UNIFIED_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            cache_system=True,
+        )
+    except Exception as exc:  # noqa: BLE001 — never fail the render
+        logger.warning("LLM unified story analysis failed: %s", exc)
+        return _empty_analysis()
+    return _parse_unified_response(reply, character_list)
+
+
+def _parse_unified_response(reply: str, character_list: list[str]) -> dict:
+    """Pull the three sections out of the unified reply, applying the
+    same per-section normalisers as the legacy split helpers so the
+    output is byte-for-byte compatible with what they used to return.
+
+    Tolerant of fenced ``` code blocks and pre/post chatter — same
+    extraction strategy as the per-section parsers."""
+    if not reply:
+        return _empty_analysis()
+    text = reply.strip()
+    if text.startswith("```"):
+        first_nl = text.find("\n")
+        if first_nl != -1:
+            text = text[first_nl + 1:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace == -1 or last_brace <= first_brace:
+        return _empty_analysis()
+    blob = text[first_brace : last_brace + 1]
+    try:
+        parsed = json.loads(blob)
+    except (ValueError, json.JSONDecodeError):
+        return _empty_analysis()
+    if not isinstance(parsed, dict):
+        return _empty_analysis()
+
+    profiles_raw = parsed.get("profiles") or {}
+    pron_raw = parsed.get("pronunciations") or {}
+    narrator_raw = parsed.get("narrator")
+
+    profiles = (
+        _profiles_from_parsed(profiles_raw, character_list)
+        if isinstance(profiles_raw, dict) else {}
+    )
+    pronunciations = (
+        _pronunciations_from_parsed(pron_raw)
+        if isinstance(pron_raw, dict) else {}
+    )
+    narrator = (
+        _narrator_from_parsed(narrator_raw)
+        if isinstance(narrator_raw, dict) else None
+    )
+    return {
+        "profiles": profiles,
+        "pronunciations": pronunciations,
+        "narrator": narrator,
+    }
+
+
+def _profiles_from_parsed(
+    raw: dict, character_list: list[str],
+) -> dict[str, dict]:
+    """Same shape-validation as :func:`_parse_profile_response`, run on
+    a pre-parsed dict instead of a raw reply string."""
+    cl_lower = {c.lower(): c for c in character_list}
+    out: dict[str, dict] = {}
+    for raw_name, raw_attrs in raw.items():
+        if not isinstance(raw_attrs, dict):
+            continue
+        canonical = _resolve_name(raw_name, cl_lower)
+        if canonical is None:
+            continue
+        tone = (raw_attrs.get("tone") or "").strip() if isinstance(
+            raw_attrs.get("tone"), str
+        ) else ""
+        out[canonical] = {
+            "gender": _clean_gender(raw_attrs.get("gender")),
+            "age": _clean_age(raw_attrs.get("age")),
+            "accent": _clean_accent(raw_attrs.get("accent")),
+            "tone": tone,
+        }
+    return out
+
+
+def _pronunciations_from_parsed(raw: dict) -> dict[str, str]:
+    """Same identity-drop / type-check as
+    :func:`_parse_pronunciation_response` on a pre-parsed dict."""
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            continue
+        key = k.strip()
+        val = v.strip()
+        if not key or not val or key == val:
+            continue
+        out[key] = val
+    return out
+
+
+def _narrator_from_parsed(raw: dict) -> dict:
+    """Same field cleaning as the inline normaliser in
+    :func:`suggest_narrator_via_llm`."""
+    return {
+        "gender": _clean_gender(raw.get("gender")),
+        "accent": _clean_accent(raw.get("accent")),
+        "tone": (raw.get("tone") or "").strip()
+        if isinstance(raw.get("tone"), str) else "",
+        "rationale": (raw.get("rationale") or "").strip()
+        if isinstance(raw.get("rationale"), str) else "",
+    }

@@ -380,8 +380,7 @@ def test_seed_profiles_via_llm_calls_provider(monkeypatch):
     parses into normalised profile dicts."""
     from ffn_dl import attribution
 
-    def fake_call(*, provider, model, api_key, endpoint,
-                  system_prompt, user_prompt):
+    def fake_call(*, user_prompt, **_kw):
         assert "Harry Potter" in user_prompt
         return (
             '{"Harry Potter": {"gender": "male", "age": "teen", '
@@ -643,6 +642,139 @@ def test_pick_narrator_voice_handles_no_profile():
         fallback="edge:en-US-AriaNeural",
     )
     assert voice == "edge:en-US-AriaNeural"
+
+
+# ── Unified per-story analysis ────────────────────────────────────
+
+
+def test_analyze_story_via_llm_returns_empty_shape_on_no_config():
+    out = character_profile.analyze_story_via_llm(
+        character_list=["Harry"], full_text="text", llm_config=None,
+    )
+    # Always returns the three keys so callers can destructure
+    # without re-checking — empty values stand in for "no data".
+    assert out == {"profiles": {}, "pronunciations": {}, "narrator": None}
+
+
+def test_analyze_story_via_llm_parses_combined_reply(monkeypatch):
+    """One round-trip should yield profiles + pronunciations +
+    narrator from a single JSON object, each section running through
+    the same normalisers as the legacy split helpers."""
+    from ffn_dl import attribution
+
+    captured: dict = {}
+
+    def fake_call(*, system_prompt, user_prompt, **_kw):
+        captured["system_prompt"] = system_prompt
+        captured["user_prompt"] = user_prompt
+        return (
+            '{"profiles": {"Harry Potter": {"gender": "male", '
+            '"age": "teen", "accent": "en-GB", "tone": "earnest"}}, '
+            '"pronunciations": {"Hermione": "Her-MY-oh-nee", '
+            '"Harry": "Harry"}, '
+            '"narrator": {"gender": "male", "accent": "en-GB", '
+            '"tone": "warm storyteller", "rationale": "British canon"}}'
+        )
+
+    monkeypatch.setattr(attribution, "_llm_call", fake_call)
+    out = character_profile.analyze_story_via_llm(
+        character_list=["Harry Potter"],
+        full_text="Story excerpt",
+        llm_config={"provider": "anthropic",
+                    "model": "claude-sonnet-4-6",
+                    "api_key": "k", "endpoint": ""},
+    )
+    assert out["profiles"]["Harry Potter"]["accent"] == "en-GB"
+    # Identity entry dropped, just like the legacy parser.
+    assert "Harry" not in out["pronunciations"]
+    assert out["pronunciations"]["Hermione"] == "Her-MY-oh-nee"
+    assert out["narrator"]["accent"] == "en-GB"
+    # The cast list and excerpt land in a single user prompt.
+    assert "Harry Potter" in captured["user_prompt"]
+    assert "Story excerpt" in captured["user_prompt"]
+
+
+def test_analyze_story_via_llm_returns_empty_shape_on_garbage(monkeypatch):
+    from ffn_dl import attribution
+
+    monkeypatch.setattr(
+        attribution, "_llm_call", lambda **_kw: "not json",
+    )
+    out = character_profile.analyze_story_via_llm(
+        character_list=["Harry"],
+        full_text="text",
+        llm_config={"provider": "ollama", "model": "llama3.1:8b",
+                    "api_key": "", "endpoint": ""},
+    )
+    assert out == {"profiles": {}, "pronunciations": {}, "narrator": None}
+
+
+def test_analyze_story_via_llm_returns_empty_shape_on_transport_error(monkeypatch):
+    from ffn_dl import attribution
+
+    def boom(**_kw):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(attribution, "_llm_call", boom)
+    out = character_profile.analyze_story_via_llm(
+        character_list=["Harry"],
+        full_text="text",
+        llm_config={"provider": "ollama", "model": "x",
+                    "api_key": "", "endpoint": ""},
+    )
+    assert out == {"profiles": {}, "pronunciations": {}, "narrator": None}
+
+
+# ── Per-model limits ──────────────────────────────────────────────
+
+
+def test_model_limits_known_anthropic_models():
+    """The lookup table drives Anthropic ``max_tokens`` budget.
+    Sonnet 4.6 must report >4096 so big A/N batches don't truncate."""
+    from ffn_dl import attribution
+
+    _ctx, sonnet_out = attribution._model_limits("claude-sonnet-4-6")
+    assert sonnet_out > 4096
+    _ctx, opus_out = attribution._model_limits("claude-opus-4-7")
+    assert opus_out > 4096
+
+
+def test_model_limits_unknown_model_falls_back():
+    from ffn_dl import attribution
+
+    ctx, out = attribution._model_limits("some-random-future-model")
+    assert ctx == attribution._DEFAULT_CONTEXT_TOKENS
+    assert out == attribution._DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def test_max_output_tokens_for_model_floors_at_4096():
+    from ffn_dl import attribution
+
+    # Even an empty-string model must return a usable budget.
+    assert attribution._max_output_tokens_for_model("") >= 4096
+    # Known models bump it.
+    assert attribution._max_output_tokens_for_model(
+        "claude-sonnet-4-6"
+    ) > 4096
+
+
+# ── Provider-aware chunk / batch sizes ────────────────────────────
+
+
+def test_chunk_chars_for_provider_cloud_vs_local():
+    from ffn_dl import attribution
+
+    cloud = attribution._chunk_chars_for_provider("anthropic")
+    local = attribution._chunk_chars_for_provider("ollama")
+    assert cloud > local
+
+
+def test_an_batch_size_for_provider_cloud_vs_local():
+    from ffn_dl import attribution
+
+    cloud = attribution._an_batch_size_for_provider("openai")
+    local = attribution._an_batch_size_for_provider("ollama")
+    assert cloud > local
 
 
 def test_piper_length_scale_from_rate():

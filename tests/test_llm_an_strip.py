@@ -54,9 +54,9 @@ def _stub_llm(monkeypatch, replies):
     """
     calls: list[dict] = []
 
-    def fake_call(*, provider, model, api_key, endpoint,
-                  system_prompt, user_prompt, response_schema=None,
-                  request_timeout_s=None, options=None):
+    def fake_call(*, provider, model, system_prompt, user_prompt,
+                  response_schema=None, request_timeout_s=None,
+                  options=None, **_kw):
         calls.append({
             "provider": provider,
             "model": model,
@@ -1079,9 +1079,7 @@ class TestLlmCallStructuredOutput:
         # invents its own scene-summary shape.
         captured: dict = {}
 
-        def fake_call(*, provider, model, api_key, endpoint,
-                      system_prompt, user_prompt, response_schema=None,
-                      request_timeout_s=None, options=None):
+        def fake_call(*, response_schema=None, **_kw):
             captured["response_schema"] = response_schema
             return '{"1": true, "2": false, "3": true}'
 
@@ -1235,9 +1233,7 @@ class TestClassifyAuthorsNotesBatching:
 
         call_count = {"n": 0}
 
-        def fake_call(*, provider, model, api_key, endpoint,
-                      system_prompt, user_prompt, response_schema=None,
-                      request_timeout_s=None, options=None):
+        def fake_call(**_kw):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 # Batch 1 succeeds.

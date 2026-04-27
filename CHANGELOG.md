@@ -1,5 +1,75 @@
 # Changelog
 
+## 2.2.30 — 2026-04-27
+
+### Improve
+
+- **Per-story LLM analysis is one round-trip instead of three.**
+  Profile seeding, pronunciation seeding, and narrator-voice
+  suggestion previously made three separate LLM calls per audiobook
+  render — each shipping the same 40 KB story excerpt and character
+  list to the model. The new ``character_profile.analyze_story_via_llm``
+  rolls all three into a single request returning
+  ``{profiles, pronunciations, narrator}``. On Anthropic / OpenAI
+  this cuts the per-story analysis bill ~70%; on local Ollama it
+  removes two redundant round-trips and the cold-start cost that
+  often comes with them. Per-section parsing/validation is unchanged
+  — output format matches the legacy split helpers byte-for-byte.
+
+- **Anthropic prompt caching on every long-running classifier.**
+  ``_llm_call`` accepts a ``cache_system`` flag that wraps the
+  ``system`` field as an Anthropic content list with
+  ``cache_control: ephemeral``. Every per-chapter call (speaker
+  attribution, A/N classification) and the unified per-story
+  analysis now opts in. Cached input tokens are billed at 1/10 the
+  standard rate after the first hit, and the system prompts here
+  (1–2 KB each) are reused across every chapter batch — for a
+  30-chapter render this reliably knocks 70–80% off the input cost
+  on Anthropic with zero quality change. OpenAI's automatic prefix
+  cache fires on identical ≥1024-token prefixes; the same flag is
+  a documented no-op there. Ollama doesn't expose prompt caching as
+  an API so the flag is also a no-op for local models.
+
+- **Anthropic ``max_tokens`` is now per-model instead of hardcoded
+  4096.** A new ``_MODEL_LIMITS`` table maps the common model names
+  (Claude Opus / Sonnet / Haiku 4.x and 3.x, GPT-4o / o-series,
+  llama / qwen / mistral / gemma / phi) to ``(context_tokens,
+  max_output_tokens)`` straight from each provider's published
+  model card. ``_max_output_tokens_for_model`` is what the
+  Anthropic transport now uses for ``max_tokens``. The previous
+  4096 cap was tight for big-batch A/N responses on cloud — a
+  200-paragraph batch on Sonnet 4.6 (64K output) could previously
+  truncate silently and corrupt the parsed flag set. Unknown
+  models fall back to a conservative 4096 with no behaviour change
+  vs prior versions.
+
+- **Provider-aware chunk / batch sizes.** Speaker attribution
+  windows the chapter at 6 KB on local Ollama (model
+  instruction-following degrades past that on 7–14B models) and
+  50 KB on cloud — turning a typical 4000-word chapter from 4–5
+  round-trips into 1. Author's-note classifier batches at 40
+  paragraphs locally (the qwen2.5 collapse threshold from 2.2.29)
+  and 200 on cloud, where frontier models classify whole chapters
+  in a single call.
+
+- **Ollama ``keep_alive`` defaults to 30 minutes.** Stock Ollama
+  unloads the model 5 minutes after the last call, paying the
+  cold-start tax on every long-render gap. The new default keeps
+  the model warm across a 40-chapter render without pinning VRAM
+  forever after ffn-dl exits.
+
+### Internal
+
+- ``character_profile.analyze_story_via_llm`` is the new public
+  entry point; ``seed_profiles_via_llm`` /
+  ``seed_pronunciations_via_llm`` / ``suggest_narrator_via_llm``
+  remain for direct callers and pass ``cache_system=True`` too.
+- New helpers in ``attribution``: ``_is_cloud_provider``,
+  ``_chunk_chars_for_provider``, ``_an_batch_size_for_provider``,
+  ``_model_limits``, ``_max_output_tokens_for_model``.
+- Test stubs of ``_llm_call`` widened to ``**_kw`` so future kwargs
+  don't break existing tests.
+
 ## 2.2.29 — 2026-04-27
 
 ### Fix

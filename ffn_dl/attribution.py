@@ -1366,8 +1366,113 @@ def _refine_with_booknlp(segments, full_text, model_size="small"):
 # tolerate much more, but staying conservative keeps latency and token
 # cost predictable. Overlap on chunk boundaries lets a quote that lands
 # at the seam keep some surrounding context.
+# Tuned for an 8B local model; cloud providers get the larger
+# ``_LLM_CHUNK_CHARS_CLOUD`` value via :func:`_chunk_chars_for_provider`
+# because their context windows + per-call overhead make the small
+# chunk size leave most of the budget on the floor.
 _LLM_CHUNK_CHARS = 6000
 _LLM_CHUNK_OVERLAP_CHARS = 500
+
+# Cloud-provider chunk size for speaker attribution. Anthropic and
+# OpenAI tolerate ~50 KB of passage text per call without quality drop,
+# which collapses a 30-chapter render from ~150 round-trips to ~30 on
+# typical chapter sizes (median fanfic chapter ≈ 4000 words ≈ 25 KB).
+_LLM_CHUNK_CHARS_CLOUD = 50000
+
+# Default Ollama ``keep_alive`` window. Ollama's stock value is 5
+# minutes; long renders (40+ chapters of attribution + per-chapter A/N
+# classification) regularly stall longer than that on slow machines,
+# unloading the model between calls and paying the cold-start tax over
+# and over. 30m keeps the model warm across a typical render without
+# pinning VRAM forever after the user closes ffn-dl.
+_OLLAMA_KEEP_ALIVE_DEFAULT = "30m"
+
+
+# ── Per-model limits ──────────────────────────────────────────────
+
+
+# Conservative defaults applied when a model name doesn't match anything
+# in :data:`_MODEL_LIMITS`. The output budget covers a 200-paragraph A/N
+# response (worst case ~1.5 KB of JSON per 200 booleans plus formatting,
+# well under 4096 tokens). Context defaults to 8K because many
+# self-hosted models ship with that — bigger ones get bumped explicitly
+# in the table below.
+_DEFAULT_CONTEXT_TOKENS = 8192
+_DEFAULT_MAX_OUTPUT_TOKENS = 4096
+
+# Substring match table mapping model-name *patterns* to (context,
+# max_output) in tokens. Patterns are checked in iteration order — put
+# more specific patterns (``opus-4-7``) before family fallbacks
+# (``opus-4``). Numbers come from each provider's published model card
+# at the time of the 2.2.30 release; keeping the data in-source rather
+# than probing at runtime is a deliberate tradeoff (zero round-trips,
+# zero new failure modes; manual update when a new model ships).
+#
+# Anthropic note: max_output exceeds the historical 4096-token default
+# significantly on every 4.x model — we were silently truncating
+# big-batch A/N responses on Anthropic before this table existed.
+_MODEL_LIMITS: tuple[tuple[str, int, int], ...] = (
+    # Anthropic Claude 4.x
+    ("claude-opus-4-7", 200_000, 32_000),
+    ("claude-opus-4-6", 200_000, 32_000),
+    ("claude-opus-4", 200_000, 32_000),
+    ("claude-sonnet-4-6", 200_000, 64_000),
+    ("claude-sonnet-4-5", 200_000, 64_000),
+    ("claude-sonnet-4", 200_000, 64_000),
+    ("claude-haiku-4-5", 200_000, 8_192),
+    ("claude-haiku-4", 200_000, 8_192),
+    # Anthropic Claude 3.x — kept for users on older keys / fallbacks.
+    ("claude-3-5-sonnet", 200_000, 8_192),
+    ("claude-3-5-haiku", 200_000, 8_192),
+    ("claude-3-opus", 200_000, 4_096),
+    ("claude-3-sonnet", 200_000, 4_096),
+    ("claude-3-haiku", 200_000, 4_096),
+    # OpenAI 4o / o-series.
+    ("gpt-4o-mini", 128_000, 16_384),
+    ("gpt-4o", 128_000, 16_384),
+    ("gpt-4-turbo", 128_000, 4_096),
+    ("gpt-4", 8_192, 4_096),
+    ("o1-mini", 128_000, 65_536),
+    ("o1-preview", 128_000, 32_768),
+    ("o1", 200_000, 100_000),
+    ("o3-mini", 200_000, 100_000),
+    # Common Ollama tags. Patterns match the leading family name; the
+    # ``:tag`` suffix is ignored by the substring search.
+    ("llama3.3", 131_072, 4_096),
+    ("llama3.2", 131_072, 4_096),
+    ("llama3.1", 131_072, 4_096),
+    ("llama3", 8_192, 4_096),
+    ("qwen2.5", 32_768, 8_192),
+    ("qwen2", 32_768, 4_096),
+    ("mistral", 32_768, 4_096),
+    ("gemma2", 8_192, 4_096),
+    ("phi3", 131_072, 4_096),
+)
+
+
+def _model_limits(model: str) -> tuple[int, int]:
+    """Return ``(context_tokens, max_output_tokens)`` for ``model``.
+
+    Falls back to the conservative
+    ``(_DEFAULT_CONTEXT_TOKENS, _DEFAULT_MAX_OUTPUT_TOKENS)`` when no
+    pattern in :data:`_MODEL_LIMITS` matches — unknown models still
+    work, they just don't get the upsized output budget."""
+    if not model:
+        return _DEFAULT_CONTEXT_TOKENS, _DEFAULT_MAX_OUTPUT_TOKENS
+    name = model.lower()
+    for prefix, ctx, out in _MODEL_LIMITS:
+        if prefix in name:
+            return ctx, out
+    return _DEFAULT_CONTEXT_TOKENS, _DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def _max_output_tokens_for_model(model: str) -> int:
+    """Convenience accessor for callers that only need the output side
+    (Anthropic ``max_tokens`` field, output-truncation guards). The
+    minimum of 4096 protects against an entry typo'd to a tiny number
+    silently breaking long-batch responses."""
+    _ctx, out = _model_limits(model)
+    return max(out, 4096)
 # Per-request timeout against the LLM endpoint. Sized for the slow
 # end of self-hosted setups: a 14B local model on CPU can spend
 # 3–4 minutes on a long chapter before the first token comes back.
@@ -1435,6 +1540,28 @@ def _looks_quoted(text: str) -> bool:
 
 def _llm_provider_supported(provider: str) -> bool:
     return provider in {"ollama", "openai", "anthropic", "openai-compatible"}
+
+
+# Cloud providers (frontier models, not edge-deployed local) — used
+# everywhere we want to upsize batches/chunks because the per-call
+# overhead and context-window assumptions are very different from a
+# CPU-bound 7–14B local model.
+_LLM_CLOUD_PROVIDERS = frozenset({"openai", "anthropic", "openai-compatible"})
+
+
+def _is_cloud_provider(provider: str) -> bool:
+    return provider in _LLM_CLOUD_PROVIDERS
+
+
+def _chunk_chars_for_provider(provider: str) -> int:
+    """Speaker-attribution window size for ``provider``. Cloud models
+    can swallow a whole chapter in one call (the
+    :data:`_LLM_CHUNK_CHARS_CLOUD` constant); local Ollama keeps the
+    smaller window so an 8B model on CPU stays inside its
+    instruction-following sweet spot."""
+    if _is_cloud_provider(provider):
+        return _LLM_CHUNK_CHARS_CLOUD
+    return _LLM_CHUNK_CHARS
 
 
 def _llm_default_endpoint(provider: str) -> str:
@@ -1517,6 +1644,8 @@ def _llm_call(
     response_schema: dict | None = None,
     request_timeout_s: int | None = None,
     options: dict | None = None,
+    cache_system: bool = False,
+    keep_alive: str | None = None,
 ) -> str:
     """One round-trip to the configured LLM. Returns the raw text reply
     (the caller is responsible for JSON-parsing it). Raises on transport
@@ -1542,6 +1671,24 @@ def _llm_call(
       support over the ``/messages`` endpoint at the time of writing);
       the parser fallbacks handle the well-behaved JSON responses
       Claude already produces.
+
+    ``cache_system`` opts the call into Anthropic prompt caching by
+    sending ``system`` as a content list with a ``cache_control:
+    ephemeral`` marker. Anthropic charges 1/10 the input rate for
+    cached tokens after the first hit and the cache stays warm for
+    five minutes — for our pattern (same 1–2 KB system prompt sent
+    on every chapter batch of a multi-chapter story) this is a large
+    saving with no quality change. OpenAI's prefix cache fires
+    automatically on identical ≥1024-token prefixes, so we don't
+    need a flag for it; the flag is a no-op there. Ollama doesn't
+    expose prompt caching as a separate API, so the flag is also a
+    no-op for local models.
+
+    ``keep_alive`` is forwarded to Ollama as ``keep_alive`` so the
+    model stays loaded between calls. Defaults to
+    :data:`_OLLAMA_KEEP_ALIVE_DEFAULT` (30m) — strictly looser than
+    Ollama's stock 5-minute eviction, which routinely unloads the
+    model partway through a long render. Ignored for cloud providers.
     """
     import json as _json
     import urllib.error
@@ -1566,6 +1713,7 @@ def _llm_call(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            "keep_alive": keep_alive or _OLLAMA_KEEP_ALIVE_DEFAULT,
         }
         # Sampling controls (e.g. ``{"temperature": 0}``). Ollama
         # defaults to temperature 0.8 — fine for free-form generation
@@ -1579,10 +1727,30 @@ def _llm_call(
             raise RuntimeError("Anthropic backend requires an API key")
         headers["x-api-key"] = api_key
         headers["anthropic-version"] = "2023-06-01"
+        # When caching is requested the system field becomes a list of
+        # content blocks so we can attach ``cache_control``. Anthropic
+        # accepts both shapes on /messages, but the cache marker only
+        # applies to the list shape.
+        if cache_system:
+            system_field = [
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        else:
+            system_field = system_prompt
         payload = {
             "model": model,
-            "max_tokens": 4096,
-            "system": system_prompt,
+            # Anthropic's API requires ``max_tokens`` and silently
+            # truncates the response if we underbudget it. The 4096
+            # historical default was tight for big-batch A/N responses
+            # on cloud (200 paragraphs × verdict JSON can clip).
+            # ``_max_output_tokens_for_model`` looks up the model's
+            # actual output ceiling instead.
+            "max_tokens": _max_output_tokens_for_model(model),
+            "system": system_field,
             "messages": [{"role": "user", "content": user_prompt}],
         }
     else:  # openai or openai-compatible
@@ -2095,7 +2263,7 @@ def _refine_with_llm(
         '"2": {"speaker": "Narrator", "emotion": "neutral"}}.'
     )
 
-    chunk_size = _LLM_CHUNK_CHARS
+    chunk_size = _chunk_chars_for_provider(provider)
     overlap = _LLM_CHUNK_OVERLAP_CHARS
     total = len(full_text)
     pos = 0
@@ -2130,6 +2298,7 @@ def _refine_with_llm(
                 endpoint=endpoint_url,
                 system_prompt=system_prompt, user_prompt=user_prompt,
                 request_timeout_s=request_timeout_s,
+                cache_system=True,
             )
             mapping = _llm_parse_speaker_map(reply)
             for n, (seg_i, _qpos) in enumerate(batch, 1):
@@ -2188,17 +2357,33 @@ def llm_cache_token(provider: str, model: str) -> str:
 # ── Author's-note classifier (LLM) ────────────────────────────────
 
 
-# Per-call paragraph cap. qwen2.5 (7b and 14b) is reliable up to ~60
-# paragraphs in one prompt and then collapses to "100% true" — at
-# 80+ paragraphs it flagged every single paragraph of a 95-paragraph
-# Harry Potter chapter as an author's note, including pure dialogue
-# and narration. Diagnosed on the FFN founders'-vault fic
+# Per-call paragraph cap for local Ollama models. qwen2.5 (7b and 14b)
+# is reliable up to ~60 paragraphs in one prompt and then collapses to
+# "100% true" — at 80+ paragraphs it flagged every single paragraph of
+# a 95-paragraph Harry Potter chapter as an author's note, including
+# pure dialogue and narration. Diagnosed on the FFN founders'-vault fic
 # (id 13772083); see the v2.2.29 changelog. 40 leaves a 1.5x safety
 # margin below the observed breakpoint and is small enough that
 # llama3.1:8b also classifies correctly within a batch. Above this
 # size we split the chapter into batches of this many paragraphs
 # and union the per-batch flag sets.
 _AN_BATCH_SIZE = 40
+
+# Per-call paragraph cap for cloud frontier models (Claude / GPT-4 /
+# OpenAI-compatible). The qwen2.5 collapse is a model-instruction
+# limitation, not a context-window one — frontier models classify
+# 200-paragraph chapters in a single call without quality loss, which
+# turns a ~95-paragraph chapter from 3 batched round-trips into 1.
+# Capped at 200 so the schema's ``required`` array stays small enough
+# that the response fits inside Anthropic's 4096-token output budget
+# even when every paragraph comes back ``true``.
+_AN_BATCH_SIZE_CLOUD = 200
+
+
+def _an_batch_size_for_provider(provider: str) -> int:
+    if _is_cloud_provider(provider):
+        return _AN_BATCH_SIZE_CLOUD
+    return _AN_BATCH_SIZE
 
 # Sampling options for every A/N classifier call. Ollama defaults to
 # ``temperature=0.8`` which is far too random for a deterministic
@@ -2285,11 +2470,12 @@ def classify_authors_notes_via_llm(
 
     flagged: set[int] = set()
     total = len(paragraphs)
-    n_batches = (total + _AN_BATCH_SIZE - 1) // _AN_BATCH_SIZE
+    batch_size = _an_batch_size_for_provider(provider)
+    n_batches = (total + batch_size - 1) // batch_size
     for batch_no, batch_start in enumerate(
-        range(0, total, _AN_BATCH_SIZE), start=1,
+        range(0, total, batch_size), start=1,
     ):
-        batch = paragraphs[batch_start : batch_start + _AN_BATCH_SIZE]
+        batch = paragraphs[batch_start : batch_start + batch_size]
         if logger.isEnabledFor(logging.DEBUG) and n_batches > 1:
             logger.debug(
                 "LLM A/N batch %d/%d: paragraphs %d-%d (%d items)",
@@ -2371,6 +2557,7 @@ def _classify_an_batch(
         user_prompt=user_prompt, response_schema=an_schema,
         request_timeout_s=request_timeout_s,
         options=_AN_LLM_OPTIONS,
+        cache_system=True,
     )
 
     if logger.isEnabledFor(logging.DEBUG):

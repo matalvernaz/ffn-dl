@@ -2778,40 +2778,50 @@ def generate_audiobook(
         }
         pron_path.write_text(json.dumps(skeleton, indent=2) + "\n", encoding="utf-8")
 
-    # LLM pronunciation seeding — only fires on first render of a
-    # story (existing user-edited maps are never overwritten). Uses
-    # the metadata cast list + the first chunks of chapter text to
-    # identify made-up names, fandom terms, foreign words.
-    if (
-        not pronunciation_map
-        and attribution_backend == "llm"
-        and attribution_llm_config
-    ):
+    # Unified per-story LLM analysis — one round-trip producing
+    # pronunciations + profiles + narrator suggestion in a single
+    # response. Replaces three separate calls that each shipped the
+    # same 40 KB excerpt and character list (~3x the bill on cloud
+    # providers, three round-trips on Ollama). Result is consumed by
+    # the pronunciation block here, the profile block after attribution,
+    # and the narrator block at voice-assignment time. Empty/None on
+    # any failure so each consumer no-ops naturally.
+    unified_analysis: dict | None = None
+    if attribution_backend == "llm" and attribution_llm_config:
         from . import character_profile
 
         seed_text = "\n\n".join(
             ch.html for ch in story.chapters[:2]
         )[:40000]
-        seeded_pron = character_profile.seed_pronunciations_via_llm(
+        unified_analysis = character_profile.analyze_story_via_llm(
             character_list=_extract_character_list(story),
             full_text=seed_text,
             llm_config=attribution_llm_config,
         )
-        if seeded_pron:
+
+    # Pronunciation seeding — only fires on first render of a story
+    # (existing user-edited maps are never overwritten). Reads from
+    # the unified analysis above instead of making its own call.
+    if (
+        not pronunciation_map
+        and unified_analysis
+        and unified_analysis.get("pronunciations")
+    ):
+        seeded_pron = unified_analysis["pronunciations"]
+        existing = {}
+        try:
+            existing = json.loads(pron_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
             existing = {}
-            try:
-                existing = json.loads(pron_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                existing = {}
-            for key, val in seeded_pron.items():
-                existing.setdefault(key, val)
-            pron_path.write_text(
-                json.dumps(existing, indent=2) + "\n", encoding="utf-8",
-            )
-            pronunciation_map = _load_pronunciation_map(pron_path)
-            logger.info(
-                "LLM seeded %d pronunciation overrides", len(seeded_pron),
-            )
+        for key, val in seeded_pron.items():
+            existing.setdefault(key, val)
+        pron_path.write_text(
+            json.dumps(existing, indent=2) + "\n", encoding="utf-8",
+        )
+        pronunciation_map = _load_pronunciation_map(pron_path)
+        logger.info(
+            "LLM seeded %d pronunciation overrides", len(seeded_pron),
+        )
 
     if pronunciation_map:
         logger.info("Loaded %d pronunciation overrides", len(pronunciation_map))
@@ -2957,23 +2967,13 @@ def generate_audiobook(
     profiles = _accent_map.filter_user_entries(_accent_map.load_profiles(profile_path))
 
     if (
-        attribution_backend == "llm"
-        and attribution_llm_config
+        unified_analysis
         and characters
         and (not profiles or not accents)
     ):
         from . import character_profile
 
-        candidate_names = list(characters)
-        if character_list:
-            for n in character_list:
-                if n not in candidate_names:
-                    candidate_names.append(n)
-        seeded = character_profile.seed_profiles_via_llm(
-            character_list=candidate_names,
-            full_text=full_text,
-            llm_config=attribution_llm_config,
-        )
+        seeded = unified_analysis.get("profiles") or {}
         if seeded:
             # Only fill in keys the user hasn't already set — never
             # clobber a hand-edited entry.
@@ -2995,10 +2995,7 @@ def generate_audiobook(
         # match the story's tone; we translate that into a real voice id
         # by filtering the live provider catalog.
         if not narrator_voice:
-            narrator_profile = character_profile.suggest_narrator_via_llm(
-                full_text=full_text,
-                llm_config=attribution_llm_config,
-            )
+            narrator_profile = unified_analysis.get("narrator")
             if narrator_profile:
                 picked = character_profile.pick_narrator_voice_for_profile(
                     profile=narrator_profile,
