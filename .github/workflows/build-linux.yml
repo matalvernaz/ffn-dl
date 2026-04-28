@@ -21,11 +21,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Install GTK runtime (wxPython dependency)
         # libgtk-3-0 + the at-spi2 accessibility bridge are the
@@ -100,13 +100,13 @@ jobs:
           ls -la ffn-dl-linux-x86_64.tar.gz
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ffn-dl-linux-x86_64
           path: dist/ffn-dl-linux-x86_64.tar.gz
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/ffn-dl-linux-x86_64.tar.gz

@@ -13,11 +13,11 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Install dependencies
         run: |
@@ -62,7 +62,7 @@ jobs:
       # pipeline errors out on net45 WinForms .resx files containing
       # non-string resources (MSB3823 / MSB3822). MSBuild from VS
       # handles the legacy Framework path correctly.
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@v3
       - name: Build ZipExtractor.exe
         shell: pwsh
         run: |
@@ -139,13 +139,13 @@ jobs:
           Get-ChildItem dist\ffn-dl-portable.zip | Format-List Name, Length
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ffn-dl-windows-portable
           path: dist/ffn-dl-portable.zip
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/ffn-dl-portable.zip
