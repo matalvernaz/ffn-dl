@@ -1645,7 +1645,6 @@ def _llm_call(
     request_timeout_s: int | None = None,
     options: dict | None = None,
     cache_system: bool = False,
-    keep_alive: str | None = None,
 ) -> str:
     """One round-trip to the configured LLM. Returns the raw text reply
     (the caller is responsible for JSON-parsing it). Raises on transport
@@ -1674,21 +1673,20 @@ def _llm_call(
 
     ``cache_system`` opts the call into Anthropic prompt caching by
     sending ``system`` as a content list with a ``cache_control:
-    ephemeral`` marker. Anthropic charges 1/10 the input rate for
-    cached tokens after the first hit and the cache stays warm for
-    five minutes — for our pattern (same 1–2 KB system prompt sent
-    on every chapter batch of a multi-chapter story) this is a large
-    saving with no quality change. OpenAI's prefix cache fires
-    automatically on identical ≥1024-token prefixes, so we don't
-    need a flag for it; the flag is a no-op there. Ollama doesn't
-    expose prompt caching as a separate API, so the flag is also a
-    no-op for local models.
+    ephemeral`` marker. Caching only actually engages when the system
+    prompt clears Anthropic's per-block minimum (1024 tokens for
+    Sonnet/Opus 4.x, 2048 for Haiku); below that the marker is
+    silently ignored. The current call sites all use shorter prompts,
+    so this is wired infrastructure rather than active behaviour —
+    flip the flag at a call site once the prompt at that site grows
+    past the threshold. OpenAI's prefix cache fires automatically on
+    identical ≥1024-token prefixes, so we don't need a flag for it.
+    Ollama doesn't expose prompt caching as a separate API.
 
-    ``keep_alive`` is forwarded to Ollama as ``keep_alive`` so the
-    model stays loaded between calls. Defaults to
-    :data:`_OLLAMA_KEEP_ALIVE_DEFAULT` (30m) — strictly looser than
-    Ollama's stock 5-minute eviction, which routinely unloads the
-    model partway through a long render. Ignored for cloud providers.
+    Ollama calls request a 30-minute :data:`_OLLAMA_KEEP_ALIVE_DEFAULT`
+    keep_alive window — strictly looser than Ollama's stock 5-minute
+    eviction, which routinely unloads the model partway through a
+    long render.
     """
     import json as _json
     import urllib.error
@@ -1713,7 +1711,7 @@ def _llm_call(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "keep_alive": keep_alive or _OLLAMA_KEEP_ALIVE_DEFAULT,
+            "keep_alive": _OLLAMA_KEEP_ALIVE_DEFAULT,
         }
         # Sampling controls (e.g. ``{"temperature": 0}``). Ollama
         # defaults to temperature 0.8 — fine for free-form generation
@@ -2298,7 +2296,6 @@ def _refine_with_llm(
                 endpoint=endpoint_url,
                 system_prompt=system_prompt, user_prompt=user_prompt,
                 request_timeout_s=request_timeout_s,
-                cache_system=True,
             )
             mapping = _llm_parse_speaker_map(reply)
             for n, (seg_i, _qpos) in enumerate(batch, 1):
@@ -2557,7 +2554,6 @@ def _classify_an_batch(
         user_prompt=user_prompt, response_schema=an_schema,
         request_timeout_s=request_timeout_s,
         options=_AN_LLM_OPTIONS,
-        cache_system=True,
     )
 
     if logger.isEnabledFor(logging.DEBUG):
@@ -2741,6 +2737,26 @@ def _walk_int_lists(obj, n_paragraphs: int):
 _HEAD_BOUNDARY_FRAC = 0.15
 _TAIL_BOUNDARY_FRAC = 0.30
 
+# expand_an_block parameters. Anchor fractions are tighter than the
+# boundary windows above so a single A/N flag in the very-edge region
+# (top 5% / bottom 20%) gates the wider sweep — without the anchor
+# gate, any mid-chapter flag near the boundary edge would trigger a
+# head/tail expansion. The anchor and window pair together: the anchor
+# decides whether to expand, the window (= the matching boundary frac)
+# bounds how far the expansion can reach.
+_AN_EXPAND_HEAD_ANCHOR_FRAC = 0.05
+_AN_EXPAND_TAIL_ANCHOR_FRAC = 0.20
+
+# Below this paragraph count the anchor/window arithmetic clamps to
+# the same 1-2 paragraphs and stops being meaningful. Skip expansion
+# entirely on these short chapters.
+_AN_EXPAND_MIN_PARAGRAPHS = 8
+
+# Hard cap on how much of a chapter expansion is allowed to flag. A
+# user who chose "just strip the obvious A/Ns" is much better off
+# with a few surviving notes than a half-empty chapter.
+_AN_EXPAND_MAX_FRAC = 0.5
+
 
 def should_constrain_an_to_boundaries(provider: str) -> bool:
     """True for providers whose LLM A/N classifier we don't trust to
@@ -2800,28 +2816,29 @@ def expand_an_block(flagged: set[int], n_paragraphs: int) -> set[int]:
 
     * Two corroborating signals required — an LLM flag *and* a
       boundary position. Mid-chapter flags don't expand.
-    * Hard cap: never produce a flagged set covering more than 50%
-      of the chapter. If expansion would breach that, return the
-      original set unchanged.
-    * No effect on chapters with fewer than 8 paragraphs (too short
-      for boundary heuristics to be meaningful).
+    * Hard cap (:data:`_AN_EXPAND_MAX_FRAC`): never produce a flagged
+      set covering more than half the chapter. If expansion would
+      breach that, return the original set unchanged.
+    * No effect on chapters with fewer than
+      :data:`_AN_EXPAND_MIN_PARAGRAPHS` paragraphs (too short for
+      boundary heuristics to be meaningful).
 
     Returns a new set; the input set is not mutated.
     """
-    if not flagged or n_paragraphs < 8:
+    if not flagged or n_paragraphs < _AN_EXPAND_MIN_PARAGRAPHS:
         return set(flagged)
 
     expanded = set(flagged)
 
     # Trailing block — anchor the expansion if any flag landed in
-    # the bottom 20%, then sweep from the earliest flag in the
-    # bottom 30% to the chapter end. Two thresholds (20% / 30%)
-    # because authors sometimes start the outro with a "your reviews
-    # are great" line that the LLM catches alongside the main
-    # rambling block — the earliest flag inside the wider window
-    # is the better anchor.
-    bottom_anchor = int(n_paragraphs * 0.8)
-    bottom_window = int(n_paragraphs * 0.7)
+    # the bottom :data:`_AN_EXPAND_TAIL_ANCHOR_FRAC`, then sweep from
+    # the earliest flag in the wider :data:`_TAIL_BOUNDARY_FRAC`
+    # window to the chapter end. Two thresholds because authors
+    # sometimes start the outro with a "your reviews are great" line
+    # that the LLM catches alongside the main rambling block — the
+    # earliest flag inside the wider window is the better anchor.
+    bottom_anchor = int(n_paragraphs * (1 - _AN_EXPAND_TAIL_ANCHOR_FRAC))
+    bottom_window = int(n_paragraphs * (1 - _TAIL_BOUNDARY_FRAC))
     if any(i >= bottom_anchor for i in flagged):
         earliest = min(i for i in flagged if i >= bottom_window)
         for i in range(earliest, n_paragraphs):
@@ -2831,18 +2848,16 @@ def expand_an_block(flagged: set[int], n_paragraphs: int) -> set[int]:
     # disclaimers and "I own nothing" lines in the top few
     # paragraphs; if the LLM flagged any, sweep to whichever flag
     # sits highest in the head window.
-    top_anchor = max(1, int(n_paragraphs * 0.05))
-    top_window = max(2, int(n_paragraphs * 0.15))
+    top_anchor = max(1, int(n_paragraphs * _AN_EXPAND_HEAD_ANCHOR_FRAC))
+    top_window = max(2, int(n_paragraphs * _HEAD_BOUNDARY_FRAC))
     if any(i < top_anchor for i in flagged):
         latest = max(i for i in flagged if i < top_window)
         for i in range(0, latest + 1):
             expanded.add(i)
 
-    # Hard cap — refuse to drop more than half the chapter, no
-    # matter how persuasive the heuristic seems. A user who chose
-    # "just strip the obvious A/Ns" is much better off with a few
-    # surviving notes than with a half-empty chapter.
-    if len(expanded) > n_paragraphs // 2:
+    # Hard cap — refuse to drop more than _AN_EXPAND_MAX_FRAC of the
+    # chapter, no matter how persuasive the heuristic seems.
+    if len(expanded) > int(n_paragraphs * _AN_EXPAND_MAX_FRAC):
         return set(flagged)
 
     return expanded

@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.3.0 — 2026-05-02
+
+### Internal
+
+- **`expand_an_block` boundary constants are named.** The function
+  used six inline literals (`0.8`, `0.7`, `0.05`, `0.15`, `8`,
+  `n // 2`) for its anchor/window thresholds; two of them duplicated
+  the values of `_HEAD_BOUNDARY_FRAC` / `_TAIL_BOUNDARY_FRAC`
+  defined two functions up. Hoisted to
+  `_AN_EXPAND_HEAD_ANCHOR_FRAC`, `_AN_EXPAND_TAIL_ANCHOR_FRAC`,
+  `_AN_EXPAND_MIN_PARAGRAPHS`, `_AN_EXPAND_MAX_FRAC`, and the
+  window arithmetic now references the existing boundary fracs
+  directly. No behaviour change — the new arithmetic produces the
+  same int values as the old literals — but `constrain_an_to_boundaries`
+  and `expand_an_block` can no longer drift apart silently.
+
+- **Removed unused `keep_alive` kwarg from `_llm_call`.** Every
+  production caller was using the default; the Ollama payload now
+  references `_OLLAMA_KEEP_ALIVE_DEFAULT` directly. No
+  user-visible change.
+
+- **Dropped `cache_system=True` at the three current call sites.**
+  Anthropic prompt caching only engages when the system prompt
+  clears the per-block minimum (≥1024 tokens for Sonnet/Opus 4.x).
+  None of ffn-dl's current system prompts approach that, so the
+  marker was a no-op and the 2.2.30 commit message overstated
+  what was happening on the wire. The `cache_system` kwarg
+  remains in `_llm_call` so a call site can opt back in once its
+  system prompt grows past the threshold.
+
+- **Removed `seed_profiles_via_llm`, `seed_pronunciations_via_llm`,
+  `suggest_narrator_via_llm`** and their parsers from
+  `character_profile.py`. The 2.2.30 unified `analyze_story_via_llm`
+  is the only LLM-seed entry point; the legacy three-call helpers
+  had no remaining production callers. Their tests in
+  `test_tts_providers.py` are removed alongside.
+
 ## 2.2.31 — 2026-04-27
 
 ### Fix
