@@ -1074,6 +1074,15 @@ def _parse_literotica_results(html):
     return results
 
 
+# Hard ceiling on how many pages ``fetch_until_limit`` will request,
+# regardless of ``limit``. A misbehaving site that returns the same
+# rows on every page (CDN caching the wrong query, server-side bug,
+# pagination param the site ignores) would otherwise loop forever
+# even though the real result set is small. 200 pages is more than
+# any sane "load more" UI traversal would need.
+_FETCH_UNTIL_LIMIT_MAX_PAGES = 200
+
+
 def fetch_until_limit(search_fn, query, *, limit, start_page=1, **kwargs):
     """Call `search_fn` across successive pages until `limit` results are
     collected or a page comes back empty. Returns (results, next_page).
@@ -1082,13 +1091,30 @@ def fetch_until_limit(search_fn, query, *, limit, start_page=1, **kwargs):
     little past `limit` if the last page's natural size overshoots). The
     caller can trim it further if they want a hard cap. `next_page` is
     the page number a subsequent "load more" should request.
+
+    Bounded by :data:`_FETCH_UNTIL_LIMIT_MAX_PAGES` and a "no new
+    results between consecutive pages" check so a site that keeps
+    serving the same page forever can't peg the worker thread.
     """
     collected = []
     page = max(1, int(start_page))
-    while len(collected) < limit:
+    end_page = page + _FETCH_UNTIL_LIMIT_MAX_PAGES
+    seen_signatures: set[tuple] = set()
+    while len(collected) < limit and page < end_page:
         page_results = search_fn(query, page=page, **kwargs)
         if not page_results:
             break
+        # Detect a page that returned exactly the same rows as a
+        # previous page (URL+title fingerprint). Any one collision is
+        # already a strong signal of a non-paginating endpoint — bail
+        # rather than re-collect the same rows another 199 times.
+        signature = tuple(
+            (r.get("url") or "", r.get("title") or "")
+            for r in page_results
+        )
+        if signature in seen_signatures:
+            break
+        seen_signatures.add(signature)
         collected.extend(page_results)
         page += 1
     return collected, page

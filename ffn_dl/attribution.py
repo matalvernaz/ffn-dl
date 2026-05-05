@@ -1813,19 +1813,68 @@ def _llm_call(
             f"LLM endpoint {url} unreachable: {exc}"
         ) from exc
 
-    parsed = _json.loads(body)
+    return _extract_llm_text(body, provider)
+
+
+def _extract_llm_text(body: str, provider: str) -> str:
+    """Pull the assistant text out of an LLM HTTP response body.
+
+    Defends against three classes of malformed response that all
+    produced uncaught crashes in earlier versions:
+
+    * Non-JSON body (truncated stream, proxy-injected HTML error
+      page, provider returning a bare string).
+    * JSON that parses but is the wrong shape (an array, a string,
+      a number).
+    * The right top-level shape but with a nested field of the
+      wrong type — Anthropic returning ``content`` as a string on
+      some error envelopes, OpenAI gateways returning ``choices[0]``
+      as ``null`` on rate-limit, etc.
+
+    Each failure path returns ``""`` so the caller — which already
+    handles "no LLM hint" by falling back to heuristics — can keep
+    going instead of dying mid-chapter.
+    """
+    import json as _json
+
+    try:
+        parsed = _json.loads(body)
+    except (ValueError, _json.JSONDecodeError):
+        logger.warning(
+            "LLM %s returned non-JSON body (%d bytes); ignoring.",
+            provider, len(body or ""),
+        )
+        return ""
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "LLM %s returned JSON of type %s, expected object; ignoring.",
+            provider, type(parsed).__name__,
+        )
+        return ""
     if provider == "ollama":
-        return (parsed.get("message") or {}).get("content", "")
+        message = parsed.get("message")
+        if not isinstance(message, dict):
+            return ""
+        return message.get("content", "") or ""
     if provider == "anthropic":
-        for block in parsed.get("content") or []:
-            if block.get("type") == "text":
-                return block.get("text", "")
+        content = parsed.get("content")
+        if not isinstance(content, list):
+            return ""
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return block.get("text", "") or ""
         return ""
     # openai / openai-compatible
-    choices = parsed.get("choices") or []
-    if not choices:
+    choices = parsed.get("choices")
+    if not isinstance(choices, list) or not choices:
         return ""
-    return (choices[0].get("message") or {}).get("content", "")
+    first = choices[0]
+    if not isinstance(first, dict):
+        return ""
+    message = first.get("message")
+    if not isinstance(message, dict):
+        return ""
+    return message.get("content", "") or ""
 
 
 _LLM_PROBE_TIMEOUT_S = 5.0

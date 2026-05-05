@@ -4,11 +4,9 @@ Uses native Win32 controls via wxPython so NVDA, JAWS, and other
 screen readers can read every widget natively.
 """
 
-import json
 import logging
 import logging.handlers
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -80,9 +78,7 @@ from .download_queue import (
     site_from_thread_name,
 )
 from .gui_dialogs import (
-    MultiPickerDialog,
     OptionalFeaturesDialog,
-    SeriesPartsDialog,
     StoryPickerDialog,
     VoicePreviewDialog,
 )
@@ -2216,7 +2212,6 @@ class MainFrame(wx.Frame):
         picker so the user can choose which works to download before we
         start pulling chapters.
         """
-        from .ao3 import AO3Scraper
         from .scraper import FFNScraper
 
         label = "bookmarks" if kind == "bookmarks" else "author page"

@@ -3363,8 +3363,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # Search filters (only apply when --search is used). Values accepted
     # depend on --site; see the search module for the full tables.
     from .search import (
-        FFN_GENRE, FFN_LANGUAGE, FFN_WORDS, AO3_RATING, AO3_SORT,
-        RR_ORDER_BY, RR_STATUS, RR_TYPE,
+        FFN_GENRE, FFN_WORDS, AO3_RATING, AO3_SORT,
+        RR_ORDER_BY,
     )
     parser.add_argument(
         "--rating",

@@ -45,8 +45,7 @@ def _find_tool(name):
             return str(bundled)
     return shutil.which(name) or name
 
-from .exporters import html_to_text, strip_note_paragraphs
-from .models import Story
+from .exporters import strip_note_paragraphs
 
 logger = logging.getLogger(__name__)
 

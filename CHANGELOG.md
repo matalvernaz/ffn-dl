@@ -1,5 +1,91 @@
 # Changelog
 
+## 2.3.3 — 2026-05-05
+
+### Exhaustive bug-sweep round 2
+
+A second pass with ruff, mypy, bandit, pip-audit, vulture, and three
+parallel deep-review agents on the LLM, library, and erotica
+subsystems. Findings triaged against the actual source; false
+positives discarded. The eight real bugs below are fixed and pinned
+by 14 new regression tests in ``tests/test_bugfix_sweep.py``.
+
+### Security
+
+- **Piper archive extraction now validates every member.**
+  ``ZipFile.extractall`` and ``TarFile.extractall`` follow ``../``
+  segments and absolute paths in member names by default — Python's
+  "trusted input" stance. A tampered Piper release archive (CDN
+  compromise, MitM on a misconfigured TLS install) could have
+  dropped ``../../etc/something`` or ``/etc/passwd`` outside the
+  install dir. New ``_assert_safe_archive_members`` walks the
+  member list before extraction, rejecting both relative-traversal
+  and absolute-path payloads. Bandit B202 finding cleared.
+
+- **`library/reorganizer` now bounds-checks resolved paths against
+  the library root.** The relpath stored in the index is computed
+  inside the root at scan time, but a hand-edited or corrupted
+  index file could carry a ``"../../etc/passwd"`` payload that
+  ``Path.resolve()`` would happily walk through. The planner now
+  skips any entry whose source or target lands outside the library
+  root and logs a warning instead.
+
+- **lxml dependency floor raised to ``>=6.1.0``** to keep installs
+  off CVE-2026-41066 (lxml 6.0.x). pip-audit now reports clean for
+  declared dependencies.
+
+### Correctness
+
+- **LLM response parsing tolerates malformed bodies.**
+  ``attribution._llm_call`` previously called ``json.loads`` with
+  no try/except and assumed the parsed value was a dict, then
+  walked into ``parsed.get("content")`` etc. without type checks.
+  Three classes of crash are now caught: non-JSON bodies (truncated
+  streams, proxy-injected HTML errors), JSON of the wrong shape
+  (a string, a list, a number), and the right top-level shape
+  with a wrong-typed nested field — Anthropic returning ``content``
+  as a string on some error envelopes; OpenAI gateways returning
+  ``choices[0]`` as ``null`` on rate-limit. Each path now returns
+  ``""`` and logs a warning, so the chapter-by-chapter loop falls
+  back to heuristics instead of dying mid-story. Refactored into
+  a testable ``_extract_llm_text`` helper.
+
+- **`fetch_until_limit` no longer infinite-loops.** A site that
+  returns the same N rows on every page (CDN caching the wrong
+  query, server-side pagination bug, ``?page=`` param the site
+  ignores) would have looped forever as long as ``len(collected)
+  < limit``. Now bounded by ``_FETCH_UNTIL_LIMIT_MAX_PAGES = 200``
+  *and* a "two consecutive pages with identical row signatures
+  bail out" check.
+
+- **Fictionmania search no longer eats accented queries.** The
+  earlier sanitiser was ``re.sub(r"[^A-Za-z0-9 ]", "", query)``
+  which silently turned ``"café"`` into ``"caf"`` and ``"résumé"``
+  into ``"rsum"``. Now folds via NFKD first so accented letters
+  degrade to their ASCII base before the strip — ``"café résumé"``
+  searches as ``"cafe resume"``.
+
+- **Library `untrackable` no longer accumulates duplicates.** The
+  list was append-only across rescans, so a corrupt EPUB that
+  couldn't be identified would grow a fresh entry on every scan,
+  bloating the index for users who scan their library hourly. Now
+  matches by ``relpath`` and updates the existing entry in place.
+
+### Internal
+
+- ``deps_activated()`` in ``neural_env.py`` resolves ``DEPS_DIR``
+  once outside the ``any(...)`` loop instead of re-resolving on
+  every ``sys.path`` entry. Cosmetic but the GUI install path
+  iterates ``sys.path`` hot enough to notice.
+
+- 20 unused imports across ``cli.py``, ``gui.py``, ``gui_dialogs.py``,
+  ``library/index.py``, ``library/scanner.py``, ``neural_env.py``,
+  ``tts.py``, ``tts_providers/piper.py``, ``wattpad.py``, and
+  ``watchlist_doctor.py`` removed via ``ruff --fix``.
+
+- New ``tests/test_bugfix_sweep.py`` covers all eight fixes (14
+  test cases). Test count: 1285 → 1299.
+
 ## 2.3.2 — 2026-05-05
 
 ### Auto-updater UX

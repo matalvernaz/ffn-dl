@@ -30,7 +30,6 @@ import threading
 
 import wx
 
-from . import prefs as _p
 from .notifications import ALL_CHANNELS
 from .watchlist import (
     SEARCH_SUPPORTED_SITES,

@@ -13,7 +13,7 @@ import re
 from bs4 import BeautifulSoup
 
 from .models import Chapter, Story
-from .scraper import BaseScraper, StoryNotFoundError
+from .scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
 
@@ -382,7 +382,6 @@ class AO3Scraper(BaseScraper):
         summary, word count, chapter count, rating, status, fandom, and
         series membership for each work, with no extra HTTP calls.
         """
-        from .search import _parse_ao3_results
 
         match = re.search(r"archiveofourown\.org/users/([\w.-]+)", url)
         if not match:

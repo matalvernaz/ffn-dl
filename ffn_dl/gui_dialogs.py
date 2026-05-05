@@ -48,7 +48,6 @@ class VoicePreviewDialog(wx.Dialog):
         self.Bind(wx.EVT_CLOSE, self._on_close)
 
     def _build_ui(self):
-        from . import tts
         panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
 

@@ -12,6 +12,7 @@ moved, but it won't be cleaned up either.
 
 from __future__ import annotations
 
+import logging
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,8 @@ from typing import Iterable
 from ..updater import FileMetadata
 from .index import LibraryIndex
 from .template import DEFAULT_MISC_FOLDER, DEFAULT_TEMPLATE, render
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -66,10 +69,32 @@ def plan(
         target = (root / render(md, template=template, misc_folder=misc_folder)).resolve(
             strict=False
         )
+        # Defence in depth: ``relpath`` was computed under ``root`` at
+        # scan time, but a corrupt or hand-edited index file could
+        # carry a "../../something" payload that resolves to a system
+        # path. Skip any entry whose source or target lands outside
+        # the library root rather than risk moving system files into
+        # the library (or vice versa).
+        if not _is_under(source, root) or not _is_under(target, root):
+            logger.warning(
+                "reorganize: skipping %s — resolved path escapes root "
+                "(source=%s, target=%s).",
+                url, source, target,
+            )
+            continue
         if source == target:
             continue
         moves.append(MoveOp(source=source, target=target, source_url=url))
     return moves
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    """True iff ``path`` (already resolved) lives inside ``root``."""
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def apply(

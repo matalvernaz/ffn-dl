@@ -34,6 +34,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import re
+import unicodedata
 from typing import Callable, Optional
 
 from bs4 import BeautifulSoup
@@ -495,9 +496,25 @@ def search_fictionmania(query: str, *, page: int = 1,
     if not query:
         url = "https://fictionmania.tv/recent.html"
     else:
+        # Fictionmania's WebDNA endpoint is fussy about the
+        # ``searchword`` payload — ASCII letters, digits, and spaces
+        # only — so anything outside that gets stripped. Earlier code
+        # used a regex that also wiped non-ASCII letters, turning a
+        # query like "café" into "caf" before it reached the network.
+        # Normalise to NFKD first so accented letters degrade to
+        # their ASCII base instead of disappearing, then strip the
+        # rest. Spaces become ``+`` per WebDNA's form-encoded
+        # convention; ``urllib.parse.quote_plus`` would emit ``%20``
+        # which the endpoint actually rejects.
+        flat = (
+            unicodedata.normalize("NFKD", query)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
+        searchword = re.sub(r"[^A-Za-z0-9 ]", "", flat).replace(" ", "+")
         url = (
             "https://fictionmania.tv/searchdisplay/display.html"
-            f"?searchword={re.sub(r'[^A-Za-z0-9 ]', '', query).replace(' ', '+')}"
+            f"?searchword={searchword}"
             "&Submit=Display+Matching+Stories"
         )
     html = _fetch(url)

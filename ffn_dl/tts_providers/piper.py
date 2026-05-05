@@ -15,7 +15,6 @@ voice, fetching from the upstream release manifest.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import platform
@@ -152,6 +151,53 @@ _PIPER_RELEASE_BASE = (
 )
 
 
+def _assert_safe_archive_members(
+    member_names, target_dir: Path,
+) -> None:
+    """Raise ``RuntimeError`` if any archive member would extract
+    outside ``target_dir``.
+
+    Both ``ZipFile.extractall`` and ``TarFile.extractall`` happily
+    follow ``../`` segments in member names by default — Python's
+    "trusted input" stance. This wrapper enforces the bounded view
+    we actually want: every member resolves to a path under
+    ``target_dir`` after path joining and resolution.
+
+    Two distinct attacks are guarded:
+
+    * **Relative traversal** (``"../etc/passwd"``) — caught by the
+      ``relative_to(base)`` check after resolution.
+    * **Absolute path** (``"/etc/passwd"`` in a tar header, which
+      Python's ``Path("/x") / "/y"`` operator silently turns into
+      ``Path("/y")``) — rejected up-front rather than silently
+      stripped, so the failure surfaces instead of becoming a
+      "looks safe after we strip the leading slash" trap.
+    """
+    base = target_dir.resolve()
+    for raw in member_names:
+        if not raw:
+            continue
+        # Reject absolute member names outright. Python's pathlib
+        # treats ``Path(base) / "/etc/passwd"`` as ``Path("/etc/passwd")``
+        # — base is silently dropped — so the relative_to check below
+        # would never fire for this case if we let it through.
+        # ``Path.is_absolute`` covers both POSIX (`/...`) and Windows
+        # (`C:\...`, `\\server\share\...`) absolute forms.
+        if Path(raw).is_absolute() or raw.startswith(("/", "\\")):
+            raise RuntimeError(
+                f"Refusing to extract archive member {raw!r}: "
+                f"absolute path is not permitted under {base}."
+            )
+        candidate = (base / raw).resolve()
+        try:
+            candidate.relative_to(base)
+        except ValueError:
+            raise RuntimeError(
+                f"Refusing to extract archive member {raw!r}: "
+                f"resolved path {candidate} is outside {base}."
+            )
+
+
 def _piper_release_asset() -> tuple[str, str] | None:
     """Resolve the upstream release asset filename for this platform.
 
@@ -202,11 +248,26 @@ def install_piper_binary(log_callback=None) -> bool:
         with urllib.request.urlopen(url, timeout=120) as resp:
             data = resp.read()
         archive.write_bytes(data)
+        # Validate every member resolves under target_dir before
+        # extracting. The upstream Piper release is from a trusted
+        # GitHub repo, but a tampered archive (CDN compromise, MitM on
+        # a misconfigured TLS install) could carry a "../../etc/foo"
+        # entry that ``extractall`` would happily write outside the
+        # intended directory. Defence in depth — costs us a single
+        # iter() pass; saves us from a class of arbitrary-write bugs.
         if fmt == "zip":
             with zipfile.ZipFile(archive) as zf:
+                _assert_safe_archive_members(
+                    (info.filename for info in zf.infolist()),
+                    target_dir,
+                )
                 zf.extractall(target_dir)
         else:
             with tarfile.open(archive, "r:gz") as tf:
+                _assert_safe_archive_members(
+                    (member.name for member in tf.getmembers()),
+                    target_dir,
+                )
                 tf.extractall(target_dir)
         # Some release archives unpack into a nested ``piper/`` dir;
         # flatten it so piper_executable() finds the binary directly.

@@ -52,12 +52,11 @@ import json
 import logging
 import os
 import tempfile
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from .candidate import Confidence, StoryCandidate
+from .candidate import StoryCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +230,13 @@ class LibraryIndex:
             lib["stories"][key] = entry_record
             return True
 
-        lib["untrackable"].append({
+        # Re-running a scan over the same library shouldn't pile a
+        # duplicate untrackable entry on every pass for the same
+        # unparseable file. Replace any prior entry with the same
+        # relpath rather than appending so the list reflects the
+        # current state of the library, not the cumulative scan
+        # history.
+        new_entry = {
             "relpath": rel,
             "format": md.format,
             "title": md.title,
@@ -241,7 +246,12 @@ class LibraryIndex:
                 if candidate.notes
                 else "no identification"
             ),
-        })
+        }
+        for i, existing in enumerate(lib["untrackable"]):
+            if existing.get("relpath") == rel:
+                lib["untrackable"][i] = new_entry
+                return True
+        lib["untrackable"].append(new_entry)
         return True
 
     def mark_scan_complete(self, root: Path) -> None:

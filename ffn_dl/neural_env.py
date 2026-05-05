@@ -19,7 +19,6 @@ Python minor version or wheels built for a different ABI won't load.
 """
 from __future__ import annotations
 
-import io
 import logging
 import os
 import site
@@ -83,8 +82,10 @@ def python_exe() -> Path:
 
 def deps_activated() -> bool:
     """True if DEPS_DIR is already on sys.path (idempotent activate)."""
-    target = str(DEPS_DIR.resolve()) if DEPS_DIR.exists() else str(DEPS_DIR)
-    return any(Path(p).resolve() == DEPS_DIR.resolve() for p in sys.path if p)
+    # Resolve once outside the loop — ``sys.path`` can be hundreds of
+    # entries on a frozen build, and ``Path.resolve()`` is a syscall.
+    target = DEPS_DIR.resolve() if DEPS_DIR.exists() else DEPS_DIR
+    return any(Path(p).resolve() == target for p in sys.path if p)
 
 
 def _embed_stdlib_zip() -> Path:
