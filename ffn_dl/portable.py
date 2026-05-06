@@ -29,9 +29,12 @@ user's actual home directory.
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
+
+_logger = logging.getLogger(__name__)
 
 
 def is_frozen() -> bool:
@@ -223,5 +226,14 @@ def _migrate_hf_cache(old: Path, new: Path) -> None:
             old.parent.rmdir()
         except OSError:
             pass
-    except Exception:
-        pass
+    except OSError as exc:
+        # ``shutil.move`` of a multi-GB BERT cache can fail mid-copy on
+        # cross-device, low-disk, or permission errors. Log so the user
+        # has a clue why HF re-downloads everything on the next launch
+        # (and so partial-state issues don't go unnoticed across
+        # repeated failed migrations).
+        _logger.warning(
+            "HF cache migration from %s to %s failed: %s. "
+            "Manual cleanup may be needed if both paths now exist.",
+            old, new, exc,
+        )

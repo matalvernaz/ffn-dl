@@ -118,6 +118,21 @@ def atomic_path(
             pass
         raise
     else:
+        # The third-party writer (e.g. ebooklib.write_epub) typically
+        # doesn't fsync, so the temp file's bytes may still be in the
+        # page cache when we rename. Without this fsync, a power loss
+        # between rename and writeback can leave a renamed-but-empty
+        # target — the failure mode this module exists to prevent.
+        try:
+            fd = os.open(str(tmp_path), os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            except OSError:
+                pass
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
         os.replace(tmp_path, target_path)
         if fsync_dir:
             _fsync_dir(target_path.parent)

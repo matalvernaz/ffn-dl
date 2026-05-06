@@ -97,6 +97,10 @@ class WatchlistFrame(wx.Frame):
         self.prefs = main_frame.prefs
         self._store = None
         self._watches: list[Watch] = []
+        # Manual poll spawns a worker thread that calls run_once
+        # against the store; closing the frame mid-poll would otherwise
+        # land _on_poll_done on a destroyed frame.
+        self._alive = True
 
         self._build_ui()
         self._install_accelerators()
@@ -480,17 +484,28 @@ class WatchlistFrame(wx.Frame):
         thread.start()
 
     def _run_poll_worker(self, watch_ids, label):
+        # Always reload the store from disk inside the worker so a
+        # concurrent autopoll's writes (last_checked_at, dedup hashes,
+        # cooldown) aren't clobbered by a save against a stale in-frame
+        # copy. run_once itself takes the process-level _RUN_ONCE_LOCK,
+        # so this load + run_once + return is serialised against any
+        # other poll path.
         try:
+            store = WatchlistStore.load_default()
             results = run_once(
-                self._store, self.prefs, watch_ids=watch_ids,
+                store, self.prefs, watch_ids=watch_ids,
             )
         except Exception as exc:
             logger.exception("Manual watchlist poll failed")
-            wx.CallAfter(self._on_poll_done, [], str(exc), label)
+            if self._alive:
+                wx.CallAfter(self._on_poll_done, [], str(exc), label)
             return
-        wx.CallAfter(self._on_poll_done, results, "", label)
+        if self._alive:
+            wx.CallAfter(self._on_poll_done, results, "", label)
 
     def _on_poll_done(self, results, fatal_error, label):
+        if not self._alive:
+            return
         self._set_poll_busy(False)
         self._reload()
         if fatal_error:
@@ -528,10 +543,11 @@ class WatchlistFrame(wx.Frame):
     # ── Close ──────────────────────────────────────────────
 
     def _on_close(self, event):
+        self._alive = False
         try:
             self.main_frame._notify_watchlist_frame_closed()
         except Exception:
-            pass
+            logger.debug("watchlist frame-close notify failed", exc_info=True)
         event.Skip()
 
 

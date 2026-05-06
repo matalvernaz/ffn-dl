@@ -249,8 +249,23 @@ def ensure_embed_python(log_callback=None) -> bool:
             log_callback("Extracting Python...")
         try:
             with zipfile.ZipFile(zip_path) as zf:
+                # Defense in depth: even though the URL is python.org
+                # over HTTPS, a compromised CDN edge or MitM proxy
+                # could substitute a zip with traversal entries. Reuse
+                # piper's name validator to refuse any member that
+                # escapes PY_DIR before extracting.
+                try:
+                    from .tts_providers.piper import (
+                        _assert_safe_archive_members,
+                    )
+                    _assert_safe_archive_members(
+                        (info.filename for info in zf.infolist()),
+                        PY_DIR,
+                    )
+                except ImportError:
+                    pass
                 zf.extractall(PY_DIR)
-        except zipfile.BadZipFile as exc:
+        except (zipfile.BadZipFile, RuntimeError) as exc:
             if log_callback:
                 log_callback(f"Zip extract failed: {exc}")
             zip_path.unlink(missing_ok=True)

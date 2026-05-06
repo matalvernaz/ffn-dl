@@ -33,6 +33,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -461,6 +462,13 @@ class PollResult:
 Notifier = Callable[..., tuple]
 
 
+# Process-level serialiser for run_once. Without this, the autopoll
+# thread and a GUI "Run Selected" thread can both observe a watch as
+# out-of-cooldown and fire duplicate notifications before either writes
+# the cooldown timestamp back to the store.
+_RUN_ONCE_LOCK = threading.Lock()
+
+
 def run_once(
     store: WatchlistStore,
     prefs,
@@ -488,50 +496,51 @@ def run_once(
     * Notification dispatch failures are logged (by ``notifier``) but
       never raised — a broken webhook cannot stop the poll loop.
     """
-    results: list[PollResult] = []
-    for watch in store.all():
-        if not watch.enabled:
-            continue
-        if watch_ids is not None and watch.id not in watch_ids:
-            continue
+    with _RUN_ONCE_LOCK:
+        results: list[PollResult] = []
+        for watch in store.all():
+            if not watch.enabled:
+                continue
+            if watch_ids is not None and watch.id not in watch_ids:
+                continue
 
-        try:
-            result = _poll_one(watch, scraper_factory)
-        except Exception as exc:  # noqa: BLE001 — runner must never crash
-            # Log with traceback so file-logging users can diagnose site
-            # breakage without having to reproduce interactively.
-            logger.exception(
-                "Unexpected error polling watch %s (%s)",
-                watch.id, watch.display_label(),
-            )
-            watch.last_checked_at = _now_iso()
-            watch.last_error = str(exc) or exc.__class__.__name__
-            store.update(watch)
-            results.append(PollResult(
-                watch_id=watch.id, ok=False, error=watch.last_error,
-            ))
-            continue
-
-        watch.last_checked_at = _now_iso()
-        watch.last_error = result.error
-
-        if result.ok and result.notification is not None:
-            if _in_cooldown(watch, now()):
-                logger.info(
-                    "Suppressing notification for %s — still in cooldown "
-                    "until %s", watch.display_label(), watch.cooldown_until,
+            try:
+                result = _poll_one(watch, scraper_factory)
+            except Exception as exc:  # noqa: BLE001 — runner must never crash
+                # Log with traceback so file-logging users can diagnose site
+                # breakage without having to reproduce interactively.
+                logger.exception(
+                    "Unexpected error polling watch %s (%s)",
+                    watch.id, watch.display_label(),
                 )
-            else:
-                # dispatch_notification never raises — it returns
-                # (delivered, failures) and logs each failure itself.
-                notifier(watch.channels, result.notification, prefs)
-                watch.cooldown_until = datetime.fromtimestamp(
-                    now() + NOTIFICATION_COOLDOWN_S, tz=timezone.utc,
-                ).isoformat(timespec="seconds")
+                watch.last_checked_at = _now_iso()
+                watch.last_error = str(exc) or exc.__class__.__name__
+                store.update(watch)
+                results.append(PollResult(
+                    watch_id=watch.id, ok=False, error=watch.last_error,
+                ))
+                continue
 
-        store.update(watch)
-        results.append(result)
-    return results
+            watch.last_checked_at = _now_iso()
+            watch.last_error = result.error
+
+            if result.ok and result.notification is not None:
+                if _in_cooldown(watch, now()):
+                    logger.info(
+                        "Suppressing notification for %s — still in cooldown "
+                        "until %s", watch.display_label(), watch.cooldown_until,
+                    )
+                else:
+                    # dispatch_notification never raises — it returns
+                    # (delivered, failures) and logs each failure itself.
+                    notifier(watch.channels, result.notification, prefs)
+                    watch.cooldown_until = datetime.fromtimestamp(
+                        now() + NOTIFICATION_COOLDOWN_S, tz=timezone.utc,
+                    ).isoformat(timespec="seconds")
+
+            store.update(watch)
+            results.append(result)
+        return results
 
 
 def _in_cooldown(watch: Watch, now_epoch: float) -> bool:
@@ -566,18 +575,24 @@ def _poll_story(watch: Watch, scraper_factory: ScraperFactory) -> PollResult:
         )
 
     previous = watch.last_seen if isinstance(watch.last_seen, int) else None
-    watch.last_seen = count
 
     # First-poll case: establish the baseline without firing an alert.
     # Authors who post mid-story shouldn't page the user on the first
     # `--watch-run` after the watch is added.
     if previous is None:
+        watch.last_seen = count
         return PollResult(watch_id=watch.id, ok=True, chapter_delta=0)
 
     if count <= previous:
+        # Treat regressions as transient flakes: a parse glitch returning
+        # 1 chapter for a 50-chapter story would otherwise become the new
+        # baseline, and the next clean poll would page the user with
+        # "49 new chapters". Preserve the prior baseline instead.
         return PollResult(
-            watch_id=watch.id, ok=True, chapter_delta=count - previous,
+            watch_id=watch.id, ok=True, chapter_delta=0,
         )
+
+    watch.last_seen = count
 
     delta = count - previous
     plural = "" if delta == 1 else "s"

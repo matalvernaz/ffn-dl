@@ -459,16 +459,26 @@ def export_html(
         buf.write(f"{row}\n")
     buf.write("</table>\n<hr>\n")
 
-    # Table of Contents
+    # Table of Contents — use the chapter's actual ``number`` (not its
+    # position) so a partial-range download (e.g. ``--chapters 5-10``)
+    # produces ``id="chapter-5"`` rather than ``id="chapter-1"``. The
+    # updater's read_html_chapters parses the id back into ``Chapter.number``,
+    # and a positional id would silently mis-number chapters on merge.
     buf.write('<nav id="toc">\n<h2>Table of Contents</h2>\n<ol>\n')
     for i, ch in enumerate(story.chapters, 1):
-        buf.write(f'<li><a href="#chapter-{i}">{escape(ch.title)}</a></li>\n')
+        anchor_n = ch.number if ch.number else i
+        buf.write(
+            f'<li><a href="#chapter-{anchor_n}">{escape(ch.title)}</a></li>\n'
+        )
     buf.write("</ol>\n</nav>\n<hr>\n")
 
     consecutive_timeouts = 0
     for i, ch in enumerate(story.chapters, 1):
         ch_title = escape(ch.title)
-        buf.write(f'<div class="chapter" id="chapter-{i}"><h2>{ch_title}</h2>\n')
+        anchor_n = ch.number if ch.number else i
+        buf.write(
+            f'<div class="chapter" id="chapter-{anchor_n}"><h2>{ch_title}</h2>\n'
+        )
         chapter_html, llm_disabled, consecutive_timeouts = (
             _prepare_chapter_html_with_llm_fallback(
                 ch.html, hr_as_stars, strip_notes,
@@ -497,6 +507,12 @@ aggressive caching. A week's TTL is long enough that re-exporting
 a story the next day doesn't re-fetch, and short enough that a
 deliberately replaced cover makes it into the library within a
 normal update cycle."""
+
+
+_COVER_MAX_BYTES = 10 * 1024 * 1024
+"""Hard cap on cover-image bytes we'll fetch / cache / load. Real covers
+are well under 2 MB; refusing oversized blobs prevents an upstream
+server (compromised or buggy) from blowing batch-export memory."""
 
 
 def _cover_cache_path(cover_url: str):
@@ -541,6 +557,10 @@ def _fetch_cover_image(cover_url, *, use_cache: bool = True):
             age = _COVER_CACHE_TTL_S + 1  # force refetch
         if age < _COVER_CACHE_TTL_S:
             try:
+                if cache_path.stat().st_size > _COVER_MAX_BYTES:
+                    # Stale-or-attacker-poisoned oversize cache entry —
+                    # treat it as corrupt and let the fetch path retry.
+                    raise OSError("cached cover exceeds size cap")
                 blob = cache_path.read_bytes()
                 # Format: ``<media_type>\n<bytes>``. The media type
                 # never contains a newline in practice, so a single
@@ -554,16 +574,20 @@ def _fetch_cover_image(cover_url, *, use_cache: bool = True):
                     if len(content) > 500:
                         return content, media_type
             except OSError:
-                # Corrupt / unreadable cache entry — fall through to
-                # the live fetch. The next successful fetch overwrites
-                # the bad entry.
+                # Corrupt / unreadable / oversize cache entry — fall
+                # through to the live fetch. The next successful fetch
+                # overwrites the bad entry.
                 pass
 
     try:
         from curl_cffi import requests as curl_requests
 
         resp = curl_requests.get(cover_url, impersonate="chrome", timeout=15)
-        if resp.status_code == 200 and len(resp.content) > 500:
+        if (
+            resp.status_code == 200
+            and len(resp.content) > 500
+            and len(resp.content) <= _COVER_MAX_BYTES
+        ):
             ct = resp.headers.get("content-type", "image/jpeg")
             if cache_path is not None:
                 try:

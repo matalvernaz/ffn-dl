@@ -152,11 +152,19 @@ class LiteroticaScraper(BaseScraper):
         url = ""
         for a in soup.find_all("a", href=_AUTHOR_RE):
             text = a.get_text(strip=True)
-            if text and len(text) < 40 and not text[0].isdigit():
-                name = text
-                href = a["href"]
-                url = href if href.startswith("http") else LIT_BASE + href
-                break
+            # Skip stats-row links ("12,453 reads", "4.5 ★", etc.) but
+            # accept handles that legitimately start with digits
+            # (1ManArmy, 2HotForCollege, 99Cents are real Lit handles).
+            if not text or len(text) >= 40:
+                continue
+            if text.isdigit():
+                continue
+            if any(ch in text for ch in "★·•"):
+                continue
+            name = text
+            href = a["href"]
+            url = href if href.startswith("http") else LIT_BASE + href
+            break
         if not url:
             # Fall back to the slug in the href
             a = soup.find("a", href=_AUTHOR_RE)

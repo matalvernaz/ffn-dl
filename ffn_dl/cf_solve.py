@@ -26,11 +26,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from .atomic import atomic_path
 
 logger = logging.getLogger(__name__)
 
@@ -146,28 +149,26 @@ def persist(host: str, result: SolveResult) -> None:
     it's a cheap defensive measure on Linux/macOS where the default
     umask leaves world-readable cache files.
     """
-    import os
     path = _host_cache_path(host)
     payload = {
         "cookies": result.cookies,
         "user_agent": result.user_agent,
         "fetched_at": result.fetched_at,
     }
+    blob = json.dumps(payload, indent=2, sort_keys=True)
     try:
-        path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        # Write into a tempfile in the same dir, chmod 0600 *before*
+        # rename, then atomically replace. This avoids the window where
+        # a partially-written or default-perms file briefly exists at
+        # the real path on a crash or concurrent reader.
+        with atomic_path(path) as tmp:
+            tmp.write_text(blob, encoding="utf-8")
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:  # pragma: no cover — filesystem-dependent
+                logger.debug("cf-cookie chmod 0600 failed for %s", host)
     except OSError as exc:
         logger.debug("cf-cookie persist failed for %s: %s", host, exc)
-        return
-    try:
-        os.chmod(path, 0o600)
-    except OSError:  # pragma: no cover — filesystem-dependent
-        # Best-effort — a chmod failure doesn't invalidate the
-        # cookie, it just means the file is still at the default
-        # umask. Debug log and move on rather than re-raising.
-        logger.debug("cf-cookie chmod 0600 failed for %s", host)
 
 
 def solve(
@@ -194,6 +195,25 @@ def solve(
         cookies, user_agent = launch(url, timeout_s)
     except ImportError as exc:
         raise SolverUnavailable(str(exc)) from exc
+    except Exception as exc:
+        # Playwright raises its own error class when the chromium
+        # binary isn't installed (``Executable doesn't exist at ...``).
+        # The caller treats SolverUnavailable as "fall through to the
+        # normal retry path"; everything else is a hard failure. Map
+        # the missing-binary case so a user with pip-installed
+        # Playwright but no ``playwright install chromium`` still gets
+        # a graceful fallback.
+        msg = str(exc)
+        if (
+            "Executable doesn't exist" in msg
+            or "browserType.launch" in msg
+            or "playwright install" in msg
+        ):
+            raise SolverUnavailable(
+                f"Playwright browser binary missing — run "
+                f"'playwright install chromium' ({exc})"
+            ) from exc
+        raise
     if not cookies:
         raise RuntimeError(
             "cf-solve: Playwright returned no cookies for {url}; "

@@ -148,6 +148,17 @@ def apply(
         entry = idx.lookup_by_url(root, op.source_url)
         if entry is not None:
             entry["relpath"] = str(op.target.relative_to(root))
+        else:
+            # The file is moved on disk but the index has no matching
+            # entry — surface it loudly rather than silently leaving an
+            # orphan-on-disk + phantom-in-index. Subsequent
+            # ``--update-library`` would skip the story with "file
+            # missing on disk" without explaining why.
+            result.messages.append(
+                f"warning: moved {op.source.name} but no index entry for "
+                f"{op.source_url} (URL-shape skew?); next --doctor --heal "
+                "will re-scan it as an orphan."
+            )
 
         touched_dirs.add(op.source.parent)
         result.applied += 1

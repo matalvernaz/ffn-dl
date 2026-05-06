@@ -204,10 +204,14 @@ def check_integrity(root: Path, index: LibraryIndex) -> IntegrityReport:
                 if cached_mtime is not None and cached_size is not None:
                     try:
                         st = primary_path.stat()
-                        if (
-                            st.st_mtime != cached_mtime
-                            or st.st_size != cached_size
-                        ):
+                        # 1ms tolerance matches refresh.py — JSON
+                        # round-tripping rounds mtime floats and would
+                        # otherwise spuriously flag drift on every run.
+                        mtime_drift = (
+                            abs(st.st_mtime - float(cached_mtime)) > 1e-3
+                        )
+                        size_drift = st.st_size != int(cached_size)
+                        if mtime_drift or size_drift:
                             report.drifted_entries.append((url, entry))
                     except OSError:
                         # Disappeared between the exists() check and

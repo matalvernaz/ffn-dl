@@ -153,13 +153,19 @@ class RoyalRoadScraper(BaseScraper):
     # Aivean/royalroad-downloader both solve this the same way: collect
     # the hidden classes from CSS, drop elements that use them. That's
     # survived ~2 years of RR rotating both class names and phrasing.
+    # Capture the entire selector group so multi-selector rules like
+    # ``.foo, .bar { display:none }`` produce both ``foo`` and ``bar``.
+    # The previous single-class regex only captured the first selector,
+    # so RR's comma-separated hidden rules silently leaked the rest of
+    # the tagged paragraphs into the EPUB.
     _HIDDEN_RULE_RE = re.compile(
-        r"\.([A-Za-z0-9_-]+)\s*\{[^}]*"
+        r"((?:\s*\.[A-Za-z0-9_-]+\s*,?)+)\s*\{[^}]*"
         r"(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|"
         r"font-size\s*:\s*0|speak\s*:\s*never)"
         r"[^}]*\}",
         re.IGNORECASE,
     )
+    _CLASS_NAME_RE = re.compile(r"\.([A-Za-z0-9_-]+)")
 
     @classmethod
     def _hidden_classes(cls, soup) -> set:
@@ -176,7 +182,9 @@ class RoyalRoadScraper(BaseScraper):
             if not css:
                 continue
             for match in cls._HIDDEN_RULE_RE.finditer(css):
-                classes.add(match.group(1))
+                selector_block = match.group(1)
+                for name_match in cls._CLASS_NAME_RE.finditer(selector_block):
+                    classes.add(name_match.group(1))
         return classes
 
     @classmethod

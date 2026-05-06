@@ -134,7 +134,16 @@ def extract_status(filepath: Path | str) -> str:
             for item in book.get_items():
                 if not hasattr(item, "file_name"):
                     continue
-                if not item.file_name.startswith("title"):
+                # Match title-page filenames case-insensitively.
+                # FanFicFare and FicHub exports can use ``Title.xhtml``
+                # or ``titlepage.xhtml``; the previous bare lowercase
+                # prefix check missed those entirely and the abandoned-
+                # sweep treated them as still-WIP.
+                fname = (item.file_name or "").lower()
+                if not (
+                    fname.startswith("title")
+                    or "titlepage" in fname
+                ):
                     continue
                 body = item.content.decode("utf-8", errors="replace")
                 match = re.search(r"<th>Status</th><td>([^<]+)</td>", body)

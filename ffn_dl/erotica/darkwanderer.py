@@ -130,18 +130,37 @@ class DarkWandererScraper(BaseScraper):
         return first_post_user.get_text(strip=True) if first_post_user else ""
 
     @staticmethod
-    def _starter_posts(soup, starter: str) -> list[str]:
+    def _starter_posts(soup, starter: str, *, is_first_page: bool) -> list[str]:
         """Return ``[html, ...]`` for each post authored by ``starter``.
 
         We look for ``<article class="message">`` blocks and match on
-        the ``data-author`` attribute or the nested username link."""
+        the ``data-author`` attribute or the nested username link.
+
+        When ``starter`` is empty (the username regex didn't match,
+        e.g. XenForo skin changed) we can't filter by author. On the
+        first page we fall back to "include only the first post" — on
+        XenForo the thread starter is always the first post — and on
+        later pages we include nothing rather than dragging in every
+        reply masquerading as story content.
+        """
+        articles = list(
+            soup.find_all("article", class_=re.compile(r"\bmessage\b"))
+        )
         htmls = []
-        for article in soup.find_all("article", class_=re.compile(r"\bmessage\b")):
+        for idx, article in enumerate(articles):
             author_attr = (article.get("data-author") or "").strip()
-            if starter and author_attr and author_attr != starter:
-                continue
-            if not starter and not author_attr:
-                continue
+            if starter:
+                if author_attr and author_attr != starter:
+                    continue
+                if not author_attr:
+                    # Unknown author on a known-starter thread — skip
+                    # rather than guess.
+                    continue
+            else:
+                # Starter unknown. Page 1 → include only the first
+                # article. Later pages → skip everything.
+                if not (is_first_page and idx == 0):
+                    continue
             body = article.find("div", class_=re.compile(r"bbWrapper"))
             if body is None:
                 body = article.find("div", class_=re.compile(r"message-content"))
@@ -166,14 +185,16 @@ class DarkWandererScraper(BaseScraper):
         # First page already fetched — count its starter posts, then
         # page through the rest. This does N HTTP calls for an N-page
         # thread, which is the same cost as downloading anyway.
-        count = len(self._starter_posts(soup, starter))
+        count = len(self._starter_posts(soup, starter, is_first_page=True))
         for page in range(2, total_pages + 1):
             self._delay()
             page_html = self._fetch(
                 self._thread_url(tid, slug) + f"page-{page}"
             )
             page_soup = BeautifulSoup(page_html, "lxml")
-            count += len(self._starter_posts(page_soup, starter))
+            count += len(
+                self._starter_posts(page_soup, starter, is_first_page=False)
+            )
         return max(count, 1)
 
     def download(
@@ -198,12 +219,16 @@ class DarkWandererScraper(BaseScraper):
         starter = self._thread_starter_username(first_soup)
         total_pages = self._page_count(first_soup)
 
-        all_posts: list[str] = list(self._starter_posts(first_soup, starter))
+        all_posts: list[str] = list(
+            self._starter_posts(first_soup, starter, is_first_page=True)
+        )
         for page in range(2, total_pages + 1):
             self._delay()
             page_html = self._fetch(thread_url + f"page-{page}")
             page_soup = BeautifulSoup(page_html, "lxml")
-            all_posts.extend(self._starter_posts(page_soup, starter))
+            all_posts.extend(
+                self._starter_posts(page_soup, starter, is_first_page=False)
+            )
 
         if not all_posts:
             raise ValueError(

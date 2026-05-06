@@ -87,12 +87,16 @@ class WatchlistPoller:
         because the thread sleeps in :meth:`threading.Event.wait`. The
         thread is a daemon, so the process can exit without waiting
         for it; ``stop()`` only matters for in-process reconfigure.
+
+        We don't clear ``self._thread`` here — ``is_running()`` reports
+        ``is_alive()`` until the worker actually returns, which lets a
+        rapid stop→start sequence (via ``reconfigure``) avoid spawning
+        a second worker before the first observes the stop event.
         """
         if self._thread is None:
             return
         self._stop.set()
-        self._thread = None
-        logger.info("Watchlist autopoll stopped.")
+        logger.info("Watchlist autopoll stop requested.")
 
     def reconfigure(self):
         """Re-read prefs after the user changes them, and align the

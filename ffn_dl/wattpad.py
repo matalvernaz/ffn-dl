@@ -380,11 +380,19 @@ class WattpadScraper(BaseScraper):
             stripped = body.strip()
             if not stripped:
                 break
-            if _PAID_MARKER in body and _PAID_MARKER_ES in body and page == 1:
-                # Whole-part paywall: the only content is the bilingual
-                # notice. Record it as a chapter but flag it.
-                paid_detected = True
-                pieces.append(stripped)
+            if _PAID_MARKER in body and _PAID_MARKER_ES in body:
+                if page == 1:
+                    # Whole-part paywall: the only content is the
+                    # bilingual notice. Record it as a chapter but flag it.
+                    paid_detected = True
+                    pieces.append(stripped)
+                else:
+                    # Paywall hits a later page after legitimate prose
+                    # has been collected — keep what we have, mark as
+                    # truncated. Without this branch the bilingual
+                    # notice would silently concatenate into the chapter
+                    # body as if it were genuine content.
+                    truncated = True
                 break
             pieces.append(stripped)
             # Guard: a successful mid-story page is always thousands of

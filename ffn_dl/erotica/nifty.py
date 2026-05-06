@@ -48,17 +48,31 @@ def _story_path(url_or_id: str) -> str:
     Accepts either a full URL or a bare path like
     ``nifty/gay/college/the-brotherhood``. Normalises trailing
     slashes away so two URL variants produce the same id.
+
+    Rejects path components containing ``..`` or empty segments so a
+    typo / hand-edited input can't round-trip through ``urljoin``-style
+    normalisation into a different host path.
     """
     text = str(url_or_id).strip().rstrip("/")
     m = NIFTY_STORY_URL_RE.search(text)
     if m:
-        return m.group(1).strip("/")
-    if text.startswith("nifty/"):
-        return text.strip("/")
-    raise ValueError(
-        f"Cannot parse Nifty story URL from: {text!r}\n"
-        "Expected e.g. https://www.nifty.org/nifty/gay/college/the-brotherhood/"
-    )
+        path = m.group(1).strip("/")
+    elif text.startswith("nifty/"):
+        path = text.strip("/")
+    else:
+        raise ValueError(
+            f"Cannot parse Nifty story URL from: {text!r}\n"
+            "Expected e.g. https://www.nifty.org/nifty/gay/college/the-brotherhood/"
+        )
+    segments = path.split("/")
+    if len(segments) < 3:
+        raise ValueError(
+            f"Nifty path {path!r} is too short — expected nifty/<category>/<slug>"
+        )
+    for seg in segments:
+        if not seg or seg == ".." or seg == ".":
+            raise ValueError(f"Nifty path contains illegal segment: {path!r}")
+    return path
 
 
 def _path_to_id(path: str) -> int:

@@ -1469,7 +1469,14 @@ class MainFrame(wx.Frame):
                 cancel_event.set()
 
         def progress_cb(done, total):
-            if cancel_event.is_set():
+            # Read WasCancelled() directly so a user's Abort click is
+            # observed even when the throttle below skips the
+            # wx.CallAfter (e.g. during a single multi-second network
+            # read where _apply_update never fires). Reading it from
+            # the worker is safe enough — at worst we see a stale value
+            # for one extra callback before noticing.
+            if cancel_event.is_set() or progress.WasCancelled():
+                cancel_event.set()
                 raise RuntimeError("Update cancelled by user.")
             now = time.monotonic()
             # Always push the final update; throttle intermediate ones
@@ -1819,13 +1826,25 @@ class MainFrame(wx.Frame):
             self.watch_btn.SetLabel("&Watch Clipboard")
 
     def _get_clipboard(self):
+        # Wrap the whole read: on Linux/Wayland a flaky clipboard
+        # manager can raise OSError mid-Open(); on macOS an in-flight
+        # foreign copy can leave Open() returning False with a pending
+        # request that the next read trips on. Without try/except an
+        # exception here propagates up through the timer event handler
+        # and silently kills the clipboard watch.
         text = ""
-        if wx.TheClipboard.Open():
-            if wx.TheClipboard.IsSupported(wx.DataFormat(wx.DF_TEXT)):
-                data = wx.TextDataObject()
-                wx.TheClipboard.GetData(data)
-                text = data.GetText().strip()
-            wx.TheClipboard.Close()
+        try:
+            if wx.TheClipboard.Open():
+                try:
+                    if wx.TheClipboard.IsSupported(wx.DataFormat(wx.DF_TEXT)):
+                        data = wx.TextDataObject()
+                        wx.TheClipboard.GetData(data)
+                        text = data.GetText().strip()
+                finally:
+                    wx.TheClipboard.Close()
+        except Exception:
+            logger.debug("clipboard read failed", exc_info=True)
+            return ""
         return text
 
     def _on_clip_timer(self, event):

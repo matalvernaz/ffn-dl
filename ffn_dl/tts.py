@@ -1386,10 +1386,22 @@ class VoiceMapper:
             ]
             self._neutral_idx += 1
 
-        # Don't assign the narrator voice to a character.
+        # Don't assign the narrator voice to a character — but bail
+        # cleanly if the only candidate IS the narrator (one-element
+        # pool from an aggressive accent filter, or a one-element
+        # fallback list). The previous unconditional `return self.assign(...)`
+        # recursed forever in that case, eventually raising
+        # RecursionError mid-render.
         narrator_ns = _namespace_legacy(NARRATOR_VOICE)
-        if voice == narrator_ns and (pool or self._fallback_male):
-            return self.assign(name, gender)
+        if voice == narrator_ns:
+            candidates = pool or self._fallback_male
+            non_narrator = [v for v in candidates if v != narrator_ns]
+            if non_narrator:
+                voice = non_narrator[0] if not pool else non_narrator[
+                    self._per_character_idx.get(name, 0) % len(non_narrator)
+                ]
+            # else: no alternative voice exists; accept the collision
+            # rather than spin forever.
 
         self.mapping[name] = voice
         return voice
@@ -1847,35 +1859,50 @@ def _make_silence_clip(tmp_dir, duration_s):
     """Generate a short silent MP3 clip matching edge-tts output format
     (24 kHz mono MP3) so it can be concat-demuxed with -c copy."""
     path = tmp_dir / f"silence_{int(duration_s * 1000)}ms.mp3"
-    result = subprocess.run(
-        [
-            FFMPEG, "-y",
-            "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
-            "-t", f"{duration_s}",
-            "-ac", "1", "-ar", "24000",
-            "-codec:a", "libmp3lame", "-b:a", "48k",
-            str(path),
-        ],
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                FFMPEG, "-y",
+                "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+                "-t", f"{duration_s}",
+                "-ac", "1", "-ar", "24000",
+                "-codec:a", "libmp3lame", "-b:a", "48k",
+                str(path),
+            ],
+            capture_output=True,
+            timeout=_FFMPEG_CLIP_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("Silence-clip generation timed out after %ds", _FFMPEG_CLIP_TIMEOUT_S)
+        return None
     if result.returncode != 0 or not path.exists() or path.stat().st_size == 0:
         return None
     return path
 
 
 def _apply_pronunciation_map(text, pron_map):
-    """Apply literal string replacements from a user pronunciation map.
+    """Apply pronunciation overrides from a user / LLM-seeded map.
 
     Ordering: longest keys first, so "Hermione Granger" matches before
     "Hermione". Case-sensitive by design — fanfic OC names often collide
     with common English words when lowercased.
+
+    Substitutions respect word boundaries via ``(?<!\\w)key(?!\\w)``
+    lookarounds. Without that, a short LLM-seeded entry like
+    ``"Tom" → "T-AHM"`` would mangle every "Tomorrow" / "Atomic" /
+    "customer" in the prose. The lookaround form (vs ``\\b``) keeps
+    keys starting or ending with non-word characters
+    (``"'Mione"``, ``"Mrs."``) working correctly.
     """
     if not pron_map or not text:
         return text
-    for key in sorted(pron_map.keys(), key=len, reverse=True):
-        if key:
-            text = text.replace(key, pron_map[key])
-    return text
+    keys = sorted((k for k in pron_map.keys() if k), key=len, reverse=True)
+    if not keys:
+        return text
+    pattern = re.compile(
+        r"(?<!\w)(?:" + "|".join(re.escape(k) for k in keys) + r")(?!\w)"
+    )
+    return pattern.sub(lambda m: pron_map[m.group(0)], text)
 
 
 def _load_pronunciation_map(path):
@@ -2077,6 +2104,23 @@ async def generate_chapter_audio(
     segments = _merge_small_segments(segments)
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="ffn-tts-"))
+    try:
+        return await _generate_chapter_audio_inner(
+            segments, voice_mapper, output_path, tmp_dir,
+            chapter_num=chapter_num, narrator=narrator,
+            speech_rate=speech_rate,
+        )
+    finally:
+        # Single cleanup point — any exception path between here and the
+        # ffmpeg concat (mkstemp races, gather cancellation, list-file
+        # write OSError) used to leak the temp directory.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+async def _generate_chapter_audio_inner(
+    segments, voice_mapper, output_path, tmp_dir,
+    *, chapter_num, narrator, speech_rate,
+):
     sem = asyncio.Semaphore(_TTS_CONCURRENCY)
 
     # Pre-generate a silence clip inserted at speaker boundaries so the
@@ -2160,17 +2204,22 @@ async def generate_chapter_audio(
             first = False
             last_was_scene_break = False
 
-    result = subprocess.run(
-        [
-            FFMPEG, "-y", "-f", "concat", "-safe", "0",
-            "-i", str(list_file), "-c", "copy", str(output_path),
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    # Clean up temp dir
-    shutil.rmtree(tmp_dir, ignore_errors=True)
+    try:
+        result = subprocess.run(
+            [
+                FFMPEG, "-y", "-f", "concat", "-safe", "0",
+                "-i", str(list_file), "-c", "copy", str(output_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_FFMPEG_BUILD_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "ffmpeg concat for ch %d timed out after %ds",
+            chapter_num, _FFMPEG_BUILD_TIMEOUT_S,
+        )
+        return False
 
     if result.returncode != 0:
         tail = _decode_stderr(result.stderr).strip()[-400:]
@@ -2323,13 +2372,28 @@ def _concat_entry(path) -> str:
     return f"file '{s}'\n"
 
 
-def _run_ffmpeg(cmd, *, step):
+# Timeout ceilings — high enough that legitimate work never trips them,
+# low enough that a wedged child doesn't stall the whole pipeline.
+_FFMPEG_BUILD_TIMEOUT_S = 30 * 60
+_FFMPEG_CLIP_TIMEOUT_S = 60
+_FFPROBE_TIMEOUT_S = 30
+
+
+def _run_ffmpeg(cmd, *, step, timeout=_FFMPEG_BUILD_TIMEOUT_S):
     """Run an ffmpeg/ffprobe invocation and surface stderr on failure.
     The default `subprocess.run(check=True, capture_output=True)` raises
     CalledProcessError with the ffmpeg message hidden in `.stderr`; we
     want that in the user's face so audiobook errors are debuggable.
     """
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"ffmpeg timed out during {step} after {timeout}s "
+            f"(no progress; check disk / cpu / hung child)"
+        ) from exc
     if result.returncode != 0:
         tail = _decode_stderr(result.stderr).strip().splitlines()[-20:]
         message = "\n".join(tail) or "(no ffmpeg stderr)"
@@ -2342,6 +2406,14 @@ def _run_ffmpeg(cmd, *, step):
 def build_m4b(chapter_files, story, output_path, cover_path=None, intro_file=None):
     """Merge per-chapter MP3s into a single M4B with chapter markers.
 
+    ``chapter_files`` is either:
+
+    * a flat list of audio paths (legacy shape — title is taken from
+      ``story.chapters[i]`` by position), or
+    * a list of ``(audio_path, title)`` tuples, which the producer
+      uses when some chapters' synth was skipped so titles stay
+      aligned with the audio that was actually generated.
+
     ``intro_file``, if given, is concatenated before the first chapter
     and gets its own "Introduction" chapter marker so listeners can
     skip back to the attribution without scrubbing.
@@ -2349,7 +2421,38 @@ def build_m4b(chapter_files, story, output_path, cover_path=None, intro_file=Non
     if not chapter_files:
         return None
 
+    # Normalise to (path, title) tuples internally.
+    normalised: list[tuple[Path, str]] = []
+    for i, item in enumerate(chapter_files):
+        if isinstance(item, tuple):
+            path, title = item
+            normalised.append((Path(path), str(title)))
+        else:
+            path = Path(item)
+            ch_title = (
+                story.chapters[i].title if i < len(story.chapters)
+                else f"Chapter {i + 1}"
+            )
+            normalised.append((path, ch_title))
+    chapter_files = normalised
+
     tmp_dir = Path(tempfile.mkdtemp(prefix="ffn-m4b-"))
+    try:
+        return _build_m4b_inner(
+            chapter_files, story, output_path, tmp_dir,
+            cover_path=cover_path, intro_file=intro_file,
+        )
+    finally:
+        # _run_ffmpeg raises RuntimeError on failure or timeout. Without
+        # this finally the merged.mp3 (potentially several hundred MB)
+        # leaks into /tmp on every failed mux.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _build_m4b_inner(
+    chapter_files, story, output_path, tmp_dir,
+    *, cover_path=None, intro_file=None,
+):
 
     # Build ffmpeg concat list. Paths must be absolute: ffmpeg resolves
     # `file` entries relative to the list file's own directory, so a bare
@@ -2358,7 +2461,7 @@ def build_m4b(chapter_files, story, output_path, cover_path=None, intro_file=Non
     with open(list_file, "w", encoding="utf-8") as f:
         if intro_file and Path(intro_file).exists():
             f.write(_concat_entry(intro_file))
-        for cf in chapter_files:
+        for cf, _title in chapter_files:
             f.write(_concat_entry(cf))
 
     # First pass: merge all MP3s into one
@@ -2372,14 +2475,22 @@ def build_m4b(chapter_files, story, output_path, cover_path=None, intro_file=Non
     )
 
     def _probe_ms(path):
-        probe = subprocess.run(
-            [
-                FFPROBE, "-v", "quiet", "-show_entries",
-                "format=duration", "-of", "csv=p=0", str(path),
-            ],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            probe = subprocess.run(
+                [
+                    FFPROBE, "-v", "quiet", "-show_entries",
+                    "format=duration", "-of", "csv=p=0", str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_FFPROBE_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "ffprobe timed out probing %s after %ds; treating as 0ms",
+                path, _FFPROBE_TIMEOUT_S,
+            )
+            return 0
         return int(float(probe.stdout.strip() or "0") * 1000)
 
     # Get chapter durations for metadata
@@ -2402,10 +2513,8 @@ def build_m4b(chapter_files, story, output_path, cover_path=None, intro_file=Non
                 f.write("title=Introduction\n\n")
                 offset_ms += intro_ms
 
-        for i, cf in enumerate(chapter_files):
+        for cf, ch_title in chapter_files:
             duration_ms = _probe_ms(cf)
-            ch_title = story.chapters[i].title if i < len(story.chapters) else f"Chapter {i + 1}"
-
             f.write("[CHAPTER]\n")
             f.write("TIMEBASE=1/1000\n")
             f.write(f"START={offset_ms}\n")
@@ -2438,10 +2547,6 @@ def build_m4b(chapter_files, story, output_path, cover_path=None, intro_file=Non
     ])
 
     _run_ffmpeg(cmd, step="m4b mux")
-
-    import shutil as _shutil
-    _shutil.rmtree(tmp_dir, ignore_errors=True)
-
     return output_path
 
 
@@ -2528,7 +2633,9 @@ def play_audio_file(path):
 def _check_ffmpeg():
     """Verify ffmpeg is available, raise a helpful error if not."""
     try:
-        subprocess.run([FFMPEG, "-version"], capture_output=True, check=True)
+        subprocess.run(
+            [FFMPEG, "-version"], capture_output=True, check=True, timeout=10,
+        )
     except FileNotFoundError:
         raise RuntimeError(
             "ffmpeg is required for audiobook generation but was not found.\n"
@@ -2721,14 +2828,21 @@ def _concat_mp3s(inputs, output):
         with open(list_file, "w", encoding="utf-8") as f:
             for p in inputs:
                 f.write(_concat_entry(p))
-        result = subprocess.run(
-            [
-                FFMPEG, "-y", "-f", "concat", "-safe", "0",
-                "-i", str(list_file), "-c", "copy", str(output),
-            ],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    FFMPEG, "-y", "-f", "concat", "-safe", "0",
+                    "-i", str(list_file), "-c", "copy", str(output),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_FFMPEG_BUILD_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "ffmpeg concat timed out after %ds", _FFMPEG_BUILD_TIMEOUT_S,
+            )
+            return False
         if result.returncode != 0:
             logger.warning(
                 "ffmpeg concat failed (%s); stderr tail: %s",
@@ -3144,7 +3258,10 @@ def generate_audiobook(
                 shutil.copyfile(body_path, assembled)
         else:
             shutil.copyfile(body_path, assembled)
-        chapter_files.append(assembled)
+        # Keep the chapter's title alongside its audio so a chapter
+        # whose synth was skipped earlier can't shift every subsequent
+        # title in the M4B metadata.
+        chapter_files.append((assembled, ch.title))
 
         if progress_callback:
             progress_callback(i, total, ch.title)
@@ -3204,8 +3321,9 @@ def generate_audiobook(
         # Per-run scratch (assembled chapter files, heading clips, intro,
         # cover) is disposable. The body-audio cache lives under
         # portable.cache_dir() and is deliberately left untouched so the
-        # next run can reuse it.
+        # next run can reuse it. The voice map (.ffn-voices-<id>.json) is
+        # persistent and user-editable — leaving it in place is what makes
+        # "edits survive re-renders" true.
         shutil.rmtree(build_tmp, ignore_errors=True)
-        map_path.unlink(missing_ok=True)
 
     return m4b_path

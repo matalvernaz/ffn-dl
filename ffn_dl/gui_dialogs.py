@@ -777,7 +777,17 @@ class OptionalFeaturesDialog(wx.Dialog):
         self._buttons: dict[str, wx.Button] = {}
         self._status_labels: dict[str, wx.StaticText] = {}
         self._active_installs: set[str] = set()
+        # Worker-thread CallAfter targets gate on this. cf-solve install
+        # in particular pulls Playwright then chromium (~400 MB) — a
+        # dialog close mid-install would otherwise reach destroyed
+        # widgets when the next batch of streamed log lines lands.
+        self._alive = True
+        self.Bind(wx.EVT_CLOSE, self._on_alive_close)
         self._build_ui()
+
+    def _on_alive_close(self, event):
+        self._alive = False
+        event.Skip()
 
     def _build_ui(self):
         panel = wx.Panel(self)
@@ -932,9 +942,13 @@ class OptionalFeaturesDialog(wx.Dialog):
         wx.CallAfter(self._append_log, line)
 
     def _append_log(self, line: str) -> None:
+        if not self._alive:
+            return
         self.log_ctrl.AppendText(line.rstrip() + "\n")
 
     def _after_install(self, feature: str, ok: bool) -> None:
+        if not self._alive:
+            return
         self._active_installs.discard(feature)
         self._refresh_feature_row(feature)
         info = self._feat.FEATURES[feature]
@@ -978,6 +992,12 @@ class TtsProvidersDialog(wx.Dialog):
         )
         self._prefs = prefs
         self._log = log_callback or (lambda _msg: None)
+        # Worker threads (Install Piper, Download Voices) gate UI
+        # mutations on this so a dialog close mid-download doesn't
+        # touch destroyed widgets.
+        self._alive = True
+        self._busy = False
+        self.Bind(wx.EVT_CLOSE, self._on_tts_close)
 
         from . import prefs as _p
         self._p = _p
@@ -1112,11 +1132,38 @@ class TtsProvidersDialog(wx.Dialog):
         self.detail.Wrap(580)
         self.Layout()
 
-    def _on_install_piper(self, event):
-        from .tts_providers import piper as _piper
+    def _on_tts_close(self, event):
+        self._alive = False
+        event.Skip()
 
-        self._log("TTS providers: installing Piper binary...")
-        ok = _piper.install_piper_binary(log_callback=self._log)
+    def _set_piper_buttons(self, enabled: bool) -> None:
+        self._busy = not enabled
+        for btn_attr in ("install_btn", "download_btn"):
+            btn = getattr(self, btn_attr, None)
+            if btn is not None:
+                btn.Enable(enabled)
+
+    def _on_install_piper(self, event):
+        if self._busy:
+            return
+
+        def _log_async(msg: str) -> None:
+            if self._alive:
+                wx.CallAfter(self._log, msg)
+
+        def worker():
+            from .tts_providers import piper as _piper
+            _log_async("TTS providers: installing Piper binary...")
+            ok = _piper.install_piper_binary(log_callback=_log_async)
+            wx.CallAfter(self._after_install_piper, ok)
+
+        self._set_piper_buttons(False)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_install_piper(self, ok: bool) -> None:
+        if not self._alive:
+            return
+        self._set_piper_buttons(True)
         if ok:
             wx.MessageBox(
                 "Piper binary installed.",
@@ -1132,6 +1179,8 @@ class TtsProvidersDialog(wx.Dialog):
         self._refresh_detail(self.list_ctrl.GetSelection())
 
     def _on_download_voices(self, event):
+        if self._busy:
+            return
         from .tts_providers import piper as _piper
 
         provider = self._tts_providers.get_provider("piper")
@@ -1155,9 +1204,26 @@ class TtsProvidersDialog(wx.Dialog):
         )
         if confirm != wx.YES:
             return
-        for v in voices:
-            self._log(f"Piper: downloading {v.short_name}...")
-            _piper.download_voice(v.short_name, log_callback=self._log)
+
+        def _log_async(msg: str) -> None:
+            if self._alive:
+                wx.CallAfter(self._log, msg)
+
+        def worker():
+            for v in voices:
+                if not self._alive:
+                    return
+                _log_async(f"Piper: downloading {v.short_name}...")
+                _piper.download_voice(v.short_name, log_callback=_log_async)
+            wx.CallAfter(self._after_download_voices)
+
+        self._set_piper_buttons(False)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_download_voices(self) -> None:
+        if not self._alive:
+            return
+        self._set_piper_buttons(True)
         self._refresh_detail(self.list_ctrl.GetSelection())
 
     def _on_save(self, event):
@@ -1877,7 +1943,19 @@ class AddFromUrlListDialog(wx.Dialog):
         self._default_max = max(0, int(default_max_results))
         self._works: list[dict] = []
         self._cancel_event = None
+        # Worker-thread CallAfter targets check this flag — extraction
+        # of a long bookmarks list can take 30+ seconds, and the
+        # callbacks would otherwise touch destroyed wx widgets if the
+        # user closes the dialog mid-fetch.
+        self._alive = True
+        self.Bind(wx.EVT_CLOSE, self._on_alive_close)
         self._build_ui()
+
+    def _on_alive_close(self, event):
+        self._alive = False
+        if self._cancel_event is not None:
+            self._cancel_event.set()
+        event.Skip()
 
     # ── UI ────────────────────────────────────────────────────
 
@@ -2012,6 +2090,8 @@ class AddFromUrlListDialog(wx.Dialog):
         wx.CallAfter(self._extract_done, ref, label, works)
 
     def _extract_failed(self, exc):
+        if not self._alive:
+            return
         self.extract_btn.Enable()
         self.status_ctrl.SetLabel(f"Extraction failed: {exc}")
         wx.MessageBox(
@@ -2021,6 +2101,8 @@ class AddFromUrlListDialog(wx.Dialog):
         )
 
     def _extract_done(self, ref, label, works):
+        if not self._alive:
+            return
         cap = int(self.max_ctrl.GetValue())
         if cap > 0:
             works = list(works)[:cap]

@@ -680,8 +680,24 @@ def _merge_with_existing(
         f"\n  Merging {len(existing)} existing chapter(s) with "
         f"{len(new_story.chapters)} new."
     )
-    merged = list(existing) + list(new_story.chapters)
-    merged.sort(key=lambda c: c.number)
+    # Dedupe by chapter number, with the freshly-downloaded chapter
+    # winning. Without this, an author re-publishing chapter N (a
+    # routine occurrence — fixing typos, re-numbering after edits)
+    # produced a merged file with two chapter-N rows. The freshly-
+    # downloaded body is the one we want to keep.
+    by_number: dict[int, "object"] = {}
+    duplicates = 0
+    for ch in existing:
+        by_number[ch.number] = ch
+    for ch in new_story.chapters:
+        if ch.number in by_number:
+            duplicates += 1
+        by_number[ch.number] = ch
+    if duplicates:
+        status(
+            f"  ({duplicates} chapter(s) replaced by re-downloaded versions)"
+        )
+    merged = sorted(by_number.values(), key=lambda c: c.number)
     new_story.chapters = merged
     return new_story
 
@@ -4274,6 +4290,15 @@ def main(argv: list[str] | None = None) -> None:
     if args.update:
         if args.batch:
             parser.error("--update and --batch cannot be used together")
+        if args.url:
+            # _handle_update_file derives the URL from the file's
+            # source-url metadata, so any extra positional URLs would
+            # be silently ignored. Reject up front so the user doesn't
+            # think they kicked off a download alongside the update.
+            parser.error(
+                "--update accepts only the file argument; pass other URLs "
+                "in a separate invocation"
+            )
         sys.exit(_handle_update_file(args))
 
     # --- --extract / --bulk: any list-page URL → list of fic URLs ---

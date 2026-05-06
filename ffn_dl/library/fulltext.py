@@ -160,6 +160,18 @@ class FullTextIndex:
         self._conn = sqlite3.connect(
             str(self._path), check_same_thread=False,
         )
+        # WAL lets readers (search) and the indexing writer coexist
+        # without blocking, and busy_timeout absorbs the brief overlap
+        # between a CLI --populate-search run and a GUI-triggered
+        # --update-library hashing pass touching the same db.
+        try:
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn.execute("PRAGMA synchronous = NORMAL")
+            self._conn.execute("PRAGMA busy_timeout = 5000")
+        except sqlite3.DatabaseError:
+            # PRAGMAs are best-effort; an older sqlite or read-only
+            # filesystem shouldn't fail the open.
+            pass
         self._init_schema()
 
     def _init_schema(self) -> None:

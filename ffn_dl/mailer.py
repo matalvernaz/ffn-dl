@@ -27,6 +27,12 @@ SMTP_TIMEOUT_S = 30
 # Implicit-TLS port. Everything else uses STARTTLS.
 SMTP_SSL_PORT = 465
 
+# Amazon's Send-to-Kindle gateway silently drops attachments larger
+# than ~25 MB. Most other SMTP relays sit at 25–50 MB. We refuse the
+# send before opening the connection so the user gets a clear error
+# instead of a delivery that vanishes.
+KINDLE_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+
 
 class SMTPConfigError(RuntimeError):
     """Raised when required SMTP settings aren't available."""
@@ -113,6 +119,15 @@ def send_file(to_addr: str, attachment_path, subject=None, body="", prefs=None):
     path = Path(attachment_path)
     if not path.is_file():
         raise FileNotFoundError(f"Attachment not found: {path}")
+
+    size = path.stat().st_size
+    if size > KINDLE_MAX_ATTACHMENT_BYTES:
+        raise RuntimeError(
+            f"Attachment {path.name} is {size / (1024 * 1024):.1f} MB, "
+            f"over the {KINDLE_MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB "
+            "Send-to-Kindle limit. Amazon would silently drop it. "
+            "Try splitting the export or using a different transport."
+        )
 
     msg = EmailMessage()
     msg["From"] = cfg["from_addr"]

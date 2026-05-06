@@ -50,12 +50,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+from ..atomic import atomic_write_text
+from ..sites import canonical_url
 from .candidate import StoryCandidate
 
 logger = logging.getLogger(__name__)
@@ -107,21 +107,15 @@ class LibraryIndex:
         return cls(p, raw)
 
     def save(self) -> None:
-        """Atomic write: temp file in the same dir, then rename."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".library-index-", suffix=".json", dir=str(self._path.parent)
+        """Atomic write with fsync: the index is the source of truth for
+        every library tool downstream, so we use the shared atomic
+        helper to get fsync-of-the-temp + parent-dir-fsync semantics
+        rather than rolling our own rename-only path."""
+        atomic_write_text(
+            self._path,
+            json.dumps(self._data, indent=2, sort_keys=True),
+            fsync_dir=True,
         )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, indent=2, sort_keys=True)
-            os.replace(tmp_name, self._path)
-        except Exception:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
 
     # ── Library-scoped accessors ────────────────────────────────
 
@@ -342,7 +336,13 @@ class LibraryIndex:
         lib["untrackable"] = []
 
     def lookup_by_url(self, root: Path, url: str) -> dict | None:
-        return self._library(root)["stories"].get(url)
+        # Stored keys are canonicalised (see ``record`` and
+        # ``_migrate_non_canonical_keys``); callers routinely pass the
+        # raw source_url from a file's metadata, which can be a fuller
+        # form (chapter id in the path, query strings, etc.). Match the
+        # storage convention before lookup.
+        key = canonical_url(url) or url
+        return self._library(root)["stories"].get(key)
 
     def stories_in(self, root: Path) -> Iterator[tuple[str, dict]]:
         for url, entry in self._library(root)["stories"].items():

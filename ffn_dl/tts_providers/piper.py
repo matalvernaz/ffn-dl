@@ -268,7 +268,15 @@ def install_piper_binary(log_callback=None) -> bool:
                     (member.name for member in tf.getmembers()),
                     target_dir,
                 )
-                tf.extractall(target_dir)
+                # Python 3.12+ ``filter="data"`` rejects symlinks /
+                # hardlinks pointing outside the destination, plus
+                # device / fifo / special members — defenses our own
+                # name-only validator can't provide for tar.
+                try:
+                    tf.extractall(target_dir, filter="data")
+                except TypeError:
+                    # Older Python without the filter argument.
+                    tf.extractall(target_dir)
         # Some release archives unpack into a nested ``piper/`` dir;
         # flatten it so piper_executable() finds the binary directly.
         nested = target_dir / "piper"
@@ -321,7 +329,13 @@ def _voice_subpath(short_name: str) -> str | None:
 def download_voice(short_name: str, log_callback=None) -> bool:
     """Fetch a voice's ``.onnx`` + ``.onnx.json`` pair from the
     HuggingFace repo. Returns True on success. Caller is expected to
-    have already checked ``voice_is_downloaded()``."""
+    have already checked ``voice_is_downloaded()``.
+
+    Each file is streamed to a ``.part`` sibling and renamed atomically
+    on success. A SIGKILL or network truncation mid-download therefore
+    leaves a ``.part`` rather than a corrupt-but-passes-size-check
+    final file, and the next attempt starts clean.
+    """
     sub = _voice_subpath(short_name)
     if sub is None:
         if log_callback:
@@ -334,14 +348,22 @@ def download_voice(short_name: str, log_callback=None) -> bool:
         (base_url + ".onnx", onnx_target),
         (base_url + ".onnx.json", cfg_target),
     ):
+        part = target.with_suffix(target.suffix + ".part")
         try:
             if log_callback:
                 log_callback(f"Piper: fetching {target.name} ...")
             with urllib.request.urlopen(url, timeout=120) as resp:
-                target.write_bytes(resp.read())
+                with open(part, "wb") as out:
+                    while True:
+                        chunk = resp.read(1 << 20)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+            os.replace(part, target)
         except (urllib.error.URLError, OSError) as exc:
             if log_callback:
                 log_callback(f"Piper: download failed for {target.name}: {exc}")
+            part.unlink(missing_ok=True)
             target.unlink(missing_ok=True)
             return False
     if log_callback:

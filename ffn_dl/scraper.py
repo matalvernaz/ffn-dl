@@ -619,6 +619,13 @@ class BaseScraper:
 
     def _bump_delay_up(self) -> None:
         """AIMD multiplicative increase after a rate-limit hit."""
+        if self.delay_range is not None:
+            # Static-delay mode (--delay-min/--delay-max). _delay() ignores
+            # _current_delay in that mode, so mutating it here would just
+            # leave a stale value the user never observes — we'd report
+            # "rate-limit recovery" while the real per-fetch delay stayed
+            # exactly the same. No-op instead.
+            return
         with self._state_lock:
             prev = self._current_delay
             new_delay = max(prev * 2, AIMD_BUMP_FLOOR_S)
@@ -668,7 +675,8 @@ class BaseScraper:
         i = 0
         while i < len(urls):
             batch = urls[i:i + concurrency]
-            delay_before = self._current_delay
+            with self._state_lock:
+                delay_before = self._current_delay
 
             def fetch_one(url):
                 # Each worker gets its own session so concurrent libcurl
@@ -676,6 +684,7 @@ class BaseScraper:
                 session = self._new_session()
                 return self._fetch(url, session=session)
 
+            first_error: BaseException | None = None
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=len(batch),
             ) as executor:
@@ -685,9 +694,24 @@ class BaseScraper:
                 }
                 for future in concurrent.futures.as_completed(future_to_local):
                     local_i = future_to_local[future]
-                    results[i + local_i] = future.result()
+                    try:
+                        results[i + local_i] = future.result()
+                    except BaseException as exc:
+                        # Previously a single failed fetch aborted the
+                        # whole batch — sibling fetches that had already
+                        # succeeded were thrown away when the executor
+                        # tore down. Now we keep the successes and only
+                        # re-raise after the batch settles, so a transient
+                        # failure on one chapter doesn't multiply load on
+                        # the server when the user retries.
+                        if first_error is None:
+                            first_error = exc
+            if first_error is not None:
+                raise first_error
 
-            if self._current_delay > delay_before and concurrency > 1:
+            with self._state_lock:
+                delay_after = self._current_delay
+            if delay_after > delay_before and concurrency > 1:
                 concurrency = max(1, concurrency // 2)
                 logger.info(
                     "Parallel fetch backing off to concurrency=%d "
@@ -1353,6 +1377,16 @@ class FFNScraper(BaseScraper):
     def _parse_chapter_html(soup):
         storytext = soup.find("div", id="storytext")
         if not storytext:
+            # Cloudflare occasionally serves an interstitial as HTTP 200
+            # with markup that doesn't contain ``div#storytext`` — neither
+            # ``_check_for_blocks`` nor the 404 path catches that. Log a
+            # snippet so a maintainer triaging "download failed
+            # randomly" reports has something to act on.
+            snippet = str(soup)[:400].replace("\n", " ")
+            logger.warning(
+                "FFN page returned 200 but had no #storytext; first 400 "
+                "chars: %s", snippet,
+            )
             raise ValueError("Could not find story text on page.")
         return storytext.decode_contents()
 

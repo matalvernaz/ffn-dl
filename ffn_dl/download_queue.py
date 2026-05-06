@@ -114,7 +114,17 @@ class _SiteQueue:
             try:
                 fut, job_fn = self._q.get(timeout=_WORKER_IDLE_TIMEOUT_S)
             except queue.Empty:
-                return
+                # Re-check the queue under the lock before exiting.
+                # Without this, a producer that called enqueue between
+                # the timeout and the return saw self._worker.is_alive()
+                # as still True (thread hadn't actually exited yet),
+                # didn't spawn a replacement, and the new job sat in
+                # the queue forever.
+                with self._lock:
+                    if self._q.empty():
+                        self._worker = None
+                        return
+                continue
             # Future may have been cancelled while pending — set_running_or_
             # notify_cancel() returns False in that case and we skip the job.
             if not fut.set_running_or_notify_cancel():
@@ -212,11 +222,18 @@ class DownloadQueues:
         """
         with cls._lock:
             qs = list(cls._queues.items())
-        return {
-            name: (q.active, q.pending)
-            for name, q in qs
-            if q.active > 0 or q.pending > 0
-        }
+        # Take per-site (active, pending) atomically under each queue's
+        # own lock so a concurrent enqueue/finish can't tear the snapshot
+        # (e.g. report active=0,pending=0 for a site whose state changed
+        # between the truthy filter and the value read).
+        out: dict[str, tuple[int, int]] = {}
+        for name, q in qs:
+            with q._lock:
+                a = q._active
+                p = q._q.qsize()
+            if a > 0 or p > 0:
+                out[name] = (a, p)
+        return out
 
     @classmethod
     def is_site_busy(cls, site_name: str) -> bool:

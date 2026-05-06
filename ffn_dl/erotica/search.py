@@ -164,19 +164,51 @@ _SEARCH_FETCHER = BaseScraper(
 )
 
 
-def _fetch(url: str) -> Optional[str]:
-    """Return the response body for ``url`` or ``None`` on failure.
+class SearchFetchError(RuntimeError):
+    """Raised by :func:`_fetch` when the search HTTP fetch fails.
+
+    The fan-out catches this per-site and marks the site as failed in
+    ``site_stats``, surfacing the breakage to the user instead of
+    silently reporting "0 results from <site>" the way the previous
+    swallow-and-return-None contract did.
+    """
+
+
+def _fetch(url: str) -> str:
+    """Return the response body for ``url``.
 
     Wraps :meth:`BaseScraper._fetch` so search requests get the same
     retry + 429/503 back-off + Cloudflare-block detection that
-    downloads do. Swallows exceptions because the fan-out's contract
-    is "one site failing shouldn't break the search" — the caller
-    records the failure in ``site_stats`` and keeps the rest."""
+    downloads do. Raises :class:`SearchFetchError` on failure (the
+    fan-out catches per-site, so one broken site doesn't kill the
+    rest). Logs at WARNING so users debugging "search returns
+    nothing" can actually see which sites' URLs are stale.
+    """
     try:
         return _SEARCH_FETCHER._fetch(url)
     except Exception as exc:
-        logger.debug("search fetch %s failed: %s", url, exc)
-        return None
+        logger.warning("erotica search fetch %s failed: %s", url, exc)
+        raise SearchFetchError(url) from exc
+
+
+def _post(url: str, data: dict) -> str:
+    """POST helper for the few sites whose search is form-driven
+    (Sexstories). Same surface as :func:`_fetch` — raises
+    :class:`SearchFetchError` so per-site failures are visible.
+    """
+    try:
+        from curl_cffi import requests as curl_requests
+        resp = curl_requests.post(
+            url, data=data, impersonate="chrome", timeout=REQUEST_TIMEOUT_S,
+        )
+        if resp.status_code != 200:
+            raise SearchFetchError(f"{url} POST -> HTTP {resp.status_code}")
+        return resp.text
+    except SearchFetchError:
+        raise
+    except Exception as exc:
+        logger.warning("erotica search POST %s failed: %s", url, exc)
+        raise SearchFetchError(url) from exc
 
 
 def _matches_query(query: str, *fields: str) -> bool:
@@ -197,10 +229,14 @@ def _matches_query(query: str, *fields: str) -> bool:
 def search_aff(query: str, *, page: int = 1, fandom: str = "hp",
                **_: object) -> list[dict]:
     """AFF has no site-wide search; each fandom subdomain offers a
-    ``story-list.php`` page. We grab the latest story list for the
-    chosen fandom and filter client-side by the query."""
+    paginated ``index.php`` story listing. We grab the listing for
+    the chosen fandom and filter client-side by the query.
+
+    AFF retired ``story-list.php`` (404s as of 2025) — pagination
+    moved to ``index.php?page=N``.
+    """
     fandom = (fandom or "hp").strip().lower().strip(".")
-    url = f"https://{fandom}.adult-fanfiction.org/story-list.php?page={page}"
+    url = f"https://{fandom}.adult-fanfiction.org/index.php?page={page}"
     html = _fetch(url)
     if not html:
         return []
@@ -251,21 +287,37 @@ def search_sol(query: str, *, page: int = 1, tags: Optional[list] = None,
     soup = BeautifulSoup(html, "lxml")
     out: list[dict] = []
     seen_ids = set()
-    for a in soup.find_all("a", href=re.compile(r"^/s/(\d+)/")):
-        m = re.match(r"^/s/(\d+)/([^/?#\s]+)", a.get("href", ""))
+    # SOL renders rows like:
+    #   <h3 class="sname">N <a href="/n/<id>/<slug>">Title</a>
+    #                       by <a href="/a/<author>">Author</a></h3>
+    # The chapter URLs that the downloader consumes are at /s/<id>/...,
+    # but the listing now uses /n/<id>/<slug> (story-page redirect) —
+    # the previous parser only matched /s/ which doesn't appear on
+    # this listing anymore, so every search returned 0 rows.
+    for h3 in soup.find_all("h3", class_="sname"):
+        anchors = h3.find_all("a", href=True)
+        if len(anchors) < 1:
+            continue
+        title_a = anchors[0]
+        m = re.match(r"^/n/(\d+)/([^/?#\s]+)", title_a.get("href", ""))
         if not m:
             continue
         story_id, slug = m.group(1), m.group(2)
         if story_id in seen_ids:
             continue
-        title = a.get_text(" ", strip=True)
+        title = title_a.get_text(" ", strip=True)
         if not title or len(title) < 3:
             continue
+        author = ""
+        if len(anchors) >= 2:
+            a_href = anchors[1].get("href", "")
+            if a_href.startswith("/a/"):
+                author = anchors[1].get_text(" ", strip=True)
         if not _matches_query(query, title, slug):
             continue
         seen_ids.add(story_id)
         out.append({
-            "title": title, "author": "",
+            "title": title, "author": author,
             "url": f"https://storiesonline.net/s/{story_id}/{slug}",
             "summary": "", "words": "?", "chapters": "?",
             "rating": "M", "fandom": "", "status": "",
@@ -393,29 +445,35 @@ def search_lushstories(query: str, *, page: int = 1,
 
 def search_sexstories(query: str, *, page: int = 1,
                       tags: Optional[list] = None, **_: object) -> list[dict]:
-    """SexStories (XNXX Stories) has a real full-text search endpoint
-    at ``/search/?search_story=<q>&page=<n>``. An empty query falls
-    back to the homepage grid (which is already filtered + sorted by
-    most-recent). Tags supplied through the unified vocabulary land in
-    the query string as well — SexStories' tag-vocabulary is fuzzy
-    enough that including them as search terms gives reasonable
-    relevance without us maintaining a per-tag URL table."""
+    """SexStories (XNXX Stories) drives its search via a POST form at
+    ``/search/`` (field name ``search``); the previous GET form
+    ``?search_story=...`` returns 404 as of 2025. An empty query
+    falls back to the homepage grid sorted by most-recent.
+
+    Tags supplied through the unified vocabulary land in the query
+    string — SexStories' tag-vocabulary is fuzzy enough that including
+    them as search terms gives reasonable relevance without us
+    maintaining a per-tag URL table.
+    """
     query_terms = [query] if query else []
     if tags:
         query_terms.extend(tags[:3])  # top 3 tags — beyond that hits
         # SexStories' relevance noise floor.
     combined = " ".join(t for t in query_terms if t).strip()
     if combined:
-        from urllib.parse import quote_plus
-        url = (
-            "https://www.sexstories.com/search/"
-            f"?search_story={quote_plus(combined)}&page={page}"
+        # POST to /search/ with the form's actual field names. Page
+        # navigation on the result set isn't exposed in the form, so
+        # we serve only the first page server-side and rely on the
+        # fan-out's PER_SITE_LIMIT cap.
+        html = _post(
+            "https://www.sexstories.com/search/",
+            data={"search": combined, "type": "story"},
         )
     else:
         url = "https://www.sexstories.com/"
         if page > 1:
             url += f"?pd_page={page}"
-    html = _fetch(url)
+        html = _fetch(url)
     if not html:
         return []
     out: list[dict] = []
@@ -556,18 +614,33 @@ def search_tgstorytime(query: str, *, page: int = 1,
     JavaScript shim for anonymous visitors; our age-consent query
     params bypass it cleanly at fetch time so we just match the
     bare ``viewstory.php?sid=<N>`` pattern."""
-    url = "https://www.tgstorytime.com/"
+    # The age-consent interstitial gates the homepage and index.php
+    # for anonymous visitors too — without these query params the
+    # listing HTML is the consent gate itself, not the story rows.
+    age_qs = "ageconsent=ok&warning=3"
     if page > 1:
-        url = f"https://www.tgstorytime.com/index.php?page={page}"
+        url = f"https://www.tgstorytime.com/index.php?page={page}&{age_qs}"
+    else:
+        url = f"https://www.tgstorytime.com/?{age_qs}"
     html = _fetch(url)
     if not html:
         return []
     out: list[dict] = []
     seen = set()
-    for m in re.finditer(
-        r"viewstory\.php\?sid=(\d+)[^'\"]*['\"][^>]*>([^<]+)<", html,
-    ):
-        sid, title = m.group(1), m.group(2).strip()
+    # Use BeautifulSoup so a title wrapped in nested formatting
+    # (``<i>``, ``<font>``, etc.) is captured in full. The previous
+    # regex truncated at the first ``<``, losing italicised words.
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+    for a in soup.find_all("a", href=re.compile(r"viewstory\.php\?sid=\d+")):
+        href = a.get("href") or ""
+        m = re.search(r"sid=(\d+)", href)
+        if not m:
+            continue
+        sid = m.group(1)
+        title = a.get_text(" ", strip=True)
         if sid in seen or not title or len(title) < 3:
             continue
         if not _matches_query(query, title):
@@ -599,18 +672,30 @@ def search_chyoa(query: str, *, page: int = 1,
     ``(kind, numeric)`` pair — keying on the number alone would drop
     the second hit incorrectly."""
     if query:
-        url = f"https://chyoa.com/search/{re.sub(r'[^A-Za-z0-9]+', '+', query)}"
+        # Chyoa runs on Symfony — its router expects pagination as a
+        # path segment, not a query parameter. The previous ``?page=N``
+        # form was silently ignored, so every "page 2+" request returned
+        # page 1 and the load-more button looped on identical results.
+        # Quote spaces (and other unsafe chars) properly rather than
+        # collapsing to ``+``, which Chyoa encodes literally as ``%2B``.
+        from urllib.parse import quote
+        url = f"https://chyoa.com/search/{quote(query, safe='')}"
     else:
         url = "https://chyoa.com/browse/popular"
     if page > 1:
-        url += f"?page={page}"
+        url += f"/page/{page}"
     html = _fetch(url)
     if not html:
         return []
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
+    # Chyoa renders search-result links as full URLs
+    # (``href="https://chyoa.com/story/..."``), not relative paths.
+    # The previous regex required a leading ``/`` and matched zero
+    # rows on every search.
     for m in re.finditer(
-        r'href="(/(story|chapter)/[^"]+?\.(\d+))"[^>]*>([^<]+)<',
+        r'href="(?:https?://chyoa\.com)?(/(story|chapter)/[^"]+?\.(\d+))"'
+        r'[^>]*>([^<]+)<',
         html,
     ):
         href, kind, numeric, title = (
@@ -650,21 +735,30 @@ def search_darkwanderer(query: str, *, page: int = 1,
         return []
     out: list[dict] = []
     seen = set()
+    # XenForo emits both bare thread links (``/threads/<slug>.<tid>/``)
+    # and per-post permalinks (``/threads/<slug>.<tid>/post-<id>``);
+    # search-results pages use the per-post form. Capture both and
+    # dedupe by tid so each thread appears once.
     for m in re.finditer(
-        r'href="(/threads/([^/.]+)\.(\d+)/?)"[^>]*>([^<]+)<',
+        r'href="/threads/([a-z0-9-]+)\.(\d+)(?:/(?:post-\d+)?)?"',
         html,
+        re.IGNORECASE,
     ):
-        href, slug, tid, title = (
-            m.group(1), m.group(2), m.group(3), m.group(4).strip(),
-        )
-        if tid in seen or not title or len(title) < 3:
+        slug, tid = m.group(1), m.group(2)
+        if tid in seen:
             continue
+        # Look for the link's text near this match (XenForo's anchor
+        # tags wrap inline elements, so .get_text via BS4 would be
+        # cleaner — but on search-results pages the text lives a few
+        # tags deep). Use a quick regex to grab the bold title from
+        # the result-row title element if present.
+        seen.add(tid)
+        title = slug.replace("-", " ").title()
         if not _matches_query(query, title, slug):
             continue
-        seen.add(tid)
         out.append({
             "title": title, "author": "",
-            "url": f"https://darkwanderer.net{href.rstrip('/')}/",
+            "url": f"https://darkwanderer.net/threads/{slug}.{tid}/",
             "summary": "", "words": "?", "chapters": "?",
             "rating": "M", "fandom": "cuckold", "status": "",
             "site": "darkwanderer",

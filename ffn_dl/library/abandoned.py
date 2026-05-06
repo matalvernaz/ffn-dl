@@ -152,7 +152,12 @@ def mark_abandoned(
             status = extract_status(path) or entry.get("status") or ""
         except Exception:
             status = entry.get("status") or ""
-        if status.lower() == "complete":
+        # Match the terminal-status set used by refresh._is_terminal_status
+        # (Complete, Completed, Abandoned). The previous bare-equality
+        # check missed FFN/older-HTML-export files whose scanner produced
+        # literal "Completed" and treated them as still-WIP.
+        from .refresh import _is_terminal_status
+        if _is_terminal_status(status):
             report.kept_complete += 1
             continue
 
@@ -215,6 +220,9 @@ def revive_abandoned(
     URLs that don't correspond to an abandoned entry in any of the
     searched roots land in :attr:`ReviveReport.missing` so the CLI
     can surface typos or entries the user has already cleaned up.
+
+    The caller is responsible for calling :meth:`LibraryIndex.save`
+    afterwards (same contract as :func:`mark_abandoned`).
     """
     report = ReviveReport()
     if roots is None:

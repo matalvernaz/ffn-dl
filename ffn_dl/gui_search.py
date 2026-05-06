@@ -13,11 +13,14 @@ filter-constant import cost on launch for users who never search.
 """
 
 import json
+import logging
 import threading
 
 import wx
 
 from .gui_dialogs import MultiPickerDialog, SeriesPartsDialog
+
+logger = logging.getLogger(__name__)
 
 
 _SEARCH_COLUMNS = [
@@ -230,6 +233,12 @@ class SearchFrame(wx.Frame):
         # same rows over and over. Empty for every per-site frame.
         self._exhausted_sites: set = set()
         self.last_filters = {}
+        # Set False on close so worker-thread CallAfter callbacks
+        # (search results, error MessageBoxes) become no-ops on a
+        # destroyed frame. An erotica fan-out can take 30+ seconds; if
+        # the user closes mid-search the late callbacks would otherwise
+        # touch destroyed wx widgets.
+        self._alive = True
 
         self._build_ui()
         self._load_state()
@@ -633,18 +642,28 @@ class SearchFrame(wx.Frame):
             tb = traceback.format_exc()
             self._log(f"Search error: {e}")
             self._log(tb.rstrip())
-            wx.CallAfter(
-                wx.MessageBox,
-                f"Search failed:\n\n{e}",
-                "Search Error",
-                wx.OK | wx.ICON_ERROR, self,
-            )
             self.main_frame._set_busy(False)
+            if self._alive:
+                wx.CallAfter(self._show_search_error, str(e))
             return
-        wx.CallAfter(self._populate_results, page_results, next_page, append)
         self.main_frame._set_busy(False)
+        if self._alive:
+            wx.CallAfter(
+                self._populate_results, page_results, next_page, append,
+            )
+
+    def _show_search_error(self, message: str) -> None:
+        if not self._alive:
+            return
+        wx.MessageBox(
+            f"Search failed:\n\n{message}",
+            "Search Error",
+            wx.OK | wx.ICON_ERROR, self,
+        )
 
     def _populate_results(self, new_results, next_page, append):
+        if not self._alive:
+            return
         from .search import collapse_ao3_series, collapse_literotica_series
 
         # Erotica fan-out ships a list subclass carrying per-site
@@ -1026,12 +1045,16 @@ class SearchFrame(wx.Frame):
     # ── Close ─────────────────────────────────────────────────
 
     def _on_close(self, event):
+        # Flip _alive *before* event.Skip() so any worker-thread
+        # CallAfter that fires between here and Destroy() short-circuits
+        # at its first line.
+        self._alive = False
         try:
             self.save_state()
         except Exception:
-            pass
+            logger.debug("save_state on close failed", exc_info=True)
         try:
             self.main_frame._notify_search_frame_closed(self.site_key)
         except Exception:
-            pass
+            logger.debug("frame-close notify failed", exc_info=True)
         event.Skip()
