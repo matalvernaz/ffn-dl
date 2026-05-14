@@ -24,8 +24,10 @@ request to 403 after the challenge would have expired anyway.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -93,13 +95,35 @@ def _cookie_cache_dir() -> Path:
     return path
 
 
+_HOST_PREFIX_RE = re.compile(r"[^a-z0-9.\-]")
+"""Characters allowed verbatim in the optional human-readable host
+prefix. Anything else gets collapsed to ``_`` for the prefix; the
+SHA-256 suffix carries the actual identity, so collapsing is purely
+cosmetic and can't cause a cross-host collision."""
+
+
 def _host_cache_path(host: str) -> Path:
-    # Sanitise the host so we can't accidentally write outside the
-    # cache dir if a caller feeds us a malformed value. The regex
-    # keeps ASCII letters, digits, dots, and dashes; everything else
-    # becomes underscore.
-    safe = re.sub(r"[^a-z0-9.\-]", "_", host.lower())
-    return _cookie_cache_dir() / f"{safe}.json"
+    """Cache-filename for ``host``.
+
+    The earlier scheme collapsed every non-ASCII byte to ``_``: two
+    distinct IDN hosts (``café.example.com`` and ``cafe2.example.com``
+    after Punycode/Unicode mismatch) could resolve to the same
+    ``cafe_.example.com.json``, and Cloudflare cookies bound to one
+    host would then be loaded for the other. Hostnames also occasionally
+    collide with Windows reserved device names (``con``, ``nul``,
+    ``aux``, ``prn``, ``com1``...) and ``con.json`` fails to open at
+    all on Windows.
+
+    The current scheme prefixes a sanitised, length-bounded human-
+    readable host fragment (purely for debuggability of the cache dir)
+    onto a SHA-256 of the lower-cased host. The hash carries identity;
+    the prefix carries readability. Windows reserved names are
+    short-circuited by the leading ``host-`` literal, which can never
+    equal a device name."""
+    lowered = host.lower()
+    digest = hashlib.sha256(lowered.encode("utf-8")).hexdigest()[:16]
+    readable = _HOST_PREFIX_RE.sub("_", lowered)[:48]
+    return _cookie_cache_dir() / f"host-{readable}-{digest}.json"
 
 
 def load_cached(host: str, *, now: Optional[float] = None) -> Optional[SolveResult]:
@@ -116,9 +140,18 @@ def load_cached(host: str, *, now: Optional[float] = None) -> Optional[SolveResu
     except (OSError, json.JSONDecodeError):
         return None
     raw_fetched = data.get("fetched_at")
-    if not isinstance(raw_fetched, (int, float)):
+    if not isinstance(raw_fetched, (int, float)) or isinstance(raw_fetched, bool):
         return None
     fetched_at = float(raw_fetched)
+    # NaN and ±inf survive every subsequent comparison (``NaN <= 0`` is
+    # False, ``NaN > current`` is False, ``current - NaN > TTL`` is
+    # False), so a corrupted timestamp would pin the entry as
+    # permanently fresh and we'd loop forever on a cookie the site has
+    # already invalidated. Python's ``json.loads`` accepts ``NaN`` and
+    # ``Infinity`` by default, so this is reachable from a
+    # hand-edited or fuzzed cache file.
+    if not math.isfinite(fetched_at):
+        return None
     current = time.time() if now is None else now
     # A future timestamp (clock skew, manually edited cache) would
     # otherwise pin the entry as "always fresh" and we'd loop on a
@@ -128,11 +161,18 @@ def load_cached(host: str, *, now: Optional[float] = None) -> Optional[SolveResu
     if current - fetched_at > COOKIE_CACHE_TTL_S:
         return None
     cookies = data.get("cookies") or []
+    if not isinstance(cookies, list):
+        return None
+    # A cache file edited by hand (or written by a future build with a
+    # different shape) can contain non-mapping entries; ``dict(c)`` on
+    # a list/None/str would crash. Filter to just real mappings and
+    # accept a partial pull rather than the whole entry being lost.
+    typed_cookies = [dict(c) for c in cookies if isinstance(c, dict)]
     ua = str(data.get("user_agent") or "")
-    if not cookies or not ua:
+    if not typed_cookies or not ua:
         return None
     return SolveResult(
-        cookies=[dict(c) for c in cookies],
+        cookies=typed_cookies,
         user_agent=ua,
         fetched_at=fetched_at,
     )
@@ -263,13 +303,19 @@ def _default_launcher(url: str, timeout_s: float) -> tuple[list[dict], str]:
             for c in raw_cookies:
                 # Keep only the fields curl_cffi cares about — the
                 # rest (sameSite, priority) would just be dropped and
-                # add noise to the on-disk cookie cache.
+                # add noise to the on-disk cookie cache. ``expires``
+                # is preserved so persistent CF cookies survive
+                # past the curl_cffi session lifetime; without it the
+                # injected cookies become session-scoped in
+                # curl_cffi's jar and die the next time the scraper
+                # is constructed, forcing another Playwright run.
                 cookies.append({
                     "name": c.get("name"),
                     "value": c.get("value"),
                     "domain": c.get("domain"),
                     "path": c.get("path") or "/",
                     "secure": bool(c.get("secure")),
+                    "expires": c.get("expires"),
                 })
             return cookies, str(ua)
         finally:
@@ -291,14 +337,25 @@ def inject_into_session(session, result: SolveResult) -> None:
         domain = c.get("domain") or ""
         if not name or value is None:
             continue
+        kwargs = {
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": c.get("path") or "/",
+            "secure": bool(c.get("secure", False)),
+        }
+        # Playwright reports the expiry as a Unix timestamp (or -1
+        # for session cookies). Forward a real expiry so curl_cffi
+        # treats the cookie as persistent through to its real
+        # lifetime; a missing or sentinel ``expires`` is left
+        # alone so the jar applies its session-cookie default.
+        raw_expires = c.get("expires")
+        if isinstance(raw_expires, (int, float)) and not isinstance(raw_expires, bool):
+            expires_f = float(raw_expires)
+            if math.isfinite(expires_f) and expires_f > 0:
+                kwargs["expires"] = expires_f
         try:
-            session.cookies.set(
-                name=name,
-                value=value,
-                domain=domain,
-                path=c.get("path") or "/",
-                secure=bool(c.get("secure", False)),
-            )
+            session.cookies.set(**kwargs)
         except Exception:  # pragma: no cover — curl_cffi internal
             logger.debug(
                 "cf-solve: skipped cookie %s@%s (rejected by jar)",

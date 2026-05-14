@@ -964,12 +964,18 @@ def _download_one(
 
 
 def _read_batch_file(path: str) -> list[str]:
-    """Read URLs from a batch file, skipping blank lines and comments."""
+    """Read URLs from a batch file, skipping blank lines and comments.
+
+    ``utf-8-sig`` instead of plain ``utf-8`` so Windows Notepad's
+    BOM-prefixed UTF-8 saves don't leak ``\\ufeff`` into the first
+    URL — the resulting fetch then fails with an opaque
+    ``Invalid URL`` from curl_cffi and the user has no way to see
+    the invisible character at the head of their first line."""
     urls = []
     batch_path = Path(path)
     if not batch_path.is_file():
         raise FileNotFoundError(f"Batch file not found: {path}")
-    with open(batch_path, "r", encoding="utf-8") as f:
+    with open(batch_path, "r", encoding="utf-8-sig") as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith("#"):

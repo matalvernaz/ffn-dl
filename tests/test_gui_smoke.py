@@ -133,6 +133,32 @@ def test_library_frame_roundtrip(wx_app):
         frame.Destroy()
 
 
+def test_announce_label_updates_label_and_accessible_name(wx_app):
+    """``_announce_label`` mirrors the visible label into the MSAA
+    accessible name. Without that mirror, NVDA on Windows reads the
+    *initial* name forever — the user never hears the status flip
+    from ``(not installed)`` to ``(installing...)`` to ``(installed)``
+    that the sighted UI shows immediately.
+
+    We verify the public observable (``GetName()`` matches the new
+    label after the call) rather than the MSAA event itself, which
+    is platform-internal."""
+    from ffn_dl.gui import _announce_label
+
+    frame = wx.Frame(None)
+    try:
+        text = wx.StaticText(frame, label="(initial)")
+        text.SetName("(initial)")
+        _announce_label(text, "(installing...)")
+        assert text.GetLabel() == "(installing...)"
+        assert text.GetName() == "(installing...)"
+        _announce_label(text, "(installed)")
+        assert text.GetLabel() == "(installed)"
+        assert text.GetName() == "(installed)"
+    finally:
+        frame.Destroy()
+
+
 def test_idle_event_pumps_clean(wx_app):
     """Some MainFrame init paths schedule wx.CallAfter to populate
     the recent-files list, log pane, etc. Pumping idle once flushes

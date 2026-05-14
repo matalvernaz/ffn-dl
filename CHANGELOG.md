@@ -1,5 +1,74 @@
 # Changelog
 
+## 2.4.12 — 2026-05-14
+
+### Multi-AI deep-debug audit fixes (Gemini + OpenAI + Explore agents)
+
+- **Silent library wipe on schema downgrade is now impossible.**
+  ``LibraryIndex.load`` previously returned an empty index for any
+  schema-version mismatch — including the case where a user runs an
+  older ffn-dl build on a newer index file. The next ``save()`` then
+  atomically overwrote the original with ``{}`` and the user's entire
+  library mapping was gone with no warning. The load path now
+  snapshots the unreadable original via the existing
+  ``library.backup`` module before returning empty, so a downgrade
+  round-trips back to the newer build without data loss. A WARNING is
+  logged with the snapshot path.
+
+- **Atomic file writes preserve existing permission bits.**
+  ``mkstemp`` defaults to mode 0600; the atomic replace then installed
+  that mode in place of whatever the target had, silently turning a
+  shared NAS file private (Plex / Calibre / a second uid lose read
+  access). ``atomic_write_text``, ``atomic_write_bytes``, and
+  ``atomic_path`` now ``shutil.copymode`` from the existing target to
+  the temp before the rename. Brand-new files keep mkstemp's secure
+  0600 default.
+
+- **``atomic_path`` cleans up its temp on a failed replace.** If
+  ``os.replace`` raised on the success branch (Windows file lock,
+  antivirus interception, target-directory permission flip), the temp
+  file was orphaned because cleanup only ran on the yield-exception
+  path. Both paths now unlink the temp on failure.
+
+- **Batch URL files saved by Windows Notepad are no longer broken by
+  the UTF-8 BOM.** ``cli._read_batch_file`` opened with plain
+  ``encoding="utf-8"``, so the U+FEFF BOM leaked onto the head of the
+  first URL and the fetch failed with an opaque "invalid URL" error
+  that hid the invisible character. Now uses ``utf-8-sig``.
+
+- **Cloudflare cookie cache no longer collides on similar hostnames.**
+  ``_host_cache_path`` previously collapsed every non-ASCII byte to
+  ``_`` — two distinct IDN hosts could resolve to the same cache file
+  and Cloudflare cookies bound to one host would be loaded for the
+  other. The new scheme prefixes ``host-`` (sidestepping Windows
+  reserved device names like ``con``, ``nul``, ``aux``) and embeds a
+  SHA-256 of the hostname so two hosts can never share a file.
+
+- **Cloudflare cookie expiry survives session reconstruction.** The
+  Playwright launcher captured cookies but discarded their ``expires``
+  field; curl_cffi then treated every injected cookie as
+  session-scoped and the next scraper instance triggered another
+  Playwright run. The launcher now preserves ``expires``, the cache
+  round-trips it, and ``inject_into_session`` forwards finite positive
+  values to the jar. Sentinel ``-1`` (Playwright's session-cookie
+  marker) is dropped so it doesn't appear as instantly-expired.
+
+- **NaN / Infinity in the Cloudflare cookie cache is rejected.**
+  Python's ``json.loads`` accepts non-standard ``NaN`` and
+  ``Infinity``; ``NaN <= 0`` is False, ``NaN > current`` is False, and
+  ``current - NaN > TTL`` is False, so a corrupted ``fetched_at``
+  pinned the entry as permanently fresh and the loop reused a
+  long-revoked cookie forever. ``load_cached`` now explicitly rejects
+  non-finite timestamps and filters non-mapping cookie entries.
+
+- **GUI: dynamic status labels are now announced by NVDA.**
+  ``wx.StaticText.SetLabel`` is silent on Windows — screen readers
+  announce a control whose accessible *name* changed, not its visible
+  label. The new ``_announce_label`` helper mirrors the new text into
+  ``SetName`` and fires an MSAA ``OBJECT_NAMECHANGE`` so NVDA reads
+  the transition (``(not installed)`` → ``(installing...)`` →
+  ``(installed)``, LLM provider summary, TTS provider detail pane).
+
 ## 2.4.11 — 2026-05-13
 
 - **Merge-in-place updates no longer mix raw and prefixed chapter

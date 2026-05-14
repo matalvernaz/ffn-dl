@@ -126,3 +126,88 @@ class TestInterruptSimulation:
                 raise RuntimeError("crash")
         leftover = [p.name for p in tmp_path.iterdir() if p.name != "story.epub"]
         assert leftover == []
+
+
+class TestPermissionPreservation:
+    """``mkstemp`` creates files with mode 0600. Without explicit
+    preservation, the atomic replace clobbers the target's prior mode
+    — a shared NAS file becomes private and other tools (Plex,
+    Calibre, the next ffn-dl run under a different uid) lose read
+    access. The fix mirrors the existing target's mode onto the temp
+    before the rename.
+
+    Skipped on Windows because ``chmod`` is mostly a no-op there and
+    permission bits aren't the failure mode being protected."""
+
+    def test_atomic_write_text_keeps_target_mode(self, tmp_path):
+        if os.name == "nt":
+            pytest.skip("POSIX permission semantics only")
+        target = tmp_path / "out.txt"
+        target.write_text("stale")
+        os.chmod(target, 0o644)
+        atomic_write_text(target, "fresh")
+        mode = target.stat().st_mode & 0o777
+        assert mode == 0o644
+
+    def test_atomic_write_bytes_keeps_target_mode(self, tmp_path):
+        if os.name == "nt":
+            pytest.skip("POSIX permission semantics only")
+        target = tmp_path / "out.bin"
+        target.write_bytes(b"stale")
+        os.chmod(target, 0o664)
+        atomic_write_bytes(target, b"fresh")
+        mode = target.stat().st_mode & 0o777
+        assert mode == 0o664
+
+    def test_atomic_path_keeps_target_mode(self, tmp_path):
+        if os.name == "nt":
+            pytest.skip("POSIX permission semantics only")
+        target = tmp_path / "out.epub"
+        target.write_bytes(b"stale")
+        os.chmod(target, 0o644)
+        with atomic_path(target) as tmp:
+            tmp.write_bytes(b"fresh")
+        mode = target.stat().st_mode & 0o777
+        assert mode == 0o644
+
+    def test_new_file_gets_secure_default(self, tmp_path):
+        """When there's no pre-existing target, mkstemp's 0600 is the
+        right default — we don't want to invent a permissive mode for
+        a brand-new file."""
+        if os.name == "nt":
+            pytest.skip("POSIX permission semantics only")
+        target = tmp_path / "brand-new.txt"
+        atomic_write_text(target, "hi")
+        mode = target.stat().st_mode & 0o777
+        assert mode == 0o600
+
+
+class TestAtomicPathReplaceFailure:
+    """If ``os.replace`` fails on the success branch — Windows file
+    lock, antivirus interception, target-directory permission flip —
+    the temp file used to be orphaned because the cleanup only ran on
+    the yield-exception path. Now both paths clean up."""
+
+    def test_tmp_cleaned_when_replace_fails(self, tmp_path, monkeypatch):
+        target = tmp_path / "out.epub"
+        target.write_bytes(b"existing")
+
+        import ffn_dl.atomic as atomic_mod
+        orig_replace = atomic_mod.os.replace
+
+        def boom(src, dst):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(atomic_mod.os, "replace", boom)
+
+        with pytest.raises(OSError):
+            with atomic_path(target) as tmp:
+                tmp.write_bytes(b"new content")
+        leftover = [p.name for p in tmp_path.iterdir() if p.name != "out.epub"]
+        assert leftover == [], f"expected no temp leftovers, got {leftover}"
+
+        # Sanity: the un-monkeypatched replace still works.
+        monkeypatch.setattr(atomic_mod.os, "replace", orig_replace)
+        with atomic_path(target) as tmp:
+            tmp.write_bytes(b"recovered")
+        assert target.read_bytes() == b"recovered"

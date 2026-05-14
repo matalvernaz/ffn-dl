@@ -1140,13 +1140,14 @@ class TtsProvidersDialog(wx.Dialog):
         self._refresh_detail(self.list_ctrl.GetSelection())
 
     def _refresh_detail(self, idx):
+        from .gui import _announce_label
         if idx < 0 or idx >= len(self._provider_names):
-            self.detail.SetLabel("")
+            _announce_label(self.detail, "")
             return
         name = self._provider_names[idx]
         provider = self._tts_providers.get_provider(name)
         if provider is None:
-            self.detail.SetLabel(f"{name}: provider failed to load.")
+            _announce_label(self.detail, f"{name}: provider failed to load.")
             return
         try:
             voices = provider.list_voices() if provider.is_installed() else []
@@ -1177,7 +1178,7 @@ class TtsProvidersDialog(wx.Dialog):
             )
         else:
             text = f"{name}: {len(voices)} voices."
-        self.detail.SetLabel(text)
+        _announce_label(self.detail, text)
         self.detail.Wrap(580)
         self.Layout()
 

@@ -36,12 +36,34 @@ Design notes:
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Union
 
 PathLike = Union[str, os.PathLike[str]]
+
+
+def _inherit_target_perms(tmp_path: Path, target_path: Path) -> None:
+    """Carry the target file's permission bits onto the temp before
+    the atomic rename.
+
+    ``tempfile.mkstemp`` defaults to mode 0600. Without this step the
+    rename installs that mode in place of whatever the user (or another
+    tool) had granted — a shared library on a NAS becomes unreadable
+    by the Plex / Calibre user, a chmod 644 config file silently
+    becomes private. We only run it when the target already exists;
+    new files keep mkstemp's secure default."""
+    if not target_path.exists():
+        return
+    try:
+        shutil.copymode(target_path, tmp_path)
+    except OSError:
+        # copymode is best-effort: tmpfs, network mounts, Windows ACLs
+        # where chmod is a no-op. The data write is more important than
+        # the mode mirror, so we don't surface the failure.
+        return
 
 
 def atomic_write_text(
@@ -117,7 +139,13 @@ def atomic_path(
         except OSError:
             pass
         raise
-    else:
+    # Success path: fsync the temp, mirror the target's perms onto it
+    # (so an existing 0644 file doesn't silently become 0600), then
+    # atomically swap. If the swap itself fails — Windows file lock,
+    # antivirus interception, target-directory permission flip — the
+    # temp would otherwise be orphaned in the parent dir; the
+    # try/finally cleans it up.
+    try:
         # The third-party writer (e.g. ebooklib.write_epub) typically
         # doesn't fsync, so the temp file's bytes may still be in the
         # page cache when we rename. Without this fsync, a power loss
@@ -133,9 +161,16 @@ def atomic_path(
                 os.close(fd)
         except OSError:
             pass
+        _inherit_target_perms(tmp_path, target_path)
         os.replace(tmp_path, target_path)
         if fsync_dir:
             _fsync_dir(target_path.parent)
+    except BaseException:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _atomic_write(
@@ -165,6 +200,7 @@ def _atomic_write(
                 # The rename is still atomic — we just lose the
                 # durability guarantee on those mounts.
                 pass
+        _inherit_target_perms(Path(tmp_name), target_path)
         os.replace(tmp_name, target_path)
     except BaseException:
         # The fdopen block already closed the fd on success; on

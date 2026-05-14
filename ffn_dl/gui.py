@@ -38,6 +38,46 @@ _LOG_FILE_BACKUPS = 3
 _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
 
 
+def _announce_label(ctrl: "wx.Window", text: str) -> None:
+    """Update a StaticText (or similar) so a screen reader picks up the
+    change.
+
+    ``wx.StaticText.SetLabel`` alone is silent on Windows: NVDA only
+    announces a control whose accessible *name* changed, not its
+    visible label. Calling :meth:`wx.Window.SetName` with the same
+    string flips the MSAA name attribute, which NVDA reads on its next
+    poll. Where the platform exposes :meth:`wx.Accessible.NotifyEvent`,
+    we also fire ``wx.ACC_EVENT_OBJECT_NAMECHANGE`` so the reader is
+    woken immediately rather than on the next focus event.
+
+    Used for transient status text — "(installing...)", "(installed)",
+    download progress, install failure reasons — that the blind user
+    otherwise can't tell has changed."""
+    ctrl.SetLabel(text)
+    try:
+        ctrl.SetName(text)
+    except Exception:
+        return
+    try:
+        acc = ctrl.GetAccessible()
+    except Exception:
+        return
+    if acc is None:
+        return
+    try:
+        acc.NotifyEvent(
+            wx.ACC_EVENT_OBJECT_NAMECHANGE,
+            ctrl,
+            wx.ACC_SELF,
+            0,
+        )
+    except Exception:
+        # NotifyEvent isn't wired on every platform/version; failure
+        # just means the reader won't be poked, not that the label
+        # didn't update.
+        return
+
+
 class _WxLogHandler(logging.Handler):
     """Pipe Python ``logging`` records into the GUI's status pane.
 
@@ -830,25 +870,25 @@ class MainFrame(wx.Frame):
         self.attribution_install_btn.Show(not is_llm)
         self.audio_panel.Layout()
         if is_llm:
-            self.attribution_status.SetLabel(self._llm_status_label())
+            _announce_label(self.attribution_status, self._llm_status_label())
             return
         if backend == "builtin":
-            self.attribution_status.SetLabel("(built-in)")
+            _announce_label(self.attribution_status, "(built-in)")
             self.attribution_install_btn.Enable(False)
             self.attribution_install_btn.SetLabel("&Install...")
             return
         reason = self._attribution_module.install_unsupported_reason(backend)
         if reason:
-            self.attribution_status.SetLabel("(install unsupported)")
+            _announce_label(self.attribution_status, "(install unsupported)")
             self.attribution_install_btn.Enable(False)
             self.attribution_install_btn.SetLabel("&Install...")
             return
         if self._attribution_module.is_installed(backend):
-            self.attribution_status.SetLabel("(installed)")
+            _announce_label(self.attribution_status, "(installed)")
             self.attribution_install_btn.Enable(True)
             self.attribution_install_btn.SetLabel("Re&install...")
         else:
-            self.attribution_status.SetLabel("(not installed)")
+            _announce_label(self.attribution_status, "(not installed)")
             self.attribution_install_btn.Enable(True)
             self.attribution_install_btn.SetLabel("&Install...")
 
@@ -873,7 +913,7 @@ class MainFrame(wx.Frame):
         finally:
             dlg.Destroy()
         # Status label reads from prefs — refresh after Save.
-        self.attribution_status.SetLabel(self._llm_status_label())
+        _announce_label(self.attribution_status, self._llm_status_label())
 
     def _on_tts_providers(self, event):
         from .gui_dialogs import TtsProvidersDialog
@@ -1019,7 +1059,7 @@ class MainFrame(wx.Frame):
 
         self._log(f"\nInstalling {backend} in the background...")
         self.attribution_install_btn.Enable(False)
-        self.attribution_status.SetLabel("(installing...)")
+        _announce_label(self.attribution_status, "(installing...)")
 
         def run():
             def cb(line):

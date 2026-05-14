@@ -92,7 +92,16 @@ class LibraryIndex:
     def load(cls, path: Path | None = None) -> "LibraryIndex":
         """Load the index from disk, or return an empty one if missing
         or malformed. Never raises on a bad file — stale data just gets
-        replaced by an empty index on the next save()."""
+        replaced by an empty index on the next save().
+
+        Schema-version mismatch (e.g. a user downgrading ffn-dl onto an
+        index written by a newer build) is treated as "structurally
+        unreadable" and returns empty — but only after first snapshotting
+        the original file via :func:`library.backup.backup`. Without that
+        snapshot, the next :meth:`save` would atomically replace the
+        original with ``{}`` and silently wipe the user's library, with
+        no signal that anything went wrong. The backup lets a downgrade
+        round-trip back to the newer build without data loss."""
         p = Path(path) if path else default_index_path()
         if not p.exists():
             return cls(p, _empty())
@@ -101,6 +110,7 @@ class LibraryIndex:
         except (json.JSONDecodeError, OSError):
             return cls(p, _empty())
         if not isinstance(raw, dict) or raw.get("version") != SCHEMA_VERSION:
+            _snapshot_unreadable_index(p, raw)
             return cls(p, _empty())
         raw.setdefault("libraries", {})
         _migrate_non_canonical_keys(raw)
@@ -361,6 +371,42 @@ class LibraryIndex:
 
 def _empty() -> dict:
     return {"version": SCHEMA_VERSION, "libraries": {}}
+
+
+def _snapshot_unreadable_index(path: Path, raw: object) -> None:
+    """Back up an index whose schema we can't read before the next save
+    overwrites it.
+
+    The structurally-valid-but-version-mismatched case is the only one
+    where the existing file contains usable (just-unreadable-by-this-
+    build) data. Logging at WARNING ensures the user sees the snapshot
+    path; the backup module's pruning keeps the directory tidy. We
+    swallow every failure here because index.load() must never raise on
+    a bad file — a bricked backup pathway is worse than no backup."""
+    try:
+        from .backup import backup
+        snapshot = backup(path)
+    except Exception:
+        logger.warning(
+            "library index at %s has an unrecognised schema "
+            "(got version=%r, expected %d) and snapshot failed; "
+            "the next save will replace it",
+            path,
+            raw.get("version") if isinstance(raw, dict) else None,
+            SCHEMA_VERSION,
+        )
+        return
+    if snapshot is None:
+        return
+    logger.warning(
+        "library index at %s has an unrecognised schema "
+        "(got version=%r, expected %d); snapshotted to %s before "
+        "treating as empty",
+        path,
+        raw.get("version") if isinstance(raw, dict) else None,
+        SCHEMA_VERSION,
+        snapshot,
+    )
 
 
 def _migrate_non_canonical_keys(raw: dict) -> None:

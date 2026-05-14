@@ -173,6 +173,46 @@ def test_index_wrong_schema_version_returns_empty(tmp_path: Path):
     assert idx.library_roots() == []
 
 
+def test_index_wrong_schema_version_snapshots_before_emptying(tmp_path: Path):
+    """A version-mismatched index must be snapshotted before load()
+    returns empty — otherwise the next save() atomically overwrites the
+    user's library with {} and the data is gone.
+
+    The downgrade case (running an older ffn-dl on a newer index file)
+    is what makes this critical: the file is structurally valid, just
+    unreadable by this build, so we can't fall back to "corrupt → empty"
+    semantics without losing real data."""
+    import json
+    from ffn_dl.library.backup import list_backups
+
+    path = tmp_path / "library-index.json"
+    payload = {
+        "version": SCHEMA_VERSION + 99,
+        "libraries": {
+            str(tmp_path / "lib"): {
+                "last_scan": "2026-01-01T00:00:00Z",
+                "stories": {"https://example/s/1": {"title": "Keep me"}},
+                "untrackable": [],
+            }
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    idx = LibraryIndex.load(path)
+    assert idx.library_roots() == []
+
+    backups = list_backups(path)
+    assert len(backups) == 1, "expected a snapshot of the unreadable index"
+    restored = json.loads(backups[0].read_text(encoding="utf-8"))
+    assert restored == payload, "snapshot must preserve the original bytes verbatim"
+
+    # The next save() should not blow away the now-snapshotted original;
+    # we treat the live file as empty, but the user's data is recoverable
+    # via the backup sibling.
+    idx.save()
+    assert list_backups(path)[0].read_text(encoding="utf-8") == json.dumps(payload)
+
+
 def test_index_multiple_libraries_keyed_separately(tmp_path: Path):
     lib_a = tmp_path / "a"
     lib_b = tmp_path / "b"

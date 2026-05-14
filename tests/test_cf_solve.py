@@ -114,6 +114,138 @@ def test_persist_sanitises_hostname(cache_dir):
         assert cache_dir in child.resolve().parents or child.parent == cache_dir
 
 
+def test_distinct_hosts_get_distinct_cache_files(cache_dir):
+    """Two distinct hosts whose old-scheme sanitisation collapsed to
+    the same string must now land in different cache files. Without a
+    hash suffix, ``café.example`` and ``cafe2.example`` could both
+    sanitise to ``cafe_.example``, cross-feeding Cloudflare cookies
+    between unrelated hosts."""
+    cf_solve.persist("café.example", _sample_result(fetched_at=time.time()))
+    cf_solve.persist("cafe2.example", _sample_result(fetched_at=time.time()))
+    json_files = sorted(p.name for p in cache_dir.iterdir() if p.suffix == ".json")
+    assert len(json_files) == 2, f"expected two distinct cache files, got {json_files}"
+
+
+def test_cache_filename_avoids_windows_reserved_names(cache_dir):
+    """Hostnames like ``con``, ``nul``, ``aux``, ``prn``, ``com1`` are
+    Windows reserved device names — ``con.json`` either hangs or
+    fails on Windows. The cache scheme prefixes ``host-`` so the
+    filename can never equal a reserved name."""
+    for host in ("con", "nul", "aux", "prn", "com1", "lpt1"):
+        path = cf_solve._host_cache_path(host)
+        stem = path.stem
+        assert stem.startswith("host-"), f"{host!r} → {stem!r}"
+        # Sanity: the bare reserved name doesn't appear as a path
+        # component on its own.
+        for part in path.parts:
+            assert part.lower() != f"{host}.json"
+
+
+def test_load_rejects_nan_fetched_at(cache_dir):
+    """``json.loads`` happily parses ``NaN``. ``NaN <= 0`` is False
+    and ``NaN > current`` is False, so a corrupted timestamp would
+    otherwise pin the cache as permanently fresh and pull a
+    long-revoked cookie on every fetch. The load path must reject
+    non-finite timestamps before they reach the comparison."""
+    import json as _json
+    path = cf_solve._host_cache_path("nan.example")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = _json.dumps({
+        "cookies": [{"name": "x", "value": "y", "domain": ".example"}],
+        "user_agent": "UA",
+        "fetched_at": 1.0,
+    })
+    path.write_text(raw.replace("1.0", "NaN"), encoding="utf-8")
+    assert cf_solve.load_cached("nan.example") is None
+
+
+def test_load_rejects_infinite_fetched_at(cache_dir):
+    """Same hazard as NaN but with positive infinity — ``inf > current``
+    is True so the future-timestamp guard catches this one already,
+    but ``-inf <= 0`` is True so the negative-timestamp guard catches
+    that one. The new explicit non-finite check makes the rejection
+    independent of the ordering of the existing guards."""
+    import json as _json
+    path = cf_solve._host_cache_path("inf.example")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        _json.dumps({
+            "cookies": [{"name": "x", "value": "y"}],
+            "user_agent": "UA",
+            "fetched_at": 1.0,
+        }).replace("1.0", "Infinity"),
+        encoding="utf-8",
+    )
+    assert cf_solve.load_cached("inf.example") is None
+
+
+def test_load_rejects_non_mapping_cookie_entries(cache_dir):
+    """A hand-edited cache where ``cookies`` contains a string or
+    a nested list would previously crash ``dict(c)`` with a
+    ``ValueError``. Filter to real mappings instead so the load
+    path stays a clean None on malformed data."""
+    import json as _json
+    path = cf_solve._host_cache_path("mixed.example")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        _json.dumps({
+            "cookies": [
+                "not a dict",
+                {"name": "ok", "value": "v", "domain": ".example"},
+                ["also", "not", "a", "dict"],
+            ],
+            "user_agent": "UA",
+            "fetched_at": time.time(),
+        }),
+        encoding="utf-8",
+    )
+    result = cf_solve.load_cached("mixed.example")
+    assert result is not None
+    assert [c["name"] for c in result.cookies] == ["ok"]
+
+
+def test_inject_forwards_persistent_expiry():
+    """A real CF clearance cookie carries an expiry timestamp; without
+    it, curl_cffi treats every injected cookie as session-scoped and
+    discards them when the scraper session is reconstructed, forcing
+    another Playwright run. The inject path must forward a finite
+    positive expiry to the jar."""
+    sess = MagicMock()
+    sess.headers = {}
+    future = time.time() + 3600
+    result = cf_solve.SolveResult(
+        cookies=[{
+            "name": "cf_clearance", "value": "x", "domain": ".example",
+            "path": "/", "secure": True, "expires": future,
+        }],
+        user_agent="UA",
+        fetched_at=time.time(),
+    )
+    cf_solve.inject_into_session(sess, result)
+    call = sess.cookies.set.call_args
+    assert call.kwargs["expires"] == future
+
+
+def test_inject_skips_sentinel_expiry():
+    """Playwright reports ``-1`` for session cookies. That value must
+    not reach the jar as a real expiry — it would make the cookie
+    appear instantly expired and the next request would behave as if
+    the solve never happened."""
+    sess = MagicMock()
+    sess.headers = {}
+    result = cf_solve.SolveResult(
+        cookies=[{
+            "name": "cf_clearance", "value": "x", "domain": ".example",
+            "path": "/", "secure": True, "expires": -1,
+        }],
+        user_agent="UA",
+        fetched_at=time.time(),
+    )
+    cf_solve.inject_into_session(sess, result)
+    call = sess.cookies.set.call_args
+    assert "expires" not in call.kwargs
+
+
 # ── solve() ─────────────────────────────────────────────────────
 
 

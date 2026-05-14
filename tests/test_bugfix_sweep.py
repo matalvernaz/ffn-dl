@@ -473,3 +473,26 @@ def test_llm_quotes_batch_loops_within_window():
     assert call_count["n"] >= 2
     assigned = sum(1 for s in segments if s.speaker == "Narrator")
     assert assigned == 60
+
+
+# ── cli._read_batch_file BOM handling ─────────────────────────────
+
+
+def test_read_batch_file_strips_utf8_bom(tmp_path):
+    """A batch file saved by Windows Notepad as ``UTF-8`` starts with
+    the ``\\ufeff`` BOM. With plain ``encoding=\"utf-8\"`` that BOM
+    landed at the head of the first URL and the fetch failed with an
+    opaque "invalid URL" message that hid the invisible character.
+    ``utf-8-sig`` consumes the BOM cleanly."""
+    from ffn_dl.cli import _read_batch_file
+
+    batch = tmp_path / "urls.txt"
+    batch.write_bytes(
+        b"\xef\xbb\xbfhttps://example.com/s/1\n"
+        b"https://example.com/s/2\n"
+    )
+    urls = _read_batch_file(str(batch))
+    assert urls == [
+        "https://example.com/s/1",
+        "https://example.com/s/2",
+    ]
