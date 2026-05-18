@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.4.15 — 2026-05-18
+
+### Convergence pass on v2.4.14 (audit round 3)
+
+Final pass-through with Gemini and OpenAI on the v2.4.14 changes. Both
+spotted the same regression I introduced in 2.4.14, and OpenAI caught
+a real edge case in the new cover validation. Two fixes plus
+regression tests; both AIs now report "no further bugs spotted."
+
+- **scraper.py — 200-CF branch no longer discards seeded cookies.**
+  v2.4.14 added `sess = self._rotate_browser()` to the
+  200-with-Cloudflare-challenge branch in `_fetch`, but kept the
+  preceding `self._maybe_seed_cf_cookies(sess, url)` call. The
+  rotation built a fresh session and abandoned the cookies that had
+  just been injected, defeating the seeding path's entire purpose.
+  Mirror the 403 branch's correct shape: try seeding first and
+  `continue` on success; rotate only on late retries when seeding
+  wasn't applicable.
+- **exporters.py — WebP magic check verifies the WEBP fourcc.**
+  v2.4.14's `_COVER_MAGIC_PREFIXES["image/webp"] = (b"RIFF",)` only
+  anchored on `RIFF`, but `RIFF` is a multi-format container — a WAV
+  or AVI body mislabelled `Content-Type: image/webp` would have
+  passed validation and ended up as the EPUB cover. `_looks_like_image`
+  now special-cases WebP to check both the leading `RIFF` magic and
+  the `WEBP` fourcc at offset 8.
+
++3 regression tests; full suite 1405 passed, 1 skipped.
+
 ## 2.4.14 — 2026-05-18
 
 ### Scraper core + EPUB exporter audit (round 2 of multi-AI deep debug)

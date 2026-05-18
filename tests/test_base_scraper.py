@@ -360,3 +360,70 @@ class TestV2414AIMDFixes:
         new = scraper._rotate_browser()
         assert new is not first
         assert scraper._tls.session is new
+
+
+class TestV2415CFCookieSeedingOn200:
+    """Regression for the convergence-pass fix: the 200-CF-challenge
+    branch used to seed cookies into ``sess`` and then immediately
+    rebind ``sess`` to a fresh rotated session, discarding the
+    seeded cookies."""
+
+    def test_200_cf_branch_returns_after_successful_seed(self, monkeypatch):
+        """When ``_maybe_seed_cf_cookies`` returns True the 200-CF
+        branch must ``continue`` to the next retry with the seeded
+        session — not rotate it away.
+
+        Verified by checking that after a 200-CF response, if seeding
+        succeeds, no rotation happens before the next request.
+        """
+        from ffn_dl.scraper import BaseScraper, CloudflareBlockError
+
+        scraper = BaseScraper(use_cache=False, max_retries=2)
+        scraper._delay = lambda *a, **kw: None
+
+        # First response: CF challenge served as 200. Second: real 200.
+        responses = [
+            type("R", (), {"status_code": 200, "text": "just a moment cloudflare", "headers": {}})(),
+            type("R", (), {"status_code": 200, "text": "<html>real</html>", "headers": {}})(),
+        ]
+        call_log = []
+
+        class FakeSession:
+            def __init__(self, label):
+                self.label = label
+                self.headers = type("H", (), {"update": lambda *a: None})()
+                self.cookies = type("C", (), {"jar": []})()
+            def get(self, url, timeout=None):
+                call_log.append(("get", self.label))
+                return responses.pop(0)
+
+        first = FakeSession("seeded")
+        scraper._tls.session = first
+        scraper.session = first
+
+        def fake_seed(sess, url):
+            call_log.append(("seed", sess.label))
+            return True  # signal that cookies were applied
+
+        def fake_rotate():
+            call_log.append(("rotate",))
+            new = FakeSession("rotated")
+            scraper._tls.session = new
+            return new
+
+        monkeypatch.setattr(scraper, "_maybe_seed_cf_cookies", fake_seed)
+        monkeypatch.setattr(scraper, "_rotate_browser", fake_rotate)
+        monkeypatch.setattr(scraper, "_check_for_blocks", lambda html: (
+            (_ for _ in ()).throw(CloudflareBlockError("cf"))
+            if "cloudflare" in html else None
+        ))
+
+        result = scraper._fetch("https://example.invalid/x")
+        assert result == "<html>real</html>"
+        # Critical: the seed succeeded → no rotation should fire on
+        # this iteration. Pre-fix the trace was:
+        #   get/seed/rotate/get
+        # Post-fix it is:
+        #   get/seed/get          (no rotate between seed and next get)
+        assert ("rotate",) not in call_log, call_log
+        assert ("seed", "seeded") in call_log

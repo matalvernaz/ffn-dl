@@ -551,21 +551,27 @@ class BaseScraper:
                     if attempt >= self.max_retries - 1:
                         raise
                     last_was_403 = True
-                    self._maybe_seed_cf_cookies(sess, url)
-                    # Rebind ``sess`` to the new session: ``_rotate_browser``
-                    # used to only update thread-local state, so the
-                    # current loop kept retrying with the same fingerprint
-                    # that just got challenged.
-                    sess = self._rotate_browser()
+                    # Match the 403 branch's shape: try the cookie cache
+                    # first (cheap, often resolves the challenge in one
+                    # retry without rotation) and only rotate the
+                    # impersonation profile if seeding wasn't applicable
+                    # or didn't help. The pre-fix version called
+                    # ``_maybe_seed_cf_cookies(sess, url)`` and then
+                    # immediately ``sess = self._rotate_browser()``,
+                    # which clobbered the freshly-seeded cookies on a
+                    # brand-new session — defeating the seeding path's
+                    # whole purpose.
+                    if self._maybe_seed_cf_cookies(sess, url):
+                        continue
                     wait = FORBIDDEN_QUICK_RETRY_S + random.uniform(
                         0, FORBIDDEN_QUICK_RETRY_S,
                     )
                     if attempt >= self.max_retries - 2:
+                        sess = self._rotate_browser()
                         wait = FORBIDDEN_SLOW_RETRY_S
                     logger.warning(
                         "Cloudflare challenge served as HTTP 200, "
-                        "rotating profile and retrying in %.0fs "
-                        "(attempt %d/%d)",
+                        "retrying in %.0fs (attempt %d/%d)",
                         wait, attempt + 1, self.max_retries,
                     )
                     time.sleep(wait)

@@ -564,14 +564,20 @@ server (compromised or buggy) from blowing batch-export memory."""
 # Content-Type, and CDN caches occasionally lie. Checking the first few
 # bytes against the type the server claimed is the cheap way to keep
 # EPUB covers from being silently filled with text/html.
+#
+# WebP isn't listed here because its magic is split: ``RIFF<4-byte
+# size>WEBP``. A bare ``RIFF`` prefix would also accept WAV and AVI
+# bodies served with ``image/webp``, so ``_looks_like_image`` checks
+# the WEBP fourcc at offset 8 explicitly.
 _COVER_MAGIC_PREFIXES = {
     "image/jpeg": (b"\xff\xd8\xff",),
     "image/png": (b"\x89PNG\r\n\x1a\n",),
     "image/gif": (b"GIF87a", b"GIF89a"),
-    "image/webp": (b"RIFF",),  # WebP starts ``RIFF....WEBP``; the
-                                # 4-byte size field varies so we only
-                                # anchor on the leading ``RIFF``.
 }
+
+# Allowlist of content types we'll accept as a cover. WebP is allowed
+# here but validated separately below.
+_COVER_ACCEPTED_TYPES = frozenset(_COVER_MAGIC_PREFIXES) | {"image/webp"}
 
 
 def _looks_like_image(content: bytes, media_type: str) -> bool:
@@ -579,7 +585,17 @@ def _looks_like_image(content: bytes, media_type: str) -> bool:
     sequence consistent with ``media_type``? Unknown types are accepted
     so a new image format we forgot to enumerate isn't rejected — but
     the known types must match.
+
+    WebP is special-cased because its magic is ``RIFF<size:4>WEBP`` —
+    the leading ``RIFF`` alone matches WAV and AVI bodies the server
+    might mislabel as ``image/webp``.
     """
+    if media_type == "image/webp":
+        return (
+            len(content) >= 12
+            and content.startswith(b"RIFF")
+            and content[8:12] == b"WEBP"
+        )
     prefixes = _COVER_MAGIC_PREFIXES.get(media_type)
     if prefixes is None:
         return True
@@ -650,7 +666,7 @@ def _fetch_cover_image(cover_url, *, use_cache: bool = True):
                     bare = media_type.split(";", 1)[0].strip().lower()
                     if (
                         len(content) > 500
-                        and bare in _COVER_MAGIC_PREFIXES
+                        and bare in _COVER_ACCEPTED_TYPES
                         and _looks_like_image(content, bare)
                     ):
                         return content, bare
@@ -682,7 +698,7 @@ def _fetch_cover_image(cover_url, *, use_cache: bool = True):
             # Cloudflare HTML challenge served with ``content-type:
             # image/jpeg`` would otherwise sail through and get
             # embedded as the EPUB cover.
-            if bare not in _COVER_MAGIC_PREFIXES:
+            if bare not in _COVER_ACCEPTED_TYPES:
                 return None
             if not _looks_like_image(resp.content, bare):
                 return None

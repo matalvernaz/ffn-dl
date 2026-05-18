@@ -247,3 +247,32 @@ class TestV2414CoverValidation:
             result = exporters._fetch_cover_image(url)
         assert result is not None
         assert m.call_count == 1  # the bad cache entry forced a refetch
+
+
+class TestV2415WebPMagic:
+    """Regression for the convergence-pass WebP fix: bare ``RIFF`` would
+    accept WAV/AVI bodies mislabelled as image/webp."""
+
+    def test_webp_with_full_magic_accepted(self, cover_cache_dir):
+        url = "https://example.invalid/real.webp"
+        body = b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"\x00" * 600
+        with patch(
+            "curl_cffi.requests.get",
+            return_value=_FakeResp(200, body, {"content-type": "image/webp"}),
+        ):
+            result = exporters._fetch_cover_image(url)
+        assert result is not None
+        content, ct = result
+        assert ct == "image/webp"
+
+    def test_riff_wav_mislabelled_as_webp_rejected(self, cover_cache_dir):
+        # RIFF...WAVE — a wav file mislabelled image/webp. Must NOT pass
+        # the magic-byte check.
+        url = "https://example.invalid/fake.webp"
+        body = b"RIFF" + b"\x00\x00\x00\x00" + b"WAVE" + b"\x00" * 600
+        with patch(
+            "curl_cffi.requests.get",
+            return_value=_FakeResp(200, body, {"content-type": "image/webp"}),
+        ):
+            result = exporters._fetch_cover_image(url)
+        assert result is None
