@@ -501,3 +501,42 @@ def test_scraper_exception_is_captured_not_raised(tmp_path):
     reloaded.reload()
     [w] = reloaded.all()
     assert "site on fire" in w.last_error
+
+
+def test_run_once_reloads_store_inside_lock(tmp_path):
+    """The autopoll-vs-manual-poll race: two callers each pre-load
+    the same on-disk store, then take turns running. Without an
+    inside-lock reload, caller A's writes silently overwrite caller
+    B's. The fix re-reads from disk after acquiring _RUN_ONCE_LOCK,
+    so a watch B added while A was reading still shows up in A's
+    iteration.
+    """
+    path = tmp_path / "w.json"
+    # Caller A loads first — sees the empty file.
+    store_a = WatchlistStore(path)
+    store_a.reload()
+    assert store_a.all() == []
+
+    # Caller B sneaks in and writes a new watch to disk.
+    store_b = WatchlistStore(path)
+    store_b.add(Watch(
+        type=WATCH_TYPE_STORY,
+        site="ao3",
+        target="https://example/works/42",
+        channels=[],
+    ))
+
+    # Caller A runs poll. It must see B's watch because run_once
+    # reloads inside the lock, not act on its stale empty list and
+    # save back a watch-less file.
+    results = run_once(
+        store_a, _FakePrefs(),
+        scraper_factory=_factory(_FakeScraper(chapter_count=3)),
+        notifier=_NotifierSpy(),
+    )
+    assert len(results) == 1
+    # And the disk file still has B's watch — A's save() didn't wipe it.
+    reloaded = WatchlistStore(path)
+    reloaded.reload()
+    assert len(reloaded.all()) == 1
+    assert reloaded.all()[0].target == "https://example/works/42"

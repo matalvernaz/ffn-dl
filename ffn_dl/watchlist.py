@@ -507,8 +507,25 @@ def run_once(
       cooldown is advanced only when we actually dispatch.
     * Notification dispatch failures are logged (by ``notifier``) but
       never raised — a broken webhook cannot stop the poll loop.
+
+    The store is reloaded from disk inside the lock so two concurrent
+    poll callers (e.g. the GUI's manual "Run Now" and the background
+    autopoller) can't trample each other's writes. Callers that
+    pre-loaded the store outside the lock would otherwise iterate
+    over a stale in-memory snapshot and silently overwrite the other
+    poller's just-saved changes. Stores without a path (test doubles)
+    are left as-is.
     """
     with _RUN_ONCE_LOCK:
+        path = getattr(store, "path", None)
+        if path is not None:
+            try:
+                store.reload()
+            except Exception:
+                logger.exception(
+                    "Could not reload watchlist before poll; continuing "
+                    "with the caller's in-memory snapshot.",
+                )
         results: list[PollResult] = []
         for watch in store.all():
             if not watch.enabled:

@@ -76,6 +76,14 @@ class _SiteQueue:
         self._q: "queue.Queue[tuple[Future, Callable[[], object]]]" = queue.Queue()
         self._worker: threading.Thread | None = None
         self._active = 0
+        # ``_pending`` mirrors the queue's logical depth under our own
+        # lock. Tracking it explicitly closes the false-idle window
+        # between ``Queue.get()`` returning an item and ``_active``
+        # being incremented: during that gap ``self._q.qsize()`` reads
+        # zero and ``_active`` still reads zero, so snapshot() /
+        # _has_active_background_work() would briefly conclude the
+        # site is idle even though a job is about to run.
+        self._pending = 0
         self._lock = threading.Lock()
         self._on_state_change = on_state_change
 
@@ -85,12 +93,17 @@ class _SiteQueue:
 
     @property
     def pending(self) -> int:
-        return self._q.qsize()
+        # Reads ``_pending`` from outside the lock; for a "are there
+        # queued items?" check this is racy by an item or two but
+        # accurate enough for UI/state callers. Snapshot() takes the
+        # lock for an atomic read.
+        return self._pending
 
     def enqueue(self, job_fn: Callable[[], object]) -> Future:
         fut: Future = Future()
         with self._lock:
             self._q.put((fut, job_fn))
+            self._pending += 1
             if self._worker is None or not self._worker.is_alive():
                 self._worker = threading.Thread(
                     target=self._drain,
@@ -125,21 +138,34 @@ class _SiteQueue:
                         self._worker = None
                         return
                 continue
-            # Future may have been cancelled while pending — set_running_or_
-            # notify_cancel() returns False in that case and we skip the job.
+            # Future may have been cancelled while pending —
+            # set_running_or_notify_cancel() returns False in that
+            # case. Either way we've already pulled the item off the
+            # queue, so decrement ``_pending`` here and continue.
             if not fut.set_running_or_notify_cancel():
+                with self._lock:
+                    self._pending -= 1
                 self._fire_state_change()
                 continue
+            # Atomic-against-snapshot: move the just-pulled item from
+            # pending → active under one lock acquisition so a
+            # concurrent snapshot() always sees (a+p) >= 1 while this
+            # job is in flight.
             with self._lock:
+                self._pending -= 1
                 self._active += 1
             self._fire_state_change()
             try:
                 result = job_fn()
                 fut.set_result(result)
-            except BaseException as exc:
-                # Never let a worker die quietly — log so users can
-                # tell the difference between "job raised" and "queue
-                # silently stopped processing".
+            except Exception as exc:
+                # Catch ``Exception`` not ``BaseException``: a worker
+                # thread that swallows ``KeyboardInterrupt`` or
+                # ``SystemExit`` would keep pulling more work even
+                # after the user asked the process to stop. Plain
+                # ``Exception`` covers every scraper / I/O failure the
+                # queue is meant to recover from while letting fatal
+                # signals propagate and tear the thread down cleanly.
                 logger.exception(
                     "Site-queue job raised: site=%s", self._site_name,
                 )
@@ -230,7 +256,13 @@ class DownloadQueues:
         for name, q in qs:
             with q._lock:
                 a = q._active
-                p = q._q.qsize()
+                # Read the lock-protected _pending instead of
+                # _q.qsize(): qsize() drops to 0 the instant _drain's
+                # Queue.get() returns, but _pending stays high until
+                # the same lock acquisition that bumps _active. That
+                # makes (a, p) atomically reflect "is anything in
+                # flight for this site?" even mid-job-pickup.
+                p = q._pending
             if a > 0 or p > 0:
                 out[name] = (a, p)
         return out
@@ -269,11 +301,14 @@ class DownloadQueues:
         cancelled = 0
         # Drain the queue in one pass under the queue's own lock so a
         # racing enqueue can't slip a job past us between the qsize
-        # check and the cancel call.
+        # check and the cancel call. Every item we pull off was
+        # ``_pending`` so we decrement the counter for each — whether
+        # or not the Future's cancel succeeds.
         with q._lock:
             try:
                 while True:
                     fut, _job_fn = q._q.get_nowait()
+                    q._pending -= 1
                     if fut.cancel():
                         cancelled += 1
             except queue.Empty:

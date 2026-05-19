@@ -18,6 +18,40 @@ SEARCH_PATH = "/search/"
 DEFAULT_LIMIT = 25
 
 
+class SearchPage(list):
+    """A list of search-result dicts with explicit pagination metadata.
+
+    ``exhausted=True`` signals the upstream archive has no more pages
+    for this query; ``exhausted=False`` signals "this page filtered
+    down to empty but more pages may still have results" (the
+    Wattpad mature/completion-filter case). Callers that iterate the
+    list see the same behaviour as a plain list; ``fetch_until_limit``
+    reads ``exhausted`` to decide whether to keep paging.
+
+    For backwards compatibility, a plain ``[]`` from a legacy
+    ``search_*`` function is treated as ``exhausted=True`` — the
+    fetcher can only know the page is "really empty" or "filtered to
+    empty" if the search function tells it.
+    """
+
+    def __init__(self, iterable=(), *, exhausted: bool = False):
+        super().__init__(iterable)
+        self.exhausted: bool = bool(exhausted)
+
+
+def _page_exhausted(page_results) -> bool:
+    """Decide whether a search-page result signals upstream exhaustion.
+
+    Plain lists default to ``True`` so legacy search functions retain
+    their existing behaviour (break on empty). :class:`SearchPage`
+    carries the explicit flag.
+    """
+    flag = getattr(page_results, "exhausted", None)
+    if flag is None:
+        return not page_results
+    return bool(flag)
+
+
 # ── Filter option tables ──────────────────────────────────────────
 # Keys are the human-readable labels shown in CLI --choices / GUI combos.
 # Values are the numeric IDs FFN's search form submits.
@@ -1096,25 +1130,43 @@ _FETCH_UNTIL_LIMIT_MAX_PAGES = 200
 
 def fetch_until_limit(search_fn, query, *, limit, start_page=1, **kwargs):
     """Call `search_fn` across successive pages until `limit` results are
-    collected or a page comes back empty. Returns (results, next_page).
+    collected or upstream signals exhaustion. Returns
+    ``(SearchPage(results, exhausted=...), next_page)``.
 
-    `results` is the full list of dicts from all fetched pages (may run a
-    little past `limit` if the last page's natural size overshoots). The
-    caller can trim it further if they want a hard cap. `next_page` is
-    the page number a subsequent "load more" should request.
+    The ``SearchPage.exhausted`` flag on the returned batch tells the
+    caller (e.g. the GUI's Load More button) whether further calls
+    would be useful. Earlier code keyed Load More off ``bool(results)``
+    — empty filtered pages then mis-disabled the button even when more
+    upstream pages remained.
+
+    `results` is the full list of dicts from all fetched pages (may run
+    a little past `limit` if the last page's natural size overshoots).
+    The caller can trim it further if they want a hard cap.
 
     Bounded by :data:`_FETCH_UNTIL_LIMIT_MAX_PAGES` and a "no new
     results between consecutive pages" check so a site that keeps
     serving the same page forever can't peg the worker thread.
     """
-    collected = []
+    collected: list[dict] = []
     page = max(1, int(start_page))
     end_page = page + _FETCH_UNTIL_LIMIT_MAX_PAGES
     seen_signatures: set[tuple] = set()
+    exhausted = False
     while len(collected) < limit and page < end_page:
         page_results = search_fn(query, page=page, **kwargs)
+        # _page_exhausted handles legacy ``[]`` (treated as exhausted)
+        # vs SearchPage(exhausted=False) (a filtered-empty page that
+        # may have keepers later).
+        page_exhausted = _page_exhausted(page_results)
         if not page_results:
-            break
+            if page_exhausted:
+                exhausted = True
+                page += 1
+                break
+            # Filtered-empty page — keep walking until upstream signals
+            # exhaustion or we hit _FETCH_UNTIL_LIMIT_MAX_PAGES.
+            page += 1
+            continue
         # Detect a page that returned exactly the same rows as a
         # previous page (URL+title fingerprint). Any one collision is
         # already a strong signal of a non-paginating endpoint — bail
@@ -1124,11 +1176,17 @@ def fetch_until_limit(search_fn, query, *, limit, start_page=1, **kwargs):
             for r in page_results
         )
         if signature in seen_signatures:
+            exhausted = True
+            page += 1
             break
         seen_signatures.add(signature)
         collected.extend(page_results)
+        if page_exhausted:
+            exhausted = True
+            page += 1
+            break
         page += 1
-    return collected, page
+    return SearchPage(collected, exhausted=exhausted), page
 
 
 def collapse_ao3_series(results):
@@ -1616,7 +1674,7 @@ def search_wattpad(query, *, page=1, **filters):
     q = (query or "").strip()
     if not q:
         # Empty query would return a generic random set; be explicit.
-        return []
+        return SearchPage([], exhausted=True)
 
     try:
         page_n = max(1, int(page))
@@ -1665,7 +1723,14 @@ def search_wattpad(query, *, page=1, **filters):
     mature = _norm(mature)
     completed = _norm(completed)
 
-    results = []
+    # Distinguish "upstream gave us fewer rows than a full page" (true
+    # exhaustion — keep paging would just hit the same empty response)
+    # from "page was full upstream but client-side filters threw
+    # everything out" (more pages may still have keepers). The former
+    # is the SearchPage exhausted=True case; the latter is
+    # exhausted=False so fetch_until_limit walks on.
+    upstream_exhausted = len(stories) < WP_PAGE_SIZE
+    results: list[dict] = []
     for s in stories:
         is_mature = bool(s.get("mature"))
         is_complete = bool(s.get("completed"))
@@ -1705,4 +1770,4 @@ def search_wattpad(query, *, page=1, **filters):
             "fandom": fandom_str,
             "status": "Complete" if is_complete else "In-Progress",
         })
-    return results
+    return SearchPage(results, exhausted=upstream_exhausted)

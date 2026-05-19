@@ -104,21 +104,28 @@ _LAST_SEND_LOCK = threading.Lock()
 def _wait_for_channel_slot(channel: str) -> None:
     """Sleep until ``channel``'s next send slot is open.
 
-    Uses :func:`time.monotonic` so a wall-clock jump (NTP sync, daylight
-    saving) doesn't stall the loop. Updates the last-send timestamp
-    after the wait so two callers that hit the lock back-to-back are
-    serialised through the floor rather than racing past it.
+    Reservation pattern: under the lock we commit the next legal send
+    time and bump the table, then release the lock before sleeping.
+    The old code slept while holding ``_LAST_SEND_LOCK``, which meant
+    a Pushover wait briefly blocked an unrelated Discord caller from
+    even computing its own slot — a non-issue today because dispatch
+    is serialised by ``_RUN_ONCE_LOCK``, but a footgun the moment
+    anything else starts calling :func:`dispatch` in parallel.
+
+    Uses :func:`time.monotonic` so a wall-clock jump (NTP sync,
+    daylight saving) doesn't stall the loop.
     """
     interval = _CHANNEL_MIN_INTERVAL_S.get(channel, 0.0)
     if interval <= 0:
         return
     with _LAST_SEND_LOCK:
-        last = _LAST_SEND_AT.get(channel, 0.0)
         now = time.monotonic()
-        wait = (last + interval) - now
-        if wait > 0:
-            time.sleep(wait)
-        _LAST_SEND_AT[channel] = time.monotonic()
+        last = _LAST_SEND_AT.get(channel, 0.0)
+        send_at = max(now, last + interval)
+        _LAST_SEND_AT[channel] = send_at
+    delay = send_at - time.monotonic()
+    if delay > 0:
+        time.sleep(delay)
 
 
 def _safe_endpoint_label(endpoint: str) -> str:

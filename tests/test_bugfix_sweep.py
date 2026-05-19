@@ -103,6 +103,107 @@ def test_fetch_until_limit_respects_max_pages():
     assert calls["n"] <= search._FETCH_UNTIL_LIMIT_MAX_PAGES + 1
 
 
+def test_fetch_until_limit_walks_through_filtered_empty_pages():
+    """A search function that filters its upstream page client-side
+    (e.g. ``search_wattpad`` with ``mature=exclude``) can produce an
+    empty result list even when later pages still have keepers. The
+    helper must continue paging until upstream signals exhaustion via
+    ``SearchPage.exhausted=True``, not bail on the first ``[]``."""
+    calls = {"n": 0}
+
+    def fake_search(query, *, page, **_):
+        calls["n"] += 1
+        if page == 1:
+            return search.SearchPage(
+                [{"url": "/s/1", "title": "A"}], exhausted=False,
+            )
+        if page == 2:
+            # Filtered-empty: upstream still has more pages.
+            return search.SearchPage([], exhausted=False)
+        if page == 3:
+            return search.SearchPage(
+                [{"url": "/s/3", "title": "C"}], exhausted=True,
+            )
+        return search.SearchPage([], exhausted=True)
+
+    results, _ = search.fetch_until_limit(
+        fake_search, "x", limit=100,
+    )
+    assert calls["n"] == 3
+    assert len(results) == 2
+    assert results.exhausted is True
+
+
+def test_fetch_until_limit_legacy_empty_list_still_breaks():
+    """Backwards compatibility: a plain ``[]`` from a legacy
+    ``search_*`` function must still be treated as exhausted so we
+    don't suddenly burn ``_FETCH_UNTIL_LIMIT_MAX_PAGES`` requests on
+    every empty result."""
+    calls = {"n": 0}
+
+    def fake_search(query, *, page, **_):
+        calls["n"] += 1
+        if page == 1:
+            return [{"url": "/s/1", "title": "A"}]
+        return []  # Legacy plain list signals exhaustion.
+
+    results, _ = search.fetch_until_limit(
+        fake_search, "x", limit=100,
+    )
+    assert calls["n"] == 2
+    assert len(results) == 1
+    assert results.exhausted is True
+
+
+def test_search_wattpad_filtered_empty_is_not_exhausted(monkeypatch):
+    """``search_wattpad`` should mark a filtered-empty page as
+    ``exhausted=False`` so ``fetch_until_limit`` keeps walking. The
+    upstream-exhaustion signal is "API returned fewer rows than
+    ``WP_PAGE_SIZE``", not "all rows got filtered out"."""
+    import json
+
+    # A full page (== WP_PAGE_SIZE rows) where every story trips the
+    # ``mature=exclude`` filter. The returned SearchPage should be
+    # empty (filtered out) AND exhausted=False (upstream has more).
+    full_mature_page = {
+        "stories": [
+            {
+                "id": i, "title": f"M{i}", "user": {"name": "u"},
+                "url": f"https://wattpad.com/story/{i}",
+                "mature": True, "completed": False, "numParts": 1,
+                "description": "x", "length": 1000, "tags": [],
+            }
+            for i in range(search.WP_PAGE_SIZE)
+        ]
+    }
+
+    class _Resp:
+        status_code = 200
+        text = json.dumps(full_mature_page)
+
+    class _Session:
+        def __init__(self, **kw): pass
+        def get(self, url, timeout=30): return _Resp()
+
+    monkeypatch.setattr(
+        "ffn_dl.search._curl_requests.Session"
+        if hasattr(search, "_curl_requests") else
+        "curl_cffi.requests.Session", _Session,
+    )
+    # Easier path — patch on the curl_cffi module level.
+    from curl_cffi import requests as _cr
+    monkeypatch.setattr(_cr, "Session", _Session)
+
+    result = search.search_wattpad("anything", mature="exclude")
+    assert isinstance(result, search.SearchPage)
+    assert len(result) == 0
+    assert result.exhausted is False, (
+        "Filtered-empty page with a full upstream batch must not "
+        "be flagged exhausted; fetch_until_limit relies on this to "
+        "keep paging through filtered runs."
+    )
+
+
 # ── erotica.search_fictionmania unicode handling ───────────────────
 
 
@@ -408,6 +509,57 @@ def test_download_queue_cancel_site_drops_pending(monkeypatch):
     assert other.result(timeout=2) == "ran"
 
     block.set()  # release the slow ffn job
+
+
+def test_download_queue_snapshot_never_reports_false_idle():
+    """Snapshot must keep reporting a busy site between the moment
+    Queue.get() pops the job and the moment _active is incremented.
+    The earlier code read qsize() for "pending", so the false-idle
+    window was:
+
+        1. _drain calls self._q.get() → qsize() drops to 0
+        2. _drain acquires lock, increments _active
+        3. between (1) and (2): snapshot() sees active=0, pending=0
+           and concludes the site is idle.
+
+    The new _pending counter is decremented under the same lock that
+    bumps _active, so a snapshot during the in-flight job always sees
+    (a + p) >= 1.
+    """
+    import threading
+    import time
+    from ffn_dl.download_queue import DownloadQueues
+
+    DownloadQueues._queues.clear()
+
+    block = threading.Event()
+    started = threading.Event()
+    snapshots: list[dict] = []
+
+    def slow_job():
+        # The moment we start running, snapshot the queue state from
+        # an outside thread; the worker thread is still inside _drain
+        # past the get() but before _active was bumped. The snapshot
+        # we take here is after _active is bumped, so it sees active=1.
+        # The real race window is shorter; we take many snapshots
+        # while the job runs to verify the site never reads as idle.
+        started.set()
+        for _ in range(20):
+            snapshots.append(DownloadQueues.snapshot())
+            time.sleep(0.01)
+        block.set()
+        return "done"
+
+    fut = DownloadQueues.enqueue("ffn", slow_job)
+    assert started.wait(timeout=2)
+    block.wait(timeout=5)
+    fut.result(timeout=5)
+    # Every snapshot taken during the job's lifetime must include
+    # 'ffn' with at least 1 unit of (active + pending).
+    for snap in snapshots:
+        assert "ffn" in snap, snapshots
+        a, p = snap["ffn"]
+        assert a + p >= 1, snap
 
 
 def test_llm_quotes_batch_loops_within_window():

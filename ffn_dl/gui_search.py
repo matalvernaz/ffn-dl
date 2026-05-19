@@ -12,13 +12,37 @@ imports to call time so opening the Search menu doesn't pay the
 filter-constant import cost on launch for users who never search.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import threading
+from dataclasses import dataclass
+from typing import Any
 
 import wx
 
 from .gui_dialogs import MultiPickerDialog, SeriesPartsDialog
+
+
+@dataclass(frozen=True)
+class _SearchJob:
+    """Immutable snapshot of a single search/load-more request.
+
+    Built on the main thread before spawning the worker so the worker
+    never reads frame-mutable state (``_exhausted_sites``, last query
+    fields). The ``generation`` token lets the completion callback
+    drop results from an earlier search that resolved after a newer
+    one started — without it, an old slow page could overwrite a new
+    fast page's results.
+    """
+
+    generation: int
+    query: str
+    filters: dict
+    page: int
+    append: bool
+    exhausted_sites: frozenset
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +257,17 @@ class SearchFrame(wx.Frame):
         # same rows over and over. Empty for every per-site frame.
         self._exhausted_sites: set = set()
         self.last_filters = {}
+        # True once fetch_until_limit (per-site) or the erotica fan-out
+        # signals it has no more upstream pages — drives Load More
+        # enable/disable so an empty filtered page (e.g. all-Mature
+        # Wattpad result page with ``mature=exclude``) doesn't mistake
+        # itself for end-of-results.
+        self._upstream_exhausted = False
+        # Generation token: bumped every time a new search/load-more
+        # is started. The worker's completion callback ignores results
+        # whose generation no longer matches, so a slow first request
+        # can't overwrite the results of a faster second request.
+        self._search_generation = 0
         # Set False on close so worker-thread CallAfter callbacks
         # (search results, error MessageBoxes) become no-ops on a
         # destroyed frame. An erotica fan-out can take 30+ seconds; if
@@ -496,7 +531,15 @@ class SearchFrame(wx.Frame):
         self.show_parts_btn.Enable(
             not busy and has_focus and focused_is_series
         )
-        self.load_more_btn.Enable(not busy and self.last_query is not None)
+        # Load More needs (a) a prior search to anchor pagination, AND
+        # (b) the upstream signalled it has more pages. Empty filtered
+        # pages don't disable the button anymore — fetch_until_limit
+        # walks through them and surfaces the upstream-exhausted bit.
+        self.load_more_btn.Enable(
+            not busy
+            and self.last_query is not None
+            and not self._upstream_exhausted
+        )
         # Pick-Multiple is enabled whenever we have at least one
         # result and aren't mid-download. The button is hidden on
         # per-site frames so we don't need a site-key check here.
@@ -590,6 +633,7 @@ class SearchFrame(wx.Frame):
         self._raw_results = []
         self.next_page = 1
         self._exhausted_sites = set()
+        self._upstream_exhausted = False
         self.last_query = query
         self.last_filters = filters
         filter_str = (
@@ -598,62 +642,113 @@ class SearchFrame(wx.Frame):
         )
         site_label = self._SITE_LABELS.get(self.site_key, self.site_key)
         self._log(f"Searching {site_label} for: {query}{filter_str}")
-        threading.Thread(
-            target=self._run_search,
-            args=(query, filters, 1, False),
-            daemon=True,
-        ).start()
+        self._spawn_search_worker(query, filters, page=1, append=False)
 
     def _on_load_more(self):
         if self.main_frame._downloading or self.last_query is None:
             return
         self.main_frame._set_busy(True, kind="search")
         self._log(f"Loading page {self.next_page}...")
+        self._spawn_search_worker(
+            self.last_query, self.last_filters,
+            page=self.next_page, append=True,
+        )
+
+    def _spawn_search_worker(self, query, filters, *, page, append):
+        """Snapshot main-thread state into a frozen _SearchJob and
+        hand it to a daemon worker.
+
+        Snapshotting ``_exhausted_sites`` here (instead of letting the
+        worker read it) is the threading guarantee — the worker only
+        ever sees an immutable frozenset.
+        """
+        self._search_generation += 1
+        job = _SearchJob(
+            generation=self._search_generation,
+            query=query,
+            filters=dict(filters),
+            page=page,
+            append=append,
+            exhausted_sites=frozenset(self._exhausted_sites),
+        )
         threading.Thread(
-            target=self._run_search,
-            args=(self.last_query, self.last_filters, self.next_page, True),
-            daemon=True,
+            target=self._run_search, args=(job,), daemon=True,
         ).start()
 
-    def _run_search(self, query, filters, page, append):
+    def _run_search(self, job: _SearchJob):
+        """WORKER THREAD.
+
+        Only reads its frozen ``_SearchJob`` and the thread-safe
+        ``main_frame._log`` / ``_set_busy`` (both already marshal
+        internally). Marshals a single completion callback so the busy
+        flag and result population happen atomically on the main
+        thread — splitting the two was the round-5 race we keep
+        hitting.
+        """
         from .search import fetch_until_limit
         try:
             # Erotica fan-out: bypass fetch_until_limit so the
             # ErotiCAResults object (with its ``site_stats`` attr)
             # survives instead of being flattened into a plain list.
-            # One call per page maps naturally to how the fan-out
-            # already pages per-site — we don't need fetch_until_limit's
-            # cross-page accumulation behaviour.
             if self.site_key == "erotica":
                 page_results = self.search_fn(
-                    query,
-                    page=page,
-                    skip_sites=set(self._exhausted_sites),
-                    **filters,
+                    job.query, page=job.page,
+                    skip_sites=set(job.exhausted_sites), **job.filters,
                 )
-                next_page = page + 1
+                next_page = job.page + 1
             else:
                 page_results, next_page = fetch_until_limit(
-                    self.search_fn, query,
-                    limit=25, start_page=page, **filters,
+                    self.search_fn, job.query,
+                    limit=25, start_page=job.page, **job.filters,
                 )
-        except Exception as e:
+        except Exception as exc:
             import traceback
             tb = traceback.format_exc()
-            self._log(f"Search error: {e}")
-            self._log(tb.rstrip())
-            self.main_frame._set_busy(False)
             if self._alive:
-                wx.CallAfter(self._show_search_error, str(e))
+                wx.CallAfter(
+                    self._on_search_finished, job, None, 0, str(exc), tb,
+                )
             return
-        self.main_frame._set_busy(False)
         if self._alive:
             wx.CallAfter(
-                self._populate_results, page_results, next_page, append,
+                self._on_search_finished,
+                job, page_results, next_page, None, None,
             )
 
+    def _on_search_finished(self, job, page_results, next_page, error, tb):
+        """Single main-thread completion callback for the search worker.
+
+        - ``not self`` catches a parent-destroy teardown path that
+          didn't run our _on_close (so ``_alive`` stayed True). Cheap
+          defensive guard against the wx C++ peer already being gone.
+        - The generation check drops a stale result if a newer search
+          / load-more started before this completion ran.
+        - Busy and results are updated atomically — busy used to be
+          cleared in the worker thread BEFORE _populate_results
+          dispatched, so a fast second click could squeeze in between
+          and trigger a partial double-search.
+        """
+        if not self or not self._alive:
+            return
+        if job.generation != self._search_generation:
+            return
+        try:
+            if error is not None:
+                self._log(f"Search error: {error}")
+                if tb:
+                    self._log(tb.rstrip())
+                self._show_search_error(error)
+                return
+            self._populate_results(page_results, next_page, job.append)
+        finally:
+            self.main_frame._set_busy(False)
+
     def _show_search_error(self, message: str) -> None:
-        if not self._alive:
+        # ``not self`` catches the wx C++ peer being torn down via
+        # parent-destroy. The check is cheap and avoids the rare
+        # "wrapped C/C++ object has been deleted" crash if the search
+        # error lands during an app-teardown that skipped _on_close.
+        if not self or not self._alive:
             return
         wx.MessageBox(
             f"Search failed:\n\n{message}",
@@ -686,13 +781,6 @@ class SearchFrame(wx.Frame):
         if self.site_key == "ao3":
             processed = collapse_ao3_series(raw)
         elif self.site_key == "erotica":
-            # The erotica fan-out mixes rows from every archive. Each
-            # per-site collapser scopes its URL pattern to its own
-            # host so chaining them is safe — a Literotica row never
-            # reaches the Lushstories matcher and vice versa. Today we
-            # cover Literotica (``Ch. 02`` / ``Pt. 03`` numbered parts)
-            # and Lushstories (``-2`` / ``-3`` slug suffixes); add new
-            # sites by appending to ``collapse_erotica_series``.
             processed = collapse_erotica_series(raw)
         else:
             processed = list(raw)
@@ -707,8 +795,7 @@ class SearchFrame(wx.Frame):
             ctrl.DeleteAllItems()
             for r in self.results:
                 row = ctrl.InsertItem(
-                    ctrl.GetItemCount(),
-                    self._prefixed_title(r, checked=False),
+                    ctrl.GetItemCount(), self._result_title(r),
                 )
                 # Column 1 = Site. For per-site frames (FFN, AO3, …)
                 # the scraper populates ``site`` only on erotica
@@ -726,19 +813,22 @@ class SearchFrame(wx.Frame):
         finally:
             ctrl.Thaw()
 
-        # Load More disabled when:
-        #   • no new rows came back (normal end-of-results for per-site
-        #     frames), OR
-        #   • every erotica site is exhausted (so the next fan-out
-        #     would hit zero archives and return immediately).
+        # Track upstream exhaustion across page boundaries so Load More
+        # can stay disabled once we know there's nothing left to fetch.
+        # Per-site fetch_until_limit ships SearchPage(exhausted=...);
+        # the erotica fan-out signals exhaustion by listing every site
+        # in `_exhausted_sites`.
+        page_exhausted = bool(getattr(new_results, "exhausted", False))
         all_erotica_exhausted = (
             self.site_key == "erotica"
             and new_site_stats is not None
             and len(self._exhausted_sites) >= len(new_site_stats)
         )
+        if page_exhausted or all_erotica_exhausted:
+            self._upstream_exhausted = True
+
         self.load_more_btn.Enable(
-            bool(new_results)
-            and not all_erotica_exhausted
+            not self._upstream_exhausted
             and not self.main_frame._downloading
         )
         self.pick_multi_btn.Enable(
@@ -803,20 +893,6 @@ class SearchFrame(wx.Frame):
             return f"[Series · {parts} part(s)] {r['title']}"
         return r.get("title", "")
 
-    @classmethod
-    def _prefixed_title(cls, r, *, checked: bool) -> str:
-        # ``checked`` kept in the signature for symmetry — the title
-        # no longer changes based on tick state, native MSAA carries
-        # that information instead.
-        return cls._result_title(r)
-
-    def _refresh_title_prefix(self, row: int) -> None:
-        if not (0 <= row < len(self.results)):
-            return
-        self.results_ctrl.SetItem(
-            row, 0, self._prefixed_title(self.results[row], checked=False),
-        )
-
     def _checked_rows(self) -> list[int]:
         return [
             i for i in range(self.results_ctrl.GetItemCount())
@@ -824,9 +900,11 @@ class SearchFrame(wx.Frame):
         ]
 
     def _on_result_checked(self, event):
-        self._refresh_title_prefix(event.GetIndex())
         # Refresh download-button enable state — going from zero ticks
         # to one should enable it even if no row is wx-selected.
+        # NVDA reads the native MSAA tick state directly; the old
+        # _refresh_title_prefix re-set the column 0 string to its
+        # current value, which made screen readers double-announce.
         self.apply_busy(bool(self.main_frame._downloading))
         event.Skip()
 
@@ -900,6 +978,9 @@ class SearchFrame(wx.Frame):
                 return
             self.main_frame._set_busy(True, kind="download")
             self._log(f"Starting series download: {url}")
+            # Snapshot params on the main thread (we're inside an
+            # event handler) so the worker doesn't read wx widgets.
+            dl_params = self.main_frame._snapshot_download_params()
             if picked.get("parts_only"):
                 part_urls = [
                     p.get("url")
@@ -913,21 +994,27 @@ class SearchFrame(wx.Frame):
                     kwargs={
                         "series_name": series_name,
                         "part_urls": part_urls,
+                        "params": dl_params,
                     },
                     daemon=True,
                 ).start()
             else:
                 threading.Thread(
                     target=self.main_frame._run_series_merge_download,
-                    args=(url,), daemon=True,
+                    args=(url,),
+                    kwargs={"params": dl_params},
+                    daemon=True,
                 ).start()
             return
         # Single-story pick: route through the per-site queue so a
         # download kicked off from an AO3 search frame doesn't lock
         # the app while an FFN library sweep is running.
         self._log(f"Starting download: {url}")
+        dl_params = self.main_frame._snapshot_download_params()
         self.main_frame._enqueue_site_job(
-            url, lambda: self.main_frame._run_download(url),
+            url,
+            lambda u=url, p=dl_params:
+                self.main_frame._run_download(u, params=p),
         )
 
     def _download_batch(self, rows: list[dict]) -> None:
@@ -951,9 +1038,15 @@ class SearchFrame(wx.Frame):
             return
         self.main_frame._set_busy(True, kind="download")
         self._log(f"Starting batch download of {len(urls)} ticked stories.")
+        # One snapshot reused by every URL in the batch — same
+        # rationale as _on_add_from_url_list and the picker handler:
+        # the user's settings at click time are the settings the batch
+        # gets, even if they change the form mid-download.
+        batch_params = self.main_frame._snapshot_download_params()
         threading.Thread(
             target=self.main_frame._run_picked_batch,
             args=(urls, self.site_key),
+            kwargs={"params": batch_params},
             daemon=True,
         ).start()
 
@@ -1011,9 +1104,11 @@ class SearchFrame(wx.Frame):
         self._log(
             f"Starting batch download of {len(picked_urls)} picked stories."
         )
+        batch_params = self.main_frame._snapshot_download_params()
         threading.Thread(
             target=self.main_frame._run_picked_batch,
             args=(picked_urls, "erotica"),
+            kwargs={"params": batch_params},
             daemon=True,
         ).start()
 
@@ -1037,9 +1132,11 @@ class SearchFrame(wx.Frame):
             picked = dlg.picked_url()
             if picked:
                 self._log(f"Starting part download: {picked}")
+                dl_params = self.main_frame._snapshot_download_params()
                 self.main_frame._enqueue_site_job(
                     picked,
-                    lambda p=picked: self.main_frame._run_download(p),
+                    lambda p=picked, dp=dl_params:
+                        self.main_frame._run_download(p, params=dp),
                 )
         dlg.Destroy()
 

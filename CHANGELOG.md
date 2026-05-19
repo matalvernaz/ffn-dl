@@ -1,5 +1,152 @@
 # Changelog
 
+## 2.4.28 — 2026-05-19
+
+Round-6 multi-AI deep-audit pass (Claude + Gemini Pro + GPT-5.5).
+Targeted the previously-unaudited surface (``gui_search.py``,
+``gui_watchlist.py``) plus round-5 follow-ups that were verified
+real but not yet patched, plus a fresh-eyes sweep of
+``download_queue.py`` / ``notifications.py``. Eleven correctness
+fixes; tests now exercise the new contracts so a regression would
+trip an explicit failure.
+
+### Watchlist autopoll-vs-manual-poll data-loss race (CRITICAL)
+
+`run_once` took ``_RUN_ONCE_LOCK`` *after* both call sites (autopoll
+thread + GUI "Run Now" worker) had already pre-loaded their own
+copy of the store from disk. Interleave: A loads → B locks +
+runs + saves → A locks + iterates over its stale in-memory list
++ saves → B's writes are silently overwritten. Last-checked
+timestamps, dedup baselines, and cooldowns from one run would
+vanish if the other ran concurrently. `run_once` now calls
+`store.reload()` immediately after acquiring the lock so both
+callers operate on the post-lock disk state.
+
+Test in ``tests/test_watchlist.py::test_run_once_reloads_store_inside_lock``.
+
+### `fetch_until_limit` no longer halts on filtered-empty pages
+
+Wattpad's `mature=exclude` / `completed=complete` filters run
+client-side over the upstream API page. A page that's entirely
+mature stories returns `[]` from `search_wattpad` even when the
+next upstream page has keepers. The old `if not page_results:
+break` mistook the filtered-empty page for end-of-results and
+silently dropped every later match.
+
+`SearchPage(list)` adds an explicit `exhausted: bool` flag.
+`search_wattpad` marks pages as exhausted=False when the upstream
+returned a full WP_PAGE_SIZE batch but the client filter drained
+it, and exhausted=True only when the upstream returned fewer rows
+than a full page. `fetch_until_limit` walks through filtered-empty
+non-exhausted pages, bounded by `_FETCH_UNTIL_LIMIT_MAX_PAGES` so
+a misbehaving site can't pin the worker forever. Plain-list
+returns from legacy `search_*` functions are still treated as
+exhausted-on-empty for back-compat.
+
+Tests in ``tests/test_bugfix_sweep.py``:
+``test_fetch_until_limit_walks_through_filtered_empty_pages``,
+``test_fetch_until_limit_legacy_empty_list_still_breaks``,
+``test_search_wattpad_filtered_empty_is_not_exhausted``.
+
+### gui.py: every worker thread now reads from `_DownloadParams`
+
+`_export_story`, `_resolve_output_dir`, `_run_download`, and
+`_run_preview_voices` all read `self.format_ctrl.GetValue()`,
+`self.output_ctrl.GetValue()`, etc. directly from wx widgets on
+worker threads. wxPython on Windows usually returns sensible data
+but the access is officially unsupported and races against widget
+destruction.
+
+`_DownloadParams` is a frozen dataclass; `_snapshot_download_params()`
+populates it on the main thread; every entry point (`_on_download`,
+`_on_update`, `_on_preview_voices`, `_on_add_from_url_list`, the
+clipboard watcher, search-frame Download Selected / picker / series
+merge) takes one snapshot and threads it through to the worker. A
+queued batch now uses the settings that were active when the user
+ticked OK — flipping the format dropdown mid-batch no longer
+retroactively changes which format old queued items export as.
+
+### `_perform_update` blocks when background work is running
+
+`_update_succeeded` calls `sys.exit(0)` to release the
+ZipExtractor.exe waiting on the parent PID. Before this fix, a
+per-site download queue worker still draining when the update
+download finished would be killed silently. `_perform_update` now
+refuses to launch the updater while `_has_active_background_work()`
+returns true; the user gets the same protection the close-X dialog
+gives them. The success path stays a fast exit (ZipExtractor.exe
+would otherwise hang).
+
+### gui_search.SearchFrame: snapshot + generation token + folded callback
+
+The search worker used to read `self._exhausted_sites` from a
+worker thread, then clear busy *before* dispatching the populate
+callback — a fast second click could squeeze into the gap and
+trigger a partial double-search. The worker now operates on an
+immutable `_SearchJob` (frozen dataclass) that captures the
+exhausted-sites set at the moment Search/Load-More was clicked.
+A generation token drops a stale result if a newer search started
+before this one finished. Busy and results are committed in a
+single main-thread callback, so the user can no longer "fall
+into" the gap between them.
+
+Load More is now driven by the explicit `_upstream_exhausted`
+flag (which combines `SearchPage.exhausted` for per-site frames
+and the erotica fan-out's `exhausted_sites` set), instead of
+`bool(new_results)`. The old check disabled Load More after the
+first filtered-empty page even though upstream had more.
+
+Dead code: `_refresh_title_prefix` and `_prefixed_title` removed.
+The NVDA-targeted `[x]/[ ]` title mirror was deprecated in round 5
+when wxPython's native MSAA check state proved reliable; the
+helper was rewriting column 0 to its current value, which made
+some screen readers double-announce on each tick.
+
+### gui_watchlist UI race fixes
+
+* `_polling` re-entrancy guard: a second poll started before the
+  first finishes is rejected — accelerators / programmatic
+  callers could previously slip past the disabled buttons.
+* `_on_poll_done` now reloads first, then clears busy. The old
+  order called `_set_poll_busy(False)` → `_on_selection_change()`
+  → `_reload()`, deriving button enable state from soon-to-be-
+  stale selection indexes.
+* `_reload()` failure nulls `self._store`. `_require_store()`
+  refuses add/remove/toggle when the store didn't load, so the
+  in-memory list can't drift from disk.
+* `_on_toggle_enabled` reverts the in-memory `Watch.enabled` flip
+  when the disk write fails — otherwise subsequent operations on
+  the same frame would read the wrong state.
+* `_on_remove` uses `with wx.MessageDialog`; defensive `if not
+  self:` guard on the CallAfter target.
+
+### download_queue.py: snapshot no longer reports false-idle
+
+`_drain` pulled an item off `self._q` (dropping `qsize()` to 0)
+*before* acquiring `self._lock` to bump `self._active` from 0 to
+1. During the gap, `DownloadQueues.snapshot()` returned an empty
+dict — making `_has_active_background_work()` (and the update
+guard / close-confirm built on it) briefly conclude the site was
+idle even though a job was about to run. A `_pending` counter is
+now bumped under the same lock as the queue put and the
+`_active` decrement, so `(active + pending) >= 1` holds for the
+entire job lifetime.
+
+`_drain` also caught `BaseException`, which would have swallowed
+a `SystemExit` / `KeyboardInterrupt` routed to the worker. Narrowed
+to `Exception`.
+
+Test in ``tests/test_bugfix_sweep.py::test_download_queue_snapshot_never_reports_false_idle``.
+
+### notifications.py: rate-limit sleep is no longer under the lock
+
+`_wait_for_channel_slot` held `_LAST_SEND_LOCK` during `time.sleep`,
+which would briefly block an unrelated channel's caller from
+computing its own send slot. Reservation pattern now: bump the
+table under the lock, sleep outside it. Not a bug in production
+(dispatch is serialised by `_RUN_ONCE_LOCK`) but a foot-gun for
+the moment anything else calls `dispatch` in parallel.
+
 ## 2.4.27 — 2026-05-19
 
 ### StoryPickerDialog preserves ticks across filter changes

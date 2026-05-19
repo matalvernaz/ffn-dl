@@ -4,6 +4,8 @@ Uses native Win32 controls via wxPython so NVDA, JAWS, and other
 screen readers can read every widget natively.
 """
 
+from __future__ import annotations
+
 import logging
 import logging.handlers
 import os
@@ -14,7 +16,41 @@ import time
 import wx
 import webbrowser
 from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Optional
+
+
+@dataclass(frozen=True)
+class _DownloadParams:
+    """Immutable snapshot of every wx-widget setting a download/export
+    worker needs.
+
+    Snapshotted on the main thread at the moment the user triggers a
+    job (Download click, Update, batch picker OK, search-frame Download
+    Selected) and threaded through to ``_export_story`` /
+    ``_resolve_output_dir`` so worker threads never read wx widgets
+    directly. Reading widgets off-main was the long-standing round-5
+    follow-up: wxPython on Windows usually returns sensible data but
+    can race during widget destruction (e.g. close-during-export).
+
+    The snapshot also fixes a separate UX bug: a queued batch used to
+    pick up whatever the format dropdown happened to read when each
+    worker eventually ran. Snapshotting at enqueue time pins the
+    settings the user saw when they clicked Download.
+    """
+
+    fmt: str
+    raw_output_dir: str
+    filename_template: str
+    hr_as_stars: bool
+    strip_notes: bool
+    llm_strip_notes: bool
+    llm_render_config: Optional[dict] = None
+    audio_backend: Optional[str] = None
+    audio_size: Optional[str] = None
+    speech_rate: Optional[int] = None
+    enabled_tts_providers: tuple = ()
 
 
 logger = logging.getLogger(__name__)
@@ -717,6 +753,14 @@ class MainFrame(wx.Frame):
         downloads (single URLs, library update-all) no longer disable
         buttons, but they do count toward busy for the close-confirm
         dialog and the "don't start another batch/search" guards.
+        """
+        return self._global_busy or bool(self._active_sites)
+
+    def _has_active_background_work(self) -> bool:
+        """True if a download/search/preview/batch is still running.
+
+        Shared by the close-confirmation dialog and the update guard
+        so both surfaces protect the same set of in-flight operations.
         """
         return self._global_busy or bool(self._active_sites)
 
@@ -1524,6 +1568,25 @@ class MainFrame(wx.Frame):
     def _perform_update(self, info):
         from . import self_update
 
+        # Refuse to launch the updater while any background work is
+        # active. _update_succeeded calls sys.exit(0) once the download
+        # is done — by then ZipExtractor.exe is already blocked on our
+        # PID, so we can't interactively cancel from there. The only
+        # safe interaction point is before download starts. The check
+        # mirrors the close-confirmation predicate so any path the
+        # user's normal "X-out" prompt would catch also catches here.
+        if self._has_active_background_work():
+            wx.MessageBox(
+                "Downloads, searches, or audiobook renders are still "
+                "running.\n\nFinish or cancel them before updating — "
+                "ffn-dl has to close itself to swap in the new version, "
+                "and that would interrupt any work in progress.",
+                "Update blocked",
+                wx.OK | wx.ICON_WARNING,
+                self,
+            )
+            return
+
         # Save prefs now so they're on disk before the swap
         try:
             self._save_prefs()
@@ -1647,6 +1710,13 @@ class MainFrame(wx.Frame):
         if not url:
             self._log("Error: Please enter a story URL or ID.")
             return
+        # Snapshot wx-widget settings on the main thread here so the
+        # worker thread reads only from the immutable params object.
+        # Snapshotting at enqueue time also pins the settings to what
+        # the user saw when they clicked — a queued batch can no
+        # longer get its format silently swapped if the user edits the
+        # form between clicks.
+        params = self._snapshot_download_params()
         if self._is_batch_url(url):
             # Batch flows still serialize globally — they pop a picker
             # dialog and then fan out to many downloads, which the
@@ -1656,12 +1726,13 @@ class MainFrame(wx.Frame):
             self._set_busy(True, kind="download")
             self._log(f"Starting download: {url}")
             threading.Thread(
-                target=self._run_download, args=(url,), daemon=True,
+                target=self._run_download, args=(url,),
+                kwargs={"params": params}, daemon=True,
             ).start()
             return
         self._log(f"Starting download: {url}")
         self._enqueue_site_job(
-            url, lambda: self._run_download(url),
+            url, lambda u=url, p=params: self._run_download(u, params=p),
         )
 
     def _on_add_from_url_list(self, event):
@@ -1678,10 +1749,14 @@ class MainFrame(wx.Frame):
             dlg.Destroy()
         if not urls:
             return
+        # One snapshot for the whole batch — every queued fic uses the
+        # settings that were active when the user OK'd the picker.
+        params = self._snapshot_download_params()
         self._log(f"Add from URL list: enqueuing {len(urls)} fic(s).")
         for url in urls:
             self._enqueue_site_job(
-                url, lambda u=url: self._run_download(u),
+                url,
+                lambda u=url, p=params: self._run_download(u, params=p),
             )
 
     def _on_preview_voices(self, event):
@@ -1692,6 +1767,9 @@ class MainFrame(wx.Frame):
         if self._global_busy:
             self._log("Already busy; finish the current job before previewing.")
             return
+        # Snapshot output_dir on the main thread; the worker no longer
+        # reads self.output_ctrl directly.
+        output_dir = (self.output_ctrl.GetValue() or "").strip()
         self._log(f"Preview: fetching metadata for {url}")
         # Voice preview is a global-busy operation: it runs one off-
         # queue worker, opens a modal dialog at completion, and
@@ -1706,16 +1784,17 @@ class MainFrame(wx.Frame):
         # confirmation branch.
         self._set_busy(True, kind="preview")
         threading.Thread(
-            target=self._run_preview_voices_with_busy, args=(url,), daemon=True,
+            target=self._run_preview_voices_with_busy,
+            args=(url, output_dir), daemon=True,
         ).start()
 
-    def _run_preview_voices_with_busy(self, url):
+    def _run_preview_voices_with_busy(self, url, output_dir: str):
         try:
-            self._run_preview_voices(url)
+            self._run_preview_voices(url, output_dir)
         finally:
             self._set_busy(False)
 
-    def _run_preview_voices(self, url):
+    def _run_preview_voices(self, url, output_dir: str):
         try:
             scraper = self._scraper_for(url)
             scraper.parse_story_id(url)
@@ -1732,9 +1811,12 @@ class MainFrame(wx.Frame):
             )
 
             from . import tts
-            output_dir = Path(self.output_ctrl.GetValue())
-            output_dir.mkdir(parents=True, exist_ok=True)
-            map_path = output_dir / f".ffn-voices-{story.id}.json"
+            # output_dir is snapshotted on the main thread by
+            # _on_preview_voices so this worker doesn't read
+            # self.output_ctrl directly.
+            preview_dir = Path(output_dir)
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            map_path = preview_dir / f".ffn-voices-{story.id}.json"
 
             voices, mapper = tts.detect_voices(story, map_path=map_path)
             self._log(
@@ -1799,6 +1881,9 @@ class MainFrame(wx.Frame):
             f"Updating{mode}: {url} (existing file has {existing} chapters)"
         )
         update_path = Path(path)
+        # Snapshot params AFTER the SetSelection above so the snapshot
+        # reflects the new format pinned from the file's suffix.
+        params = self._snapshot_download_params()
         self._enqueue_site_job(
             url,
             lambda: self._run_download(
@@ -1807,6 +1892,7 @@ class MainFrame(wx.Frame):
                 is_update=True,
                 update_path=update_path,
                 refetch_all=refetch_all,
+                params=params,
             ),
         )
 
@@ -1845,7 +1931,12 @@ class MainFrame(wx.Frame):
     def _notify_search_frame_closed(self, site_key):
         self._search_frames.pop(site_key, None)
 
-    def _run_series_merge_download(self, series_url, *, series_name=None, part_urls=None):
+    def _run_series_merge_download(
+        self, series_url, *, series_name=None, part_urls=None,
+        params: Optional[_DownloadParams] = None,
+    ):
+        if params is None:
+            params = self._snapshot_download_params()
         try:
             from .ao3 import AO3Scraper
             from .cli import _merge_stories
@@ -1917,7 +2008,7 @@ class MainFrame(wx.Frame):
             self._log(
                 f"\nMerged {len(stories)} works / {len(merged.chapters)} sections"
             )
-            path = self._export_story(merged)
+            path = self._export_story(merged, params)
             self._log(f"Saved: {path}")
         except Exception as exc:
             self._log(f"Series download failed: {exc}")
@@ -1992,8 +2083,10 @@ class MainFrame(wx.Frame):
             self._log(f"Clipboard detected: {url}")
             self.url_ctrl.SetValue(url)
             self._set_busy(True, kind="download")
+            params = self._snapshot_download_params()
             threading.Thread(
-                target=self._run_download, args=(url,), daemon=True,
+                target=self._run_download, args=(url,),
+                kwargs={"params": params}, daemon=True,
             ).start()
             return
 
@@ -2001,8 +2094,10 @@ class MainFrame(wx.Frame):
 
         self._log(f"Clipboard detected: {url}")
         self.url_ctrl.SetValue(url)
+        params = self._snapshot_download_params()
         self._enqueue_site_job(
-            url, lambda: self._run_download(url),
+            url,
+            lambda u=url, p=params: self._run_download(u, params=p),
         )
 
     # ── Download worker ──────────────────────────────────────
@@ -2011,10 +2106,53 @@ class MainFrame(wx.Frame):
         from .sites import detect_scraper
         return detect_scraper(url)()
 
-    def _resolve_output_dir(self, story, fmt: str) -> str:
+    def _snapshot_download_params(self) -> _DownloadParams:
+        """MAIN THREAD ONLY. Bundle every wx-widget setting a worker
+        thread might need into an immutable :class:`_DownloadParams`.
+
+        Call this just before queueing/spawning a download worker so
+        the worker reads from the snapshot — never from
+        ``self.<x>_ctrl`` directly. Batches snapshot once and reuse
+        the same params for every item in the batch so changing the
+        format dropdown mid-batch doesn't retroactively change which
+        format old queued items export as.
+        """
+        fmt = self.format_ctrl.GetString(self.format_ctrl.GetSelection())
+        strip_notes = self.strip_notes_ctrl.GetValue()
+        llm_strip_notes = (
+            strip_notes and self.llm_strip_notes_ctrl.GetValue()
+        )
+        return _DownloadParams(
+            fmt=fmt,
+            raw_output_dir=(self.output_ctrl.GetValue() or "").strip(),
+            filename_template=self.name_ctrl.GetValue(),
+            hr_as_stars=self.hr_stars_ctrl.GetValue(),
+            strip_notes=strip_notes,
+            llm_strip_notes=llm_strip_notes,
+            llm_render_config=(
+                self._llm_config_for_render() if llm_strip_notes else None
+            ),
+            audio_backend=(
+                self._selected_attribution_backend() if fmt == "audio" else None
+            ),
+            audio_size=(
+                self._selected_size() if fmt == "audio" else None
+            ),
+            speech_rate=(
+                self.speech_rate_ctrl.GetValue() if fmt == "audio" else None
+            ),
+            enabled_tts_providers=(
+                tuple(self._enabled_tts_providers()) if fmt == "audio" else ()
+            ),
+        )
+
+    def _resolve_output_dir(self, story, params: _DownloadParams) -> str:
         """Pick the save folder for ``story``, auto-routing into the
         library's fandom subfolder when the user's Save-to folder
         matches the configured library root.
+
+        Reads from a :class:`_DownloadParams` snapshot so worker
+        threads don't touch wx widgets — see ``_snapshot_download_params``.
 
         Mirrors the CLI's ``_apply_library_autosort`` +
         ``_library_subdir_for`` behaviour so library-wide downloads
@@ -2026,7 +2164,7 @@ class MainFrame(wx.Frame):
         """
         from . import cli, prefs as _p
 
-        raw_output = (self.output_ctrl.GetValue() or "").strip()
+        raw_output = params.raw_output_dir
         if not raw_output:
             return raw_output
         base = Path(raw_output).expanduser()
@@ -2053,7 +2191,7 @@ class MainFrame(wx.Frame):
             _library_misc=(
                 self.prefs.get(_p.KEY_LIBRARY_MISC_FOLDER) or "Misc"
             ),
-            format=fmt,
+            format=params.fmt,
         )
         subdir = cli._library_subdir_for(story, args_like)
         if subdir is None or str(subdir) in ("", "."):
@@ -2189,33 +2327,35 @@ class MainFrame(wx.Frame):
             self.prefs.set(_p.KEY_OUTPUT_DIR, best_root)
             self._log(f"Library root set: {best_root}")
 
-    def _export_story(self, story):
-        fmt = self.format_ctrl.GetString(self.format_ctrl.GetSelection())
-        output_dir = self._resolve_output_dir(story, fmt)
-        template = self.name_ctrl.GetValue()
-        hr_as_stars = self.hr_stars_ctrl.GetValue()
-        strip_notes = self.strip_notes_ctrl.GetValue()
-        llm_strip_notes = (
-            strip_notes and self.llm_strip_notes_ctrl.GetValue()
-        )
-        # Reuse the same LLM config the audiobook attribution path
-        # uses — _llm_config_for_render reads provider/model/api-key
-        # from prefs. The LLM A/N strip is a separate user-facing
-        # toggle but the credentials come from the same place.
-        an_llm_config = (
-            self._llm_config_for_render() if llm_strip_notes else None
-        )
+    def _export_story(self, story, params: _DownloadParams):
+        """Run the configured exporter for ``story`` using the snapshot
+        in ``params``.
 
-        if fmt == "audio":
+        Worker-thread safe: every value that used to be read live from
+        ``self.<x>_ctrl`` now comes from the immutable snapshot. Audio
+        attribution backend/size + LLM A/N config are pre-resolved on
+        the main thread inside ``_snapshot_download_params`` so this
+        path never has to call ``self._selected_attribution_backend``
+        or ``self._llm_config_for_render`` off-main.
+        """
+        output_dir = self._resolve_output_dir(story, params)
+
+        if params.fmt == "audio":
             from .tts import generate_audiobook
 
             def audio_progress(current, total, title):
                 self._log(f"  Synthesizing [{current}/{total}] {title}")
 
-            backend = self._selected_attribution_backend()
-            size = self._selected_size()
-            rate = self.speech_rate_ctrl.GetValue()
-            llm_config = self._llm_config_for_render() if backend == "llm" else None
+            backend = params.audio_backend or "builtin"
+            size = params.audio_size
+            rate = params.speech_rate if params.speech_rate is not None else 0
+            # Reuse the same LLM config the A/N strip path uses when the
+            # selected attribution backend is "llm". The two snapshot
+            # slots are kept distinct because A/N strip can be on
+            # without LLM attribution being on.
+            llm_config = (
+                params.llm_render_config if backend == "llm" else None
+            )
             size_note = f", size={size}" if size else ""
             llm_note = (
                 f", llm={llm_config['provider']}/{llm_config['model']}"
@@ -2232,21 +2372,22 @@ class MainFrame(wx.Frame):
                 attribution_backend=backend,
                 attribution_model_size=size,
                 attribution_llm_config=llm_config,
-                enabled_tts_providers=self._enabled_tts_providers(),
-                strip_notes=strip_notes,
-                hr_as_stars=hr_as_stars,
+                enabled_tts_providers=list(params.enabled_tts_providers),
+                strip_notes=params.strip_notes,
+                hr_as_stars=params.hr_as_stars,
             )
 
         from .exporters import EXPORTERS
-        exporter = EXPORTERS[fmt]
+        exporter = EXPORTERS[params.fmt]
+        an_llm_config = params.llm_render_config if params.llm_strip_notes else None
         if an_llm_config:
             self._log(
                 f"  LLM A/N strip: {an_llm_config['provider']}/"
                 f"{an_llm_config['model']} (one call per chapter)"
             )
         return exporter(
-            story, output_dir, template=template,
-            hr_as_stars=hr_as_stars, strip_notes=strip_notes,
+            story, output_dir, template=params.filename_template,
+            hr_as_stars=params.hr_as_stars, strip_notes=params.strip_notes,
             llm_config=an_llm_config,
             progress=self._log,
         )
@@ -2254,7 +2395,19 @@ class MainFrame(wx.Frame):
     def _run_download(
         self, url, skip_chapters=0, is_update=False,
         update_path=None, refetch_all=False,
+        params: Optional[_DownloadParams] = None,
     ):
+        # ``params`` MUST be snapshotted on the main thread by the
+        # caller. If None (legacy/test/internal callers that haven't
+        # threaded params through yet), snapshot here as a fallback —
+        # but flag it for cleanup so we eventually remove the off-main
+        # widget reads completely.
+        if params is None:
+            logger.debug(
+                "_run_download called without params; snapshotting on "
+                "current thread (legacy path)."
+            )
+            params = self._snapshot_download_params()
         try:
             from .ao3 import AO3Scraper
             from .erotica import LiteroticaScraper
@@ -2264,12 +2417,14 @@ class MainFrame(wx.Frame):
 
             if not is_update and AO3Scraper.is_bookmarks_url(url):
                 self._run_picker_download(
-                    url, AO3Scraper(), kind="bookmarks",
+                    url, AO3Scraper(), kind="bookmarks", params=params,
                 )
                 return
 
             if not is_update and scraper.is_author_url(url):
-                self._run_picker_download(url, scraper, kind="author")
+                self._run_picker_download(
+                    url, scraper, kind="author", params=params,
+                )
                 return
 
             if not is_update and (
@@ -2281,7 +2436,7 @@ class MainFrame(wx.Frame):
                     scraper = AO3Scraper()
                 elif LiteroticaScraper.is_series_url(url) and not isinstance(scraper, LiteroticaScraper):
                     scraper = LiteroticaScraper()
-                self._run_series_download(url, scraper)
+                self._run_series_download(url, scraper, params=params)
                 return
 
             scraper.parse_story_id(url)
@@ -2345,7 +2500,7 @@ class MainFrame(wx.Frame):
             self._log(f"  Author:   {story.author}")
             self._log(f"  Chapters: {len(story.chapters)}")
 
-            path = self._export_story(story)
+            path = self._export_story(story, params)
             self._log(f"\nDone! Saved to: {path}")
 
         except Exception as e:
@@ -2362,7 +2517,7 @@ class MainFrame(wx.Frame):
             ):
                 self._set_busy(False)
 
-    def _run_series_download(self, url, scraper):
+    def _run_series_download(self, url, scraper, *, params: Optional[_DownloadParams] = None):
         self._log(f"Fetching series: {url}")
         series_name, work_urls = scraper.scrape_series_works(url)
         if not work_urls:
@@ -2370,9 +2525,11 @@ class MainFrame(wx.Frame):
             return
         self._log(f"Series: {series_name}")
         self._log(f"Found {len(work_urls)} works. Downloading in series order...")
-        self._batch_download(work_urls, scraper, summary_label="Series")
+        self._batch_download(
+            work_urls, scraper, summary_label="Series", params=params,
+        )
 
-    def _run_author_download(self, url, scraper):
+    def _run_author_download(self, url, scraper, *, params: Optional[_DownloadParams] = None):
         self._log(f"Fetching author page: {url}")
         author_name, story_urls = scraper.scrape_author_stories(url)
         if not story_urls:
@@ -2380,9 +2537,11 @@ class MainFrame(wx.Frame):
             return
         self._log(f"Author: {author_name}")
         self._log(f"Found {len(story_urls)} stories. Downloading all...")
-        self._batch_download(story_urls, scraper, summary_label="Author batch")
+        self._batch_download(
+            story_urls, scraper, summary_label="Author batch", params=params,
+        )
 
-    def _run_picker_download(self, url, scraper, *, kind):
+    def _run_picker_download(self, url, scraper, *, kind, params: Optional[_DownloadParams] = None):
         """Fetch a work list (author page or AO3 bookmarks) and open the
         picker so the user can choose which works to download before we
         start pulling chapters.
@@ -2439,9 +2598,15 @@ class MainFrame(wx.Frame):
                 # Stay global-busy through the batch — the worker
                 # thread we spawn here will clear it on exit.
                 self._set_busy(True, kind="download")
+                # Re-snapshot params on the main thread here (we ARE
+                # on it inside _handle_selection) rather than capturing
+                # the picker-open-time snapshot, since the user could
+                # have flipped settings while the picker was up.
+                batch_params = params or self._snapshot_download_params()
                 threading.Thread(
                     target=self._run_picked_batch,
                     args=(selected_urls, kind),
+                    kwargs={"params": batch_params},
                     daemon=True,
                 ).start()
             finally:
@@ -2463,7 +2628,13 @@ class MainFrame(wx.Frame):
         dlg.Destroy()
         on_ok(picked_urls)
 
-    def _run_picked_batch(self, urls, kind):
+    def _run_picked_batch(self, urls, kind, *, params: Optional[_DownloadParams] = None):
+        if params is None:
+            # Should never happen on the production path (the picker
+            # handler snapshots before spawning), but tests/synthetic
+            # callers without a main-thread snapshot still get a
+            # working fallback.
+            params = self._snapshot_download_params()
         try:
             # Each url may target a different scraper (e.g. bookmarks can
             # include works outside the owner's own, but on AO3 they're
@@ -2482,7 +2653,7 @@ class MainFrame(wx.Frame):
                     story = scraper.download(
                         story_url, progress_callback=progress,
                     )
-                    path = self._export_story(story)
+                    path = self._export_story(story, params)
                     self._log(f"  Saved: {path}")
                     succeeded += 1
                 except Exception as exc:
@@ -2498,7 +2669,12 @@ class MainFrame(wx.Frame):
         finally:
             self._set_busy(False)
 
-    def _batch_download(self, story_urls, scraper, summary_label="Batch"):
+    def _batch_download(
+        self, story_urls, scraper, summary_label="Batch",
+        *, params: Optional[_DownloadParams] = None,
+    ):
+        if params is None:
+            params = self._snapshot_download_params()
 
         def progress(current, total, title, cached):
             tag = " (cached)" if cached else ""
@@ -2510,7 +2686,7 @@ class MainFrame(wx.Frame):
             self._log(f"\n[{i}/{len(story_urls)}] {story_url}")
             try:
                 story = scraper.download(story_url, progress_callback=progress)
-                path = self._export_story(story)
+                path = self._export_story(story, params)
                 self._log(f"  Saved: {path}")
                 succeeded += 1
             except Exception as e:

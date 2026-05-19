@@ -101,6 +101,10 @@ class WatchlistFrame(wx.Frame):
         # against the store; closing the frame mid-poll would otherwise
         # land _on_poll_done on a destroyed frame.
         self._alive = True
+        # _polling guards against a second poll being started while the
+        # first is still running. Accelerators / programmatic callers
+        # can fire faster than the UI buttons can disable themselves.
+        self._polling = False
 
         self._build_ui()
         self._install_accelerators()
@@ -228,12 +232,20 @@ class WatchlistFrame(wx.Frame):
     # ── State ──────────────────────────────────────────────
 
     def _reload(self):
-        """Re-read the watchlist from disk and repaint the list."""
+        """Re-read the watchlist from disk and repaint the list.
+
+        A load failure nulls ``self._store`` so handlers that mutate
+        the watchlist (add / remove / toggle) refuse to run on stale
+        in-memory state. The user is shown a message box and the list
+        is repainted empty; a subsequent Refresh can recover once the
+        underlying disk error is resolved.
+        """
         try:
             self._store = WatchlistStore.load_default()
             self._watches = self._store.all()
         except Exception as exc:
             logger.exception("Failed to load watchlist")
+            self._store = None
             wx.MessageBox(
                 f"Could not load the watchlist:\n\n{exc}",
                 "Watchlist error",
@@ -242,6 +254,22 @@ class WatchlistFrame(wx.Frame):
             self._watches = []
         self._repaint_list()
         self._update_status_summary()
+
+    def _require_store(self) -> bool:
+        """Refuse a mutating action when the store failed to load.
+
+        The Refresh button is the recovery path; the user can clear
+        the underlying disk error and click Refresh to retry.
+        """
+        if self._store is None:
+            wx.MessageBox(
+                "The watchlist isn't loaded — Refresh first to retry "
+                "reading it from disk.",
+                "Watchlist not loaded",
+                wx.OK | wx.ICON_WARNING, self,
+            )
+            return False
+        return True
 
     def _repaint_list(self):
         ctrl = self.list_ctrl
@@ -302,6 +330,8 @@ class WatchlistFrame(wx.Frame):
     # ── Add flows ──────────────────────────────────────────
 
     def _open_url_dialog(self, expected_type: str):
+        if not self._require_store():
+            return
         dlg = AddURLWatchDialog(
             self, expected_type, channels=self._channels_choices(),
         )
@@ -341,6 +371,8 @@ class WatchlistFrame(wx.Frame):
             dlg.Destroy()
 
     def _on_add_search(self, event):
+        if not self._require_store():
+            return
         dlg = AddSearchWatchDialog(self, channels=self._channels_choices())
         try:
             if dlg.ShowModal() != wx.ID_OK:
@@ -402,17 +434,17 @@ class WatchlistFrame(wx.Frame):
         idx = self._selected_index()
         if idx < 0:
             return
+        if not self._require_store():
+            return
         watch = self._watches[idx]
-        dlg = wx.MessageDialog(
+        with wx.MessageDialog(
             self,
             f"Remove this watch?\n\n{watch.display_label()}",
             "Confirm removal",
             style=wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION,
-        )
-        if dlg.ShowModal() != wx.ID_YES:
-            dlg.Destroy()
-            return
-        dlg.Destroy()
+        ) as dlg:
+            if dlg.ShowModal() != wx.ID_YES:
+                return
         if not self._store.remove(watch.id):
             wx.MessageBox(
                 "That watch is no longer on disk — someone else may have "
@@ -426,16 +458,24 @@ class WatchlistFrame(wx.Frame):
         idx = self._selected_index()
         if idx < 0:
             return
+        if not self._require_store():
+            return
         watch = self._watches[idx]
-        watch.enabled = not watch.enabled
+        previous_enabled = watch.enabled
+        watch.enabled = not previous_enabled
         try:
             self._store.update(watch)
         except Exception as exc:
+            # Revert the in-memory flip so the cached Watch object can't
+            # drift from on-disk truth — otherwise a subsequent
+            # display_label / status query would read the wrong state.
+            watch.enabled = previous_enabled
             logger.exception("Failed to toggle watch enabled state")
             wx.MessageBox(
                 f"Could not update watch:\n\n{exc}",
                 "Update failed", wx.OK | wx.ICON_ERROR, self,
             )
+            self._reload()
             return
         logger.info(
             "%s watch %s (%s)",
@@ -468,11 +508,15 @@ class WatchlistFrame(wx.Frame):
     def _run_poll(self, *, watch_ids, label):
         """Fire run_once in a daemon thread so the GUI stays responsive.
 
-        We disable the Run buttons while the thread is active so a user
-        can't queue two concurrent polls on the same store — that would
-        race the atomic-write guarantee and could lose an update to
-        ``last_checked_at``.
+        ``self._polling`` rejects a second concurrent poll even if the
+        triggering button never disabled (accelerator, programmatic
+        call). ``run_once`` itself serialises against the autopoller
+        via ``_RUN_ONCE_LOCK``, but a re-entered GUI poll would still
+        double-marshal a UI completion and stomp the status label.
         """
+        if self._polling:
+            return
+        self._polling = True
         self._set_poll_busy(True)
         self.status_ctrl.SetLabel(f"Polling {label}...")
         thread = threading.Thread(
@@ -484,12 +528,10 @@ class WatchlistFrame(wx.Frame):
         thread.start()
 
     def _run_poll_worker(self, watch_ids, label):
-        # Always reload the store from disk inside the worker so a
-        # concurrent autopoll's writes (last_checked_at, dedup hashes,
-        # cooldown) aren't clobbered by a save against a stale in-frame
-        # copy. run_once itself takes the process-level _RUN_ONCE_LOCK,
-        # so this load + run_once + return is serialised against any
-        # other poll path.
+        # run_once now reloads the store from disk inside its own
+        # _RUN_ONCE_LOCK so we can't trample a concurrent autopoll's
+        # writes. We still create a fresh WatchlistStore handle so the
+        # frame's _store reference isn't shared into the worker.
         try:
             store = WatchlistStore.load_default()
             results = run_once(
@@ -504,10 +546,21 @@ class WatchlistFrame(wx.Frame):
             wx.CallAfter(self._on_poll_done, results, "", label)
 
     def _on_poll_done(self, results, fatal_error, label):
-        if not self._alive:
+        # ``not self`` catches the wx C++ peer being torn down via a
+        # parent-destroy path that didn't run our _on_close (so _alive
+        # stayed True). Cheap belt-and-suspenders against a teardown
+        # race that's hard to trigger but would crash with
+        # "wrapped C/C++ object has been deleted" if it ever fired.
+        if not self or not self._alive:
             return
-        self._set_poll_busy(False)
+        self._polling = False
+        # Reload first, then clear busy: _set_poll_busy(False) routes
+        # through _on_selection_change which derives button enable
+        # state from the current selection. Doing it pre-reload reads
+        # stale selection indexes against the soon-to-be-repainted
+        # list.
         self._reload()
+        self._set_poll_busy(False)
         if fatal_error:
             self.status_ctrl.SetLabel(f"Poll failed: {fatal_error}")
             return
