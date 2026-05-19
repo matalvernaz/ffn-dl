@@ -239,7 +239,10 @@ def _parse_results(html):
         meta_text = meta_div.get_text(" ", strip=True) if meta_div else ""
 
         words_m = re.search(r"Words:\s*([\d,]+)", meta_text)
-        chapters_m = re.search(r"Chapters:\s*(\d+)", meta_text)
+        # Accept comma-grouped chapter counts (``Chapters: 1,234``).
+        # FFN normally shows small counts but the old ``\d+``-only regex
+        # would silently truncate a four-digit count to its leading digit.
+        chapters_m = re.search(r"Chapters:\s*([\d,]+)", meta_text)
         rating_m = re.search(r"Rated:\s*(\S+)", meta_text)
         status_m = re.search(r"\bComplete\b", meta_text)
 
@@ -423,16 +426,24 @@ def _build_ao3_search_url(query, filters, page=1):
         params["work_search[single_chapter]"] = 1
 
     # Language: accept a pretty label from AO3_LANGUAGES, or a raw ISO
-    # code / numeric ID passed through verbatim.
+    # code / numeric ID passed through verbatim. The "any" label in
+    # AO3_LANGUAGES maps to None and means "omit the filter" — so a
+    # ``matched is None`` after a successful lookup must NOT fall back
+    # to passing through ``lang_str="any"`` as a literal language code,
+    # which AO3's search would treat as a no-result filter.
     lang_raw = filters.get("language")
     if lang_raw:
         lang_str = str(lang_raw).strip()
-        matched = None
+        sentinel = object()
+        matched = sentinel
         for label, code in AO3_LANGUAGES.items():
             if label.lower() == lang_str.lower():
                 matched = code
                 break
-        params["work_search[language_id]"] = matched if matched else lang_str
+        if matched is sentinel:
+            params["work_search[language_id]"] = lang_str
+        elif matched is not None:
+            params["work_search[language_id]"] = matched
 
     # Free-text AO3 fields pass straight through
     for key, param in [
@@ -1128,6 +1139,11 @@ def collapse_ao3_series(results):
 
     Works that belong to more than one series still appear as work rows;
     collapsing them would hide the multi-membership.
+
+    ``series_parts`` is sorted by the AO3 part number so a downstream
+    consumer iterating the list reads chapters in series order; AO3's
+    search results come back in relevance / date order which would
+    otherwise scramble the part sequence.
     """
     series_counts = {}
     for r in results:
@@ -1164,6 +1180,15 @@ def collapse_ao3_series(results):
         }
         seen_series[s["id"]] = row
         collapsed.append(row)
+
+    def _part_key(work):
+        entries = work.get("series") or [{}]
+        part = entries[0].get("part") if entries else None
+        # Unknown parts sort to the end so explicit parts come first.
+        return (part is None, part if part is not None else 10**9)
+
+    for row in seen_series.values():
+        row["series_parts"].sort(key=_part_key)
     return collapsed
 
 
@@ -1373,6 +1398,13 @@ def collapse_lushstories_series(results):
     scrape doesn't surface author or series metadata, so the group key
     is the base slug alone. The per-site URL prefix in
     :data:`_LUSH_SLUG_URL_RE` keeps this from matching non-lush rows.
+
+    Bare-slug adoption requires the group to already hold **two**
+    explicit suffixed siblings (``foo-2`` AND ``foo-3``, not just
+    ``foo-2`` alone). A single ``-N`` suffix is too ambiguous —
+    real-world titles like ``route-66``, ``area-51``, ``catch-22``
+    would otherwise be folded into a fake series alongside any
+    standalone ``route`` / ``area`` / ``catch`` listing.
     """
     groups: dict[str, list] = {}  # base_slug → [(index, result, part)]
     seen_indices: set[int] = set()
@@ -1387,14 +1419,20 @@ def collapse_lushstories_series(results):
     # Adopt a bare-slugged Lushstories result as part 1 when its slug
     # matches an existing group's base — Lush's convention is that part
     # 1 lives at the bare slug. Same guard as Literotica: only adopt
-    # when the group doesn't *already* have an explicit part 1.
+    # when the group doesn't *already* have an explicit part 1, and
+    # only when at least two explicit suffixed siblings exist so a
+    # numeric-ending title isn't paired up alongside an unrelated
+    # standalone work.
     for i, r in enumerate(results):
         if i in seen_indices:
             continue
         slug = _lushstories_bare_slug(r)
         if not slug or slug not in groups:
             continue
-        if any(part == 1 for _, _, part in groups[slug]):
+        existing = groups[slug]
+        if any(part == 1 for _, _, part in existing):
+            continue
+        if len(existing) < 2:
             continue
         groups[slug].append((i, r, 1))
 
@@ -1613,9 +1651,16 @@ def search_wattpad(query, *, page=1, **filters):
 
     mature = (filters or {}).get("mature")
     completed = (filters or {}).get("completed")
-    # Allow natural-case labels ("Complete", "In-Progress") and the
-    # boolean-ish keys from the CLI.
+    # Allow natural-case labels ("Complete", "In-Progress"), the
+    # boolean-ish keys from the WP_COMPLETED table (``True``/``False``),
+    # and the raw CLI strings. ``_norm`` alone would turn ``True`` into
+    # ``"true"`` which never matches the ``"complete"`` arm below, so
+    # boolean inputs were silently dropping the filter.
     def _norm(s):
+        if s is True:
+            return "complete"
+        if s is False:
+            return "in-progress"
         return str(s).strip().lower() if s is not None else None
     mature = _norm(mature)
     completed = _norm(completed)

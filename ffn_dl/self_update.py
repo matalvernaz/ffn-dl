@@ -48,10 +48,16 @@ ZIP_EXTRACTOR_EXE = "ZipExtractor.exe"
 
 
 def _parse_version(tag: str):
-    """Parse 'v1.2.3' → (1, 2, 3). Returns None for unrecognised formats."""
+    """Parse 'v1.2.3' → (1, 2, 3). Returns None for unrecognised formats.
+
+    Anchored so prerelease tags like ``v1.2.3-beta`` / ``v1.2.3rc1`` don't
+    parse as stable ``(1, 2, 3)`` — GitHub's ``releases/latest`` skips
+    prereleases by default, but if one slips through unmarked we'd
+    silently treat it as a stable update.
+    """
     if not tag:
         return None
-    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", tag)
+    m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", tag.strip())
     if not m:
         return None
     return tuple(int(x) for x in m.groups())
@@ -105,10 +111,15 @@ def is_frozen() -> bool:
 
 
 def can_self_replace() -> bool:
-    """True only when we're a frozen Windows build with the helper bundled."""
+    """True only when we're a frozen Windows build with the helper bundled.
+
+    ``.is_file()`` rather than ``.exists()`` so a directory accidentally
+    named ``ZipExtractor.exe`` doesn't fool the GUI into offering an
+    in-place update that would fail at the ``shutil.copy2`` step.
+    """
     if not (is_frozen() and sys.platform.startswith("win")):
         return False
-    return (Path(sys.executable).parent / ZIP_EXTRACTOR_EXE).exists()
+    return (Path(sys.executable).parent / ZIP_EXTRACTOR_EXE).is_file()
 
 
 def _verify_digest(path: Path, digest: str) -> None:
@@ -174,7 +185,7 @@ def cleanup_old_exe() -> None:
 
 
 def _download(url: str, dest: Path, progress_cb=None, expected_size: int = 0) -> None:
-    """Stream ``url`` to ``dest``; raises on HTTP errors or truncation.
+    """Stream ``url`` to ``dest``; raises on HTTP errors, truncation, or overshoot.
 
     A short per-read timeout (12 s) is preferred over the previous 60 s
     so a user clicking Abort during a stalled HTTPS read sees the
@@ -182,10 +193,25 @@ def _download(url: str, dest: Path, progress_cb=None, expected_size: int = 0) ->
     download itself routinely takes longer than that — the timeout is
     *per recv*, not per request — so a healthy slow connection still
     completes.
+
+    Both the ``Content-Length`` header AND the API-declared
+    ``expected_size`` are checked independently — a malicious or buggy
+    server can otherwise serve a short body that matches its own header
+    but disagrees with the release-asset size. Without this fallback
+    layer, the only thing standing between a short-zip update and the
+    install dir is the SHA-256 digest, which GitHub doesn't always
+    populate.
     """
     resp = curl_requests.get(url, impersonate="chrome", timeout=12, stream=True)
     resp.raise_for_status()
-    total = int(resp.headers.get("content-length") or expected_size or 0)
+    header_size = int(resp.headers.get("content-length") or 0)
+    api_size = int(expected_size or 0)
+    if header_size > 0 and api_size > 0 and header_size != api_size:
+        raise RuntimeError(
+            f"Update size mismatch: server reports {header_size} bytes, "
+            f"release API reports {api_size}. Refusing to install."
+        )
+    max_expected = max(s for s in (header_size, api_size) if s > 0) if (header_size or api_size) else 0
     done = 0
     with open(dest, "wb") as f:
         for chunk in resp.iter_content(chunk_size=1 << 20):
@@ -193,18 +219,27 @@ def _download(url: str, dest: Path, progress_cb=None, expected_size: int = 0) ->
                 continue
             f.write(chunk)
             done += len(chunk)
+            if max_expected and done > max_expected:
+                raise RuntimeError(
+                    f"Update download exceeded expected size: got at least "
+                    f"{done} bytes, expected {max_expected}."
+                )
             if progress_cb:
-                progress_cb(done, total)
+                progress_cb(done, max_expected)
     # Catch truncation on connection drops where the underlying stream
-    # ended cleanly (no exception) but Content-Length wasn't satisfied.
-    # Without this guard a partial zip lands on disk and either fails
-    # extraction or — worse — extracts a half-installed app over the
-    # user's existing install. Skip when total is 0 (chunked transfer
-    # without Content-Length and no expected_size from the release JSON).
-    if total > 0 and done != total:
+    # ended cleanly (no exception) but the declared sizes weren't
+    # satisfied. Without this guard a partial zip lands on disk and
+    # either fails extraction or — worse — extracts a half-installed
+    # app over the user's existing install.
+    if header_size > 0 and done != header_size:
         raise RuntimeError(
-            f"Update download truncated: got {done} bytes, expected {total}. "
+            f"Update download truncated: got {done} bytes, expected {header_size}. "
             "The current version is unchanged; please retry."
+        )
+    if api_size > 0 and done != api_size:
+        raise RuntimeError(
+            f"Update download size mismatch: got {done} bytes, release API "
+            f"declared {api_size}. The current version is unchanged."
         )
 
 
@@ -249,11 +284,33 @@ def _shell_execute(verb: str, file: Path, params: str, cwd: Path) -> None:
     ``subprocess.Popen`` can't request the ``runas`` verb; Win32
     ``ShellExecuteW`` is the only stdlib-accessible way to trigger a
     UAC elevation prompt from Python.
+
+    Argtypes/restype are declared so the 64-bit ``HINSTANCE`` return
+    value isn't truncated by ctypes' default ``c_int`` — the
+    ``rc <= 32`` success-code semantics survive truncation in practice
+    but declaring the signature is the correct defensive shape.
     """
-    SW_SHOWNORMAL = 1
-    rc = ctypes.windll.shell32.ShellExecuteW(
-        None, verb, str(file), params, str(cwd), SW_SHOWNORMAL,
-    )
+    if sys.platform.startswith("win"):
+        from ctypes import wintypes
+        shell32 = ctypes.windll.shell32
+        if not getattr(shell32.ShellExecuteW, "_ffn_dl_signature_set", False):
+            shell32.ShellExecuteW.argtypes = [
+                wintypes.HWND,
+                wintypes.LPCWSTR,
+                wintypes.LPCWSTR,
+                wintypes.LPCWSTR,
+                wintypes.LPCWSTR,
+                ctypes.c_int,
+            ]
+            shell32.ShellExecuteW.restype = wintypes.HINSTANCE
+            shell32.ShellExecuteW._ffn_dl_signature_set = True
+        SW_SHOWNORMAL = 1
+        rc_handle = shell32.ShellExecuteW(
+            None, verb, str(file), params, str(cwd), SW_SHOWNORMAL,
+        )
+        rc = int(ctypes.cast(rc_handle, ctypes.c_void_p).value or 0)
+    else:
+        raise RuntimeError("ShellExecuteW only available on Windows")
     # ShellExecuteW returns > 32 on success; values <= 32 are Win32
     # error codes (2 = ENOENT, 5 = access denied, 1223 = UAC cancelled
     # — though the UAC-cancel case usually returns SE_ERR_ACCESSDENIED).
@@ -269,15 +326,18 @@ def _spawn_extractor(
     Uses ``runas`` only when the install dir isn't writable — the
     common case (user unzipped to Downloads, Desktop, home) doesn't
     need elevation and skipping the prompt makes the flow one-click.
-    """
-    def _q(p):
-        return f'"{p}"'
 
-    params = (
-        f"--input {_q(zip_path)} "
-        f"--output {_q(install_dir)} "
-        f"--current-exe {_q(exe)}"
-    )
+    Argument quoting goes through ``subprocess.list2cmdline`` because
+    hand-rolled ``f'"{path}"'`` breaks at drive roots:
+    ``"D:\\"`` parses as an escaped quote under
+    ``CommandLineToArgvW``, swallowing the next token. ``list2cmdline``
+    doubles trailing backslashes correctly per MS docs.
+    """
+    params = subprocess.list2cmdline([
+        "--input", str(zip_path),
+        "--output", str(install_dir),
+        "--current-exe", str(exe),
+    ])
     verb = "open" if _is_writable(install_dir) else "runas"
     # ZipExtractor writes its log (ZipExtractor.log) to AppDomain.
     # CurrentDomain.BaseDirectory — i.e. its own folder. Point it at
@@ -330,10 +390,29 @@ def download_and_replace(update_info, progress_cb=None) -> Path:
             zf.extractall(extracted)
         zip_path.unlink(missing_ok=True)
 
-        inner = list(extracted.iterdir())
-        src_for_repack = (
-            inner[0] if len(inner) == 1 and inner[0].is_dir() else extracted
-        )
+        # Determine the directory whose *contents* should land in the
+        # install dir. The release zip wraps everything under
+        # ``ffn-dl/``, so the common case is a single top-level dir;
+        # but a malformed release (stray README, __MACOSX, etc.) can
+        # produce multiple top-level entries. Look for a child dir that
+        # actually contains the running exe name — that's the real app
+        # root regardless of sibling debris. Fall back to the bare
+        # extracted root only when the exe sits there directly. If
+        # nothing matches, refuse the update rather than half-install.
+        expected_exe = current_exe.name
+        candidate = None
+        for child in extracted.iterdir():
+            if child.is_dir() and (child / expected_exe).is_file():
+                candidate = child
+                break
+        if candidate is None and (extracted / expected_exe).is_file():
+            candidate = extracted
+        if candidate is None:
+            raise RuntimeError(
+                f"Downloaded portable zip does not contain {expected_exe} "
+                "at the expected location. Update aborted; install unchanged."
+            )
+        src_for_repack = candidate
         _repack_flat(src_for_repack, flat_zip)
         shutil.rmtree(extracted, ignore_errors=True)
 

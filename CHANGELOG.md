@@ -1,5 +1,99 @@
 # Changelog
 
+## 2.4.17 — 2026-05-19
+
+### Round 5 multi-AI audit (self_update + search)
+
+First pass on the previously-unaudited surface. Gemini Pro + GPT-5 +
+me on a shared roundtable thread; every finding verified against the
+actual code or live site before applying. Three of Gemini's FFN
+search-form claims were rejected after fetching the real form via
+`curl_cffi` and reading the option IDs (FFN_WORDS, FFN_CROSSOVER, and
+the "Rated: Fiction" prefix on result meta all matched the current
+code).
+
+Self-update (`ffn_dl/self_update.py`):
+
+- **Drive-root install paths break the update helper.** The hand-rolled
+  `_q(p)` quoter wrapped paths in literal `"..."`. At a drive root
+  (`D:\`) the result is `"D:\"`, whose trailing `\"` parses as an
+  escaped quote under `CommandLineToArgvW` — the next argument gets
+  glued onto `--output` and the helper never sees `--current-exe`. Now
+  goes through `subprocess.list2cmdline()`, which doubles trailing
+  backslashes per the Microsoft argv spec.
+- **Download truncation guard could miss a short body matching its
+  own Content-Length.** The truncation check trusted `Content-Length`
+  *or* the API-declared `expected_size`, never both. A server returning
+  50 MB with a matching `Content-Length: 50 MB` header would pass the
+  guard even when GitHub's release API said the asset was 100 MB. Now
+  both sizes are checked independently, and the loop aborts as soon
+  as `done` exceeds either declared size — closing the disk-fill /
+  short-update window for the case where the SHA-256 digest is absent.
+- **`_parse_version` accepts prerelease tags as stable.** `re.match`
+  isn't anchored, so `v1.2.3-beta` / `v1.2.3rc1` / `v1.2.3.4` all
+  parsed as stable `(1, 2, 3)`. GitHub's `/releases/latest` skips
+  prereleases by default so it's not currently exploitable, but if
+  one ever ships unmarked we'd happily install it as a stable update.
+  Now anchored with `re.fullmatch`.
+- **`can_self_replace` returns True for a directory named
+  `ZipExtractor.exe`.** `.exists()` doesn't discriminate; the GUI
+  would have offered an in-place update that then failed at
+  `shutil.copy2`. Switched to `.is_file()`.
+- **Repack heuristic only flattens when the extracted zip has exactly
+  one top-level entry.** A release zip with stray files (README at
+  root, `__MACOSX/`, etc.) would skip the flatten step and install
+  the new app nested inside `ffn-dl-vX.Y.Z/`, leaving the old binary
+  in place. Now walks the extracted tree to find a directory
+  containing the running exe by name and refuses the update if
+  nothing matches — half-installing was strictly worse than aborting.
+- **`ShellExecuteW` lacks argtypes/restype.** Defensive correctness:
+  ctypes' default `c_int` truncates the 64-bit `HINSTANCE` return
+  value. The `<= 32` success-code semantics survived truncation in
+  practice, but the signature is now declared properly.
+
+Search (`ffn_dl/search.py`):
+
+- **AO3 `language="any"` emits `language_id=any` instead of omitting
+  the filter.** The label-lookup's success path conflated `matched =
+  None` with "no match" and fell back to passing the literal `"any"`
+  string as a language code. AO3 has no language whose code is `any`,
+  so the search returned zero results instead of all-languages.
+  Sentinel-based lookup now distinguishes "found, but value is None"
+  from "not found".
+- **Wattpad `completed=True`/`False` (bool from `WP_COMPLETED`) is
+  silently dropped.** `_norm(True)` produced `"true"`, which never
+  matches the `"complete"` / `"in-progress"` arms. Anyone passing the
+  WP_COMPLETED table value through verbatim got an unfiltered result
+  set. Booleans now normalize to their string equivalents.
+- **Lushstories series collapse over-groups numeric-tail titles.**
+  The bare-slug-as-part-1 adoption ran as long as a single `-N`
+  suffixed sibling existed, so `route` + `route-66` would collapse
+  into a fake 66-part series. Now requires at least two explicit
+  suffixed siblings (`foo-2` AND `foo-3`) before adopting a bare slug.
+- **AO3 `series_parts` isn't sorted by part number.** Literotica and
+  Lushstories sort their members before producing `series_parts`; AO3
+  was appending in raw search-result order so downstream consumers
+  iterating the list could read chapters out of order. Now sorted by
+  `series[0].part` with unknown parts trailing.
+- **FFN chapter count truncates above 999.** `Chapters: 1,234` parsed
+  as `1` because the regex didn't accept commas (it did for words).
+  Now `[\d,]+` matches both.
+
+Rejected after live-form verification (documenting so they don't
+re-surface): `FFN_WORDS` IDs match FFN's current `words=` param
+exactly (1→`<1K`, 2→`<5K`, 3→`5K+`, ...); `FFN_CROSSOVER`
+matches `formatid=` (1=only, 2=exclude); result meta says "Rated: T"
+not "Rated: Fiction T" — the "Fiction" prefix only appears on the
+composite K-T filter option label, not in story listings.
+
+Known issue surfaced but not patched (would require a search-fn
+contract change): `fetch_until_limit` halts on the first empty page
+returned by `search_wattpad`, but Wattpad applies its `mature` /
+`completed` filters client-side after one 20-item API page — so a
+filtered-empty page can stop pagination before genuine matches at
+higher offsets are reached. Worth fixing as a follow-up by returning
+a `(results, next_page, exhausted)` tuple from search functions.
+
 ## 2.4.16 — 2026-05-18
 
 ### Watchlist + merge-in-place audit (round 4 of multi-AI deep debug)
