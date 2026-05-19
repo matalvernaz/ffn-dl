@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4.26 — 2026-05-19
+
+### LlmSettingsDialog Save also bypassed _alive
+
+Same shape as v2.4.25 but for LlmSettingsDialog: Save ended the
+modal without flipping `_alive`, so a test / install / pull worker
+that completed after Save would still touch the destroyed dialog.
+Save now flips `_alive` first.
+
 ## 2.4.25 — 2026-05-19
 
 ### TtsProvidersDialog Save/Cancel bypass fix

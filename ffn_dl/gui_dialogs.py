@@ -1799,6 +1799,11 @@ class LlmSettingsDialog(wx.Dialog):
             self._prefs.set(model_k, fields.get("model", ""))
             self._prefs.set(api_k, fields.get("api_key", ""))
             self._prefs.set(endpoint_k, fields.get("endpoint", ""))
+        # Background test / install / pull workers gate on _alive
+        # before touching widgets. Save bypasses EVT_CLOSE, so without
+        # this flip a worker that completes after Save would still
+        # try to update the destroyed dialog.
+        self._alive = False
         self.EndModal(wx.ID_OK)
 
     # ── Actions: test / install / download ──────────────────────
