@@ -1189,6 +1189,88 @@ def fetch_until_limit(search_fn, query, *, limit, start_page=1, **kwargs):
     return SearchPage(collected, exhausted=exhausted), page
 
 
+# Bounded multi-page ceiling for the erotica fan-out specifically.
+# Lower than the per-site _FETCH_UNTIL_LIMIT_MAX_PAGES because each
+# erotica iteration fires N parallel HTTP requests (one per active
+# site), so the polite-network budget burns faster. Six pages × ~5
+# active sites × ~8 rows/page is more than enough headroom for the
+# default GUI ``limit=25`` target.
+_FETCH_EROTICA_MAX_PAGES = 6
+
+
+def fetch_erotica_until_limit(
+    search_fn, query, *, limit, start_page=1, **kwargs,
+):
+    """Multi-page driver for the erotica fan-out.
+
+    The plain :func:`fetch_until_limit` helper flattens the wrapper
+    object the GUI relies on (``ErotiCAResults.site_stats`` /
+    ``.exhausted_sites``), so the erotica frame used to bypass it and
+    fetch only one page per click. That capped a tag-only search at
+    ``PER_SITE_LIMIT * num_supported_sites`` rows on first load — fine
+    for a narrow query, but a broad tag like ``feet`` (5 sites, ~8
+    rows each, then series collapse + dedup) ended up presenting
+    ~20 results when 100+ existed.
+
+    This driver preserves the wrapper. Each iteration calls
+    ``search_fn`` with ``page=N``, accumulates the rows, merges the
+    per-site stats, and forwards ``exhausted_sites`` back into
+    ``skip_sites`` so finished archives don't get re-polled. Stops
+    when ``len(accumulated) >= limit``, when every active site is
+    exhausted, or when the page ceiling is hit.
+
+    Returns ``(ErotiCAResults, next_page)`` — the same shape the GUI's
+    Load More expects from :func:`fetch_until_limit`.
+    """
+    from .erotica.search import ErotiCAResults
+
+    accumulated = ErotiCAResults()
+    accumulated.site_stats = {}
+    accumulated.exhausted_sites = set()
+    skip_set: set[str] = set(kwargs.pop("skip_sites", None) or ())
+    page = max(1, int(start_page))
+    end_page = page + _FETCH_EROTICA_MAX_PAGES
+
+    while len(accumulated) < limit and page < end_page:
+        page_results = search_fn(
+            query, page=page, skip_sites=skip_set, **kwargs,
+        )
+        accumulated.extend(page_results)
+
+        stats = getattr(page_results, "site_stats", None) or {}
+        for site, st in stats.items():
+            prev = accumulated.site_stats.get(site)
+            if prev is None:
+                accumulated.site_stats[site] = dict(st)
+            else:
+                # Merge counts; flip ``ok`` off if any page failed;
+                # take the latest ``exhausted`` flag.
+                prev["count"] = (prev.get("count") or 0) + (st.get("count") or 0)
+                if st.get("ok") is False:
+                    prev["ok"] = False
+                    prev["error"] = st.get("error") or prev.get("error")
+                prev["exhausted"] = bool(st.get("exhausted"))
+
+        new_exhausted = getattr(page_results, "exhausted_sites", None) or set()
+        accumulated.exhausted_sites |= new_exhausted
+        skip_set |= new_exhausted
+
+        # If every site that was active is now exhausted, stop early.
+        active = set(stats.keys()) - accumulated.exhausted_sites
+        if not active:
+            page += 1
+            break
+        # If this page didn't add any new rows for any active site, the
+        # remaining sites have nothing useful — bail rather than burn
+        # the rest of the page budget polling for empty pages.
+        if not page_results:
+            page += 1
+            break
+        page += 1
+
+    return accumulated, page
+
+
 def collapse_ao3_series(results):
     """Fold multiple AO3 works that share a series into a single series
     row, but only when 2+ parts of the same series appear in the results.

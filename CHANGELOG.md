@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.4.31 — 2026-05-20
+
+Erotica fan-out used to fetch a single page per click, capping a
+broad tag search like ``feet`` at ``PER_SITE_LIMIT * supported_sites``
+rows (~40 ideal, ~20 after series collapse + dedup). Every other
+site frame uses ``fetch_until_limit`` to walk pages until 25 results
+are collected, but that helper flattens to a plain list and loses
+the ``ErotiCAResults`` wrapper the erotica GUI binds its per-site
+stats panel to — so the erotica path explicitly bypassed it. Net
+effect: the user reported "I searched feet on all sites and only
+got 20-something results, I should get a bunch."
+
+Added ``fetch_erotica_until_limit`` in ``ffn_dl/search.py``. Same
+multi-page contract as ``fetch_until_limit`` but preserves the
+``ErotiCAResults`` wrapper end-to-end, merges per-site stats across
+iterations, and forwards exhausted sites back into ``skip_sites``
+so finished archives don't get re-polled on later pages. Page
+budget capped at ``_FETCH_EROTICA_MAX_PAGES = 6`` — lower than the
+per-site 200-page ceiling because each iteration fires N parallel
+HTTP requests (one per active site), and the polite-network budget
+burns faster.
+
+Wired into ``gui_search.py``'s worker thread so the erotica frame
+uses it instead of the one-page bypass. Tag-only ``feet`` now
+returns 25+ results on first load (or the full available set if
+the supported-sites pool exhausts earlier), with Load More
+continuing from where the auto-walk stopped.
+
+Tests in
+``tests/test_erotica_scrapers.py::test_fetch_erotica_until_limit_accumulates_across_pages``,
+``tests/test_erotica_scrapers.py::test_fetch_erotica_until_limit_stops_when_all_sites_exhausted``,
+``tests/test_erotica_scrapers.py::test_fetch_erotica_until_limit_forwards_exhausted_sites_as_skip``.
+
 ## 2.4.30 — 2026-05-20
 
 Follow-up to the v2.4.29 erotica audit: series-collapse misses

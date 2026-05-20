@@ -512,6 +512,136 @@ def test_search_greatfeet_returns_empty_for_non_feet_tag_only():
         erotica_search._fetch = original_fetch
 
 
+# ── Multi-page erotica fan-out driver ────────────────────────────
+
+
+def test_fetch_erotica_until_limit_accumulates_across_pages():
+    """The erotica fan-out used to fetch one page per click —
+    ``PER_SITE_LIMIT * supported_sites`` was the hard ceiling for a
+    broad tag query. ``fetch_erotica_until_limit`` walks pages until
+    it reaches the requested ``limit`` (or the page budget is hit),
+    preserving the ``ErotiCAResults`` wrapper that carries the
+    per-site stats panel the GUI binds to.
+    """
+    from ffn_dl.erotica.search import ErotiCAResults
+    from ffn_dl.search import fetch_erotica_until_limit
+
+    call_pages = []
+
+    def fake_search(query, *, page, skip_sites=None, **kwargs):
+        call_pages.append(page)
+        out = ErotiCAResults()
+        # Each page yields a fresh batch of 8 rows from 'literotica'.
+        out.extend([
+            {
+                "title": f"Story p{page} #{i}",
+                "url": f"https://www.literotica.com/s/p{page}-n{i}",
+                "site": "literotica",
+            }
+            for i in range(8)
+        ])
+        out.site_stats = {
+            "literotica": {
+                "count": 8, "ok": True, "error": None, "exhausted": False,
+            },
+        }
+        out.exhausted_sites = set()
+        return out
+
+    results, next_page = fetch_erotica_until_limit(
+        fake_search, "feet", limit=25, start_page=1,
+    )
+    # Need ceil(25 / 8) == 4 pages to reach 25.
+    assert call_pages == [1, 2, 3, 4]
+    assert len(results) >= 25
+    # Wrapper survived — site_stats is on the merged object.
+    assert "literotica" in results.site_stats
+    assert results.site_stats["literotica"]["count"] == 32  # 8 * 4
+    assert next_page == 5
+
+
+def test_fetch_erotica_until_limit_stops_when_all_sites_exhausted():
+    """If every active site flips its ``exhausted`` flag on page 1,
+    the driver stops immediately — no point burning more page budget
+    re-polling sites that already said they're done."""
+    from ffn_dl.erotica.search import ErotiCAResults
+    from ffn_dl.search import fetch_erotica_until_limit
+
+    call_pages = []
+
+    def fake_search(query, *, page, skip_sites=None, **kwargs):
+        call_pages.append(page)
+        out = ErotiCAResults()
+        out.extend([
+            {
+                "title": "lone result",
+                "url": f"https://www.literotica.com/s/lone-{page}",
+                "site": "literotica",
+            },
+        ])
+        out.site_stats = {
+            "literotica": {
+                "count": 1, "ok": True, "error": None, "exhausted": True,
+            },
+        }
+        out.exhausted_sites = {"literotica"}
+        return out
+
+    results, next_page = fetch_erotica_until_limit(
+        fake_search, "feet", limit=25, start_page=1,
+    )
+    # Only one page — every site exhausted immediately.
+    assert call_pages == [1]
+    assert len(results) == 1
+    assert "literotica" in results.exhausted_sites
+
+
+def test_fetch_erotica_until_limit_forwards_exhausted_sites_as_skip():
+    """A site exhausted on page N gets added to ``skip_sites`` for
+    page N+1, so the dispatcher doesn't bother re-polling it."""
+    from ffn_dl.erotica.search import ErotiCAResults
+    from ffn_dl.search import fetch_erotica_until_limit
+
+    skip_seen_per_call = []
+
+    def fake_search(query, *, page, skip_sites=None, **kwargs):
+        skip_seen_per_call.append(set(skip_sites or ()))
+        out = ErotiCAResults()
+        if page == 1:
+            # 'aff' is exhausted after page 1; 'literotica' keeps going.
+            out.extend([
+                {"title": "aff p1", "url": "https://hp.adult-fanfiction.org/story.php?no=1", "site": "aff"},
+                {"title": "lit p1", "url": "https://www.literotica.com/s/p1", "site": "literotica"},
+            ])
+            out.site_stats = {
+                "aff": {
+                    "count": 1, "ok": True, "error": None, "exhausted": True,
+                },
+                "literotica": {
+                    "count": 1, "ok": True, "error": None, "exhausted": False,
+                },
+            }
+            out.exhausted_sites = {"aff"}
+        else:
+            # Page 2 should only be polling 'literotica' now.
+            assert "aff" in (skip_sites or set())
+            out.extend([
+                {"title": "lit p2", "url": "https://www.literotica.com/s/p2", "site": "literotica"},
+            ])
+            out.site_stats = {
+                "literotica": {
+                    "count": 1, "ok": True, "error": None, "exhausted": True,
+                },
+            }
+            out.exhausted_sites = {"literotica"}
+        return out
+
+    fetch_erotica_until_limit(fake_search, "feet", limit=25, start_page=1)
+    # Page 1 didn't have anything pre-skipped; page 2 has 'aff' in skip.
+    assert skip_seen_per_call[0] == set()
+    assert "aff" in skip_seen_per_call[1]
+
+
 # ── New scraper URL parsing ───────────────────────────────────────
 
 class TestTGStorytimeParsing:

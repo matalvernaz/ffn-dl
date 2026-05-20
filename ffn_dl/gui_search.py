@@ -685,17 +685,23 @@ class SearchFrame(wx.Frame):
         thread — splitting the two was the round-5 race we keep
         hitting.
         """
-        from .search import fetch_until_limit
+        from .search import fetch_erotica_until_limit, fetch_until_limit
         try:
-            # Erotica fan-out: bypass fetch_until_limit so the
-            # ErotiCAResults object (with its ``site_stats`` attr)
-            # survives instead of being flattened into a plain list.
+            # Erotica fan-out goes through ``fetch_erotica_until_limit``
+            # so the ``ErotiCAResults`` wrapper (carrying ``site_stats``
+            # / ``exhausted_sites``) survives multi-page fetches. The
+            # plain ``fetch_until_limit`` flattens to a list, which is
+            # why the erotica path bypassed it before — but bypassing
+            # also meant only one page got fetched per click, capping
+            # broad tag searches at ``PER_SITE_LIMIT * supported_sites``
+            # rows and surfacing as the "I searched feet and only got
+            # ~20 results" report.
             if self.site_key == "erotica":
-                page_results = self.search_fn(
-                    job.query, page=job.page,
+                page_results, next_page = fetch_erotica_until_limit(
+                    self.search_fn, job.query,
+                    limit=25, start_page=job.page,
                     skip_sites=set(job.exhausted_sites), **job.filters,
                 )
-                next_page = job.page + 1
             else:
                 page_results, next_page = fetch_until_limit(
                     self.search_fn, job.query,
