@@ -410,6 +410,215 @@ class TestCollapseLiteroticaSeries:
         assert len(collapsed) == 1
         assert collapsed[0].get("is_series") is True
 
+    def test_prefix_chapter_title_collapses(self):
+        """Titles where the chapter marker LEADS — ``"Chapter 2. The
+        Package"`` instead of ``"The Package Ch. 02"`` — are now a
+        first-class match. Earlier the suffix-only regex missed the
+        whole class, so two prefix-style chapters of the same work
+        appeared as two unrelated rows."""
+        from ffn_dl.search import collapse_literotica_series
+        results = [
+            {
+                "title": "Chapter 2. The Package",
+                "author": "Beardfaceman",
+                "url": "https://www.literotica.com/s/the-package-ch-02",
+            },
+            {
+                "title": "Chapter 3. The Package",
+                "author": "Beardfaceman",
+                "url": "https://www.literotica.com/s/the-package-ch-03",
+            },
+        ]
+        collapsed = collapse_literotica_series(results)
+        assert len(collapsed) == 1
+        series = collapsed[0]
+        assert series.get("is_series") is True
+        # Base title is the meaningful portion that follows the
+        # marker — without this the row would label itself "" and
+        # the user would see an empty series title.
+        assert series["title"] == "The Package"
+
+    def test_chapter_range_title_still_groups(self):
+        """``"Ch. 16-18"`` covers a range; we still take the first
+        number as the part anchor so range chapters sort alongside
+        single ones in the same series."""
+        from ffn_dl.search import collapse_literotica_series
+        results = [
+            {
+                "title": "Punishment Of Nonagon Ch. 15",
+                "author": "electrify_books",
+                "url": "https://www.literotica.com/s/punishment-of-nonagon-ch-15",
+            },
+            {
+                "title": "Punishment Of Nonagon Ch. 16-18",
+                "author": "electrify_books",
+                "url": "https://www.literotica.com/s/punishment-of-nonagon-ch-16-18",
+            },
+        ]
+        collapsed = collapse_literotica_series(results)
+        assert len(collapsed) == 1
+        assert collapsed[0].get("is_series") is True
+
+
+class TestCollapseLushstoriesSeries:
+    """Lush titles whose slug doesn't follow the canonical ``-N``
+    convention — the ``schoolgirl-chapter-4-...`` / ``new-beginnings-
+    ...-ch-12`` cases that left chapter rows un-collapsed in
+    real-world results. Title-based fallback path."""
+
+    def test_title_based_collapse_groups_chapter_siblings(self):
+        from ffn_dl.search import collapse_lushstories_series
+        results = [
+            {
+                "title": "Schoolgirl Chapter 4 The Guidance Counselor",
+                "author": "",
+                "url": (
+                    "https://www.lushstories.com/stories/femdom/"
+                    "schoolgirl-chapter-4-the-guidance-counselor"
+                ),
+                "site": "lushstories",
+            },
+            {
+                "title": "Schoolgirl Chapter 5 The Headmaster",
+                "author": "",
+                "url": (
+                    "https://www.lushstories.com/stories/femdom/"
+                    "schoolgirl-chapter-5-the-headmaster"
+                ),
+                "site": "lushstories",
+            },
+        ]
+        collapsed = collapse_lushstories_series(results)
+        assert len(collapsed) == 1, (
+            f"expected one merged series row, got: {collapsed}"
+        )
+        assert collapsed[0].get("is_series") is True
+
+    def test_url_slug_path_still_works(self):
+        """The canonical ``slug-2`` / ``slug-3`` shape continues to
+        collapse — title fallback is additive, not a replacement."""
+        from ffn_dl.search import collapse_lushstories_series
+        results = [
+            {
+                "title": "Foo",
+                "url": "https://www.lushstories.com/stories/erotic/foo",
+                "site": "lushstories",
+            },
+            {
+                "title": "Foo 2",
+                "url": "https://www.lushstories.com/stories/erotic/foo-2",
+                "site": "lushstories",
+            },
+            {
+                "title": "Foo 3",
+                "url": "https://www.lushstories.com/stories/erotic/foo-3",
+                "site": "lushstories",
+            },
+        ]
+        collapsed = collapse_lushstories_series(results)
+        # foo + foo-2 + foo-3 collapse to one series via the URL-slug
+        # path (needs 2+ explicit -N siblings before adopting the bare
+        # slug as part 1).
+        assert len(collapsed) == 1
+        assert collapsed[0].get("is_series") is True
+
+
+class TestDedupErotica:
+    """Exact-duplicate rows from per-site search HTML — Literotica's
+    tag listings sometimes render the same work as both a series card
+    and a chapter card, both with ``itemListElement`` markup. Without
+    a dedup pass the merged result set shows the same title twice in
+    a row, as Matt's "Angelica the Latex Mob Wife" report demonstrated."""
+
+    def test_identical_url_rows_dropped(self):
+        from ffn_dl.search import collapse_erotica_series
+        results = [
+            {
+                "title": "Angelica the Latex Mob Wife",
+                "author": "Shield2",
+                "url": "https://www.literotica.com/s/angelica-the-latex-mob-wife",
+                "site": "literotica",
+                "fandom": "BDSM",
+            },
+            {
+                "title": "Angelica the Latex Mob Wife",
+                "author": "Shield2",
+                "url": "https://www.literotica.com/s/angelica-the-latex-mob-wife",
+                "site": "literotica",
+                "fandom": "BDSM",
+            },
+        ]
+        collapsed = collapse_erotica_series(results)
+        assert len(collapsed) == 1
+
+    def test_same_title_author_site_different_url_dropped(self):
+        """Even when URLs differ slightly (a series-card link vs.
+        a chapter-card link both labelled with the same title), the
+        identity key (title + author + site) catches them."""
+        from ffn_dl.search import collapse_erotica_series
+        results = [
+            {
+                "title": "Angelica the Latex Mob Wife",
+                "author": "Shield2",
+                "url": "https://www.literotica.com/s/angelica-the-latex-mob-wife",
+                "site": "literotica",
+            },
+            {
+                "title": "Angelica the Latex Mob Wife",
+                "author": "Shield2",
+                "url": "https://www.literotica.com/series/se/12345",
+                "site": "literotica",
+            },
+        ]
+        collapsed = collapse_erotica_series(results)
+        assert len(collapsed) == 1
+
+    def test_dedup_preserves_distinct_works(self):
+        """Different titles by the same author on the same site stay
+        as distinct rows."""
+        from ffn_dl.search import collapse_erotica_series
+        results = [
+            {
+                "title": "Work A",
+                "author": "shared-author",
+                "url": "https://www.literotica.com/s/work-a",
+                "site": "literotica",
+            },
+            {
+                "title": "Work B",
+                "author": "shared-author",
+                "url": "https://www.literotica.com/s/work-b",
+                "site": "literotica",
+            },
+        ]
+        collapsed = collapse_erotica_series(results)
+        assert len(collapsed) == 2
+
+    def test_dedup_runs_after_collapse(self):
+        """The dedup pass executes downstream of the series collapse,
+        so a collapsed series row's title doesn't clash with the part
+        rows it absorbed — only standalone duplicates are dropped."""
+        from ffn_dl.search import collapse_erotica_series
+        results = [
+            {
+                "title": "Foo Ch. 02",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/foo-ch-02",
+                "site": "literotica",
+            },
+            {
+                "title": "Foo Ch. 03",
+                "author": "Author1",
+                "url": "https://www.literotica.com/s/foo-ch-03",
+                "site": "literotica",
+            },
+        ]
+        collapsed = collapse_erotica_series(results)
+        # Two chapter rows -> one series row. No duplicate-row drop
+        # should have fired between them.
+        assert len(collapsed) == 1
+        assert collapsed[0].get("is_series") is True
+
 
 class TestExpandedRRFilters:
     def test_genres_label_resolves_to_tagsadd(self):

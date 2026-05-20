@@ -1,5 +1,64 @@
 # Changelog
 
+## 2.4.30 — 2026-05-20
+
+Follow-up to the v2.4.29 erotica audit: series-collapse misses
+that left chapter-level rows un-merged in the unified search
+window, plus a dedup pass for the exact-duplicate rows
+Literotica's tag listings occasionally emit.
+
+### Prefix-style chapter titles weren't recognised
+
+``_LIT_CHAPTER_TITLE_RE`` only matched the *suffix* form
+(``"The Package Ch. 02"``). Authors who lead the title with the
+marker (``"Chapter 2. The Package"``, ``"Ch 12 The Visit"``,
+``"Part 4: Aftermath"``) slipped through entirely — the work
+appeared as an isolated chapter row instead of folding into its
+series. Added ``_LIT_CHAPTER_TITLE_PREFIX_RE``;
+``_literotica_series_key`` consults it as a fallback when the
+suffix form doesn't match, and uses the post-marker text as the
+displayed series title so the row reads as ``"The Package"`` rather
+than blank.
+
+### Lush chapters with subtitled slugs weren't collapsed
+
+Lushstories' canonical multi-part convention is ``<slug>-2``,
+``<slug>-3``, …, and the URL-slug-based collapse handles those.
+But many Lush works encode the chapter marker plus a subtitle
+into the slug verbatim — ``schoolgirl-chapter-4-the-guidance-
+counselor``, ``new-beginnings-...-ch-12-2`` — which the bare
+``-N`` suffix regex doesn't recognise. Added
+``_LUSH_CHAPTER_TITLE_RE`` and a title-fallback branch in
+``_lushstories_series_key``: when the URL path fails, the visible
+title is parsed for ``"Ch N"`` / ``"Chapter N"`` / ``"Pt N"`` /
+``"Part N"`` markers and the base title is slugified into the
+group key. Title-keyed groups carry a ``title:`` prefix so they
+can't collide with URL-slug-keyed groups.
+
+### Exact-duplicate rows leaked through the collapse
+
+Literotica's category pages occasionally render the same work as
+both a series card and a chapter card, both carrying
+``itemListElement`` markup. The per-site ``seen`` set inside
+``_parse_literotica_results`` deduplicates on URL, but the two
+cards point at slightly different URLs (story page vs. series
+page) so both survived — surfacing in the merged result set as
+two identical title/author/site rows ("Angelica the Latex Mob
+Wife" reported twice).
+
+Added ``_dedup_erotica_results`` and chained it after the per-site
+collapsers in ``collapse_erotica_series``. Drops rows whose URL
+already appeared, or whose ``(title, author, site)`` identity
+matches an earlier row. Series-row identity is exempted from the
+identity-only check so two genuine series with similar titles
+aren't accidentally folded.
+
+Tests in
+``tests/test_search_filters.py::TestCollapseLiteroticaSeries::test_prefix_chapter_title_collapses``,
+``tests/test_search_filters.py::TestCollapseLiteroticaSeries::test_chapter_range_title_still_groups``,
+``tests/test_search_filters.py::TestCollapseLushstoriesSeries::*``,
+``tests/test_search_filters.py::TestDedupErotica::*``.
+
 ## 2.4.29 — 2026-05-20
 
 Erotica search + library auto-sort audit (Claude + Gemini Pro +

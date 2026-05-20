@@ -1276,6 +1276,18 @@ _LIT_CHAPTER_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Prefix-style chapter titles where the marker leads instead of
+# trails \u2014 e.g. ``"Chapter 2. The Package"``, ``"Ch 12 The Visit"``,
+# ``"Part 4: Aftermath"``. The base story title is whatever follows
+# the marker (and trailing punctuation), so the group key uses that
+# as the base instead of an empty string. Without this alternation,
+# any work whose author followed the leading-chapter convention slips
+# past ``collapse_literotica_series`` entirely.
+_LIT_CHAPTER_TITLE_PREFIX_RE = re.compile(
+    r"^(?:Ch|Chapter|Pt|Part)\.?\s*(\d+)(?:\s*[-:.,]?\s*)(.+?)\s*$",
+    re.IGNORECASE,
+)
+
 
 def _literotica_series_key(result):
     """Return (base_slug, part_number, base_title) if the result looks like
@@ -1285,11 +1297,16 @@ def _literotica_series_key(result):
     trusted on the URL alone. The bare `-N` URL suffix is ambiguous
     (it also matches year-tagged annual stories like
     `/s/new-years-eve-2024`) so it's only accepted when the *title*
-    also carries a numeric chapter marker.
+    also carries a numeric chapter marker — either a trailing
+    ``" Ch. NN"`` suffix or a leading ``"Chapter NN"`` prefix.
     """
     url = result.get("url") or ""
     title = result.get("title") or ""
-    title_has_marker = bool(_LIT_CHAPTER_TITLE_RE.match(title))
+    suffix_match = _LIT_CHAPTER_TITLE_RE.match(title)
+    prefix_match = (
+        _LIT_CHAPTER_TITLE_PREFIX_RE.match(title) if not suffix_match else None
+    )
+    title_has_marker = bool(suffix_match or prefix_match)
     strict_patterns = (
         (_LIT_CHAPTER_URL_RE, True),
         (_LIT_COMPACT_P_URL_RE, True),
@@ -1306,8 +1323,16 @@ def _literotica_series_key(result):
             part = int(m.group(2))
         except ValueError:
             continue
-        tm = _LIT_CHAPTER_TITLE_RE.match(title)
-        base_title = tm.group(1).strip() if tm else title
+        if suffix_match:
+            base_title = suffix_match.group(1).strip()
+        elif prefix_match:
+            # Prefix form: ``"Chapter 2. The Package"`` → base title is
+            # ``"The Package"``. Keeps the displayed series row anchored
+            # on the meaningful part of the title rather than the empty
+            # head before the marker.
+            base_title = prefix_match.group(2).strip().rstrip(":,. ")
+        else:
+            base_title = title
         return base_slug, part, base_title
     return None
 
@@ -1417,10 +1442,32 @@ _LUSH_SLUG_URL_RE = re.compile(
 # (``new-years-eve-2024``) into a phantom 2024-part series.
 _LUSH_PART_SUFFIX_RE = re.compile(r"^(.+?)-(\d{1,2})$")
 
+# Lushstories title-based chapter detection — fallback for the many
+# cases where the URL slug doesn't follow the ``-N`` convention
+# (titles encoded into the slug verbatim: ``schoolgirl-chapter-4-the-
+# guidance-counselor``, ``new-beginnings-...-ch-12-2``). Captures the
+# part number plus the base title (before the marker) so siblings
+# with different trailing subtitles still group together.
+_LUSH_CHAPTER_TITLE_RE = re.compile(
+    r"^(?P<base>.+?)\s+(?:Ch|Chapter|Pt|Part)\.?\s*(?P<part>\d{1,3})\b",
+    re.IGNORECASE,
+)
+
 
 def _lushstories_series_key(result):
-    """Return ``(base_slug, part)`` for a Lushstories ``-N`` part URL,
-    else None. ``part`` is the integer suffix (≥ 2)."""
+    """Return ``(base_slug, part)`` for a Lushstories chapter row, or
+    ``None``. ``part`` is the integer chapter / part number (≥ 2).
+
+    Two detection paths:
+
+    * URL-slug ``-N`` suffix — covers the canonical Lush convention
+      ("part 2 of <slug>" lives at ``<slug>-2``).
+    * Title text — covers titles whose part marker leaks into the
+      slug verbatim ("Schoolgirl Chapter 4 The Guidance Counselor"
+      ends up at ``schoolgirl-chapter-4-the-guidance-counselor``,
+      not ``schoolgirl-4``). The URL slug rule misses these and the
+      collapse would silently leave each chapter as its own row.
+    """
     url = result.get("url") or ""
     if "lushstories.com" not in url.lower():
         return None
@@ -1428,14 +1475,34 @@ def _lushstories_series_key(result):
     if not m:
         return None
     slug = m.group(1).lower()
+    # URL-slug path: bare ``-N`` suffix on the slug.
     part_m = _LUSH_PART_SUFFIX_RE.match(slug)
-    if not part_m:
-        return None
-    base = part_m.group(1)
-    part = int(part_m.group(2))
-    if part < 2:
-        return None
-    return base, part
+    if part_m:
+        base = part_m.group(1)
+        part = int(part_m.group(2))
+        if part >= 2:
+            return base, part
+    # Title path: parse a leading or embedded "Ch N" / "Chapter N" /
+    # "Pt N" / "Part N" marker out of the visible title. Group key is
+    # built from the base title (slugified) rather than the URL slug
+    # — siblings under this rule share a title prefix, not a URL
+    # prefix.
+    title = (result.get("title") or "").strip()
+    if title:
+        tm = _LUSH_CHAPTER_TITLE_RE.match(title)
+        if tm:
+            try:
+                part = int(tm.group("part"))
+            except ValueError:
+                return None
+            if part >= 2:
+                base = re.sub(
+                    r"[^a-z0-9]+", "-",
+                    tm.group("base").strip().lower(),
+                ).strip("-")
+                if base:
+                    return f"title:{base}", part
+    return None
 
 
 def _lushstories_bare_slug(result):
@@ -1540,9 +1607,47 @@ def collapse_erotica_series(results):
     chaining them is order-independent: a Literotica row never reaches
     the Lushstories matcher and vice versa. Adding a new site means
     appending one more call here.
+
+    A final dedup pass drops exact-duplicate rows the source-site
+    HTML occasionally emits (Literotica's tag listings sometimes
+    render the same work as both a series card and a chapter card,
+    both carrying ``itemListElement`` markup — they survive the
+    per-site ``seen`` set inside :func:`_parse_literotica_results`
+    because the URLs differ, but their visible title + author + site
+    identity is identical and showing them twice is noise).
     """
     out = collapse_literotica_series(results)
     out = collapse_lushstories_series(out)
+    out = _dedup_erotica_results(out)
+    return out
+
+
+def _dedup_erotica_results(results):
+    """Drop rows whose ``(url)`` or ``(title, author, site)`` identity
+    repeats a row earlier in the list. The earlier row wins because
+    upstream ordering is stable (alphabetic by site, then title) and
+    callers expect that order to survive the collapse pipeline."""
+    seen_urls: set[str] = set()
+    seen_keys: set[tuple[str, str, str]] = set()
+    out = []
+    for r in results:
+        url = (r.get("url") or "").strip()
+        if url and url in seen_urls:
+            continue
+        title = (r.get("title") or "").strip().lower()
+        author = (r.get("author") or "").strip().lower()
+        site = (r.get("site") or "").strip().lower()
+        # Series rows are aggregates; their constituent parts are
+        # already hidden by the collapse pass, so a "second" series
+        # row with the same display title is a real second series
+        # not a stale duplicate. Skip the identity dedup for those.
+        if not r.get("is_series") and title and (title, author, site) in seen_keys:
+            continue
+        if url:
+            seen_urls.add(url)
+        if title:
+            seen_keys.add((title, author, site))
+        out.append(r)
     return out
 
 
