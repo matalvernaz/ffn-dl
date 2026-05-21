@@ -1227,6 +1227,7 @@ def fetch_erotica_until_limit(
     accumulated = ErotiCAResults()
     accumulated.site_stats = {}
     accumulated.exhausted_sites = set()
+    accumulated.total_sites = set()
     skip_set: set[str] = set(kwargs.pop("skip_sites", None) or ())
     page = max(1, int(start_page))
     end_page = page + _FETCH_EROTICA_MAX_PAGES
@@ -1236,6 +1237,16 @@ def fetch_erotica_until_limit(
             query, page=page, skip_sites=skip_set, **kwargs,
         )
         accumulated.extend(page_results)
+        # Capture the canonical eligible-sites set from the first page
+        # that surfaces one. Subsequent pages invoke ``search_erotica``
+        # with a larger ``skip_sites``, so their ``total_sites`` shrinks
+        # — only the first page reports the original cohort, which the
+        # GUI needs as a stable denominator for its "all exhausted?"
+        # check on Load More.
+        if not accumulated.total_sites:
+            page_total = getattr(page_results, "total_sites", None)
+            if page_total:
+                accumulated.total_sites = set(page_total)
 
         stats = getattr(page_results, "site_stats", None) or {}
         for site, st in stats.items():

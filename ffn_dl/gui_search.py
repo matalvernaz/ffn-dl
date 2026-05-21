@@ -257,6 +257,13 @@ class SearchFrame(wx.Frame):
         # full tail so Load More skips them instead of polling for the
         # same rows over and over. Empty for every per-site frame.
         self._exhausted_sites: set = set()
+        # Canonical "every site this search was eligible to query"
+        # snapshot, set on the initial search and preserved across Load
+        # More. Used as the denominator for the all-exhausted check —
+        # ``len(self._exhausted_sites) >= len(new_site_stats)`` is wrong
+        # because Load More's ``site_stats`` only includes still-active
+        # sites (skip_sites pruned the exhausted ones away).
+        self._initial_eligible_sites: set = set()
         self.last_filters = {}
         # True once fetch_until_limit (per-site) or the erotica fan-out
         # signals it has no more upstream pages — drives Load More
@@ -450,12 +457,14 @@ class SearchFrame(wx.Frame):
             wx.EVT_BUTTON, lambda e: self._on_load_more(),
         )
         self.load_more_btn.Disable()
-        if self.site_key == "erotica":
-            # Erotica frame uses the picker for multi-download; the
-            # fan-out already batches across sites, so paginating one
-            # more page rarely buys much over just ticking the rows
-            # you care about in the picker.
-            self.load_more_btn.Hide()
+        # Load More IS visible for the erotica frame as of round-7:
+        # the initial fan-out already drives several pages internally
+        # via fetch_erotica_until_limit, but a broad tag like ``feet``
+        # or ``femdom`` across 5+ sites can easily have more than the
+        # initial 25-row batch. Without the button users had no escape
+        # hatch when they wanted to see beyond what the first fan-out
+        # surfaced. The button stays disabled until the fan-out reports
+        # at least one still-non-exhausted site in the eligible cohort.
         dl_row.Add(self.load_more_btn, 0)
         sizer.Add(dl_row, 0, wx.ALL, pad)
 
@@ -653,6 +662,7 @@ class SearchFrame(wx.Frame):
         self._raw_results = []
         self.next_page = 1
         self._exhausted_sites = set()
+        self._initial_eligible_sites = set()
         self._upstream_exhausted = False
         self.last_query = query
         self.last_filters = filters
@@ -810,8 +820,15 @@ class SearchFrame(wx.Frame):
         # we flatten to a plain list for the rest of the pipeline.
         new_site_stats = getattr(new_results, "site_stats", None)
         new_exhausted = getattr(new_results, "exhausted_sites", None)
+        new_total_sites = getattr(new_results, "total_sites", None)
         if new_exhausted:
             self._exhausted_sites = set(self._exhausted_sites) | set(new_exhausted)
+        # Capture the canonical eligible-sites cohort on the initial
+        # search. Load More calls run a shrunken fan-out (skip_sites
+        # excludes already-exhausted archives), so the eligible set has
+        # to come from the first call's ``total_sites`` snapshot.
+        if not append and new_total_sites:
+            self._initial_eligible_sites = set(new_total_sites)
 
         # Snapshot ticked URLs before DeleteAllItems blows them away —
         # Load More then rebuilds the list and we re-tick any row whose
@@ -880,13 +897,20 @@ class SearchFrame(wx.Frame):
         # Track upstream exhaustion across page boundaries so Load More
         # can stay disabled once we know there's nothing left to fetch.
         # Per-site fetch_until_limit ships SearchPage(exhausted=...);
-        # the erotica fan-out signals exhaustion by listing every site
-        # in `_exhausted_sites`.
+        # the erotica fan-out signals exhaustion when every site in the
+        # canonical eligible cohort has been marked exhausted. The
+        # earlier ``len(_exhausted_sites) >= len(new_site_stats)`` test
+        # was broken across pages — Load More's ``site_stats`` only
+        # contains the sites that were still active when the worker
+        # ran (i.e. *not* the exhausted ones), so the comparison would
+        # spuriously claim "all done" the moment the active set was
+        # smaller than the exhausted count, even with rows still to
+        # find.
         page_exhausted = bool(getattr(new_results, "exhausted", False))
         all_erotica_exhausted = (
             self.site_key == "erotica"
-            and new_site_stats is not None
-            and len(self._exhausted_sites) >= len(new_site_stats)
+            and bool(self._initial_eligible_sites)
+            and self._exhausted_sites >= self._initial_eligible_sites
         )
         if page_exhausted or all_erotica_exhausted:
             self._upstream_exhausted = True

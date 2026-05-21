@@ -411,8 +411,20 @@ def test_search_erotica_tag_only_drops_tag_ignoring_sites(monkeypatch):
     """Tag-only fan-out must drop sites that ignore the tag —
     otherwise they fall back to recent/popular browses and flood the
     merged result set with unrelated rows. The 'all sites + bdsm
-    returns junk' bug."""
+    returns junk' bug.
+
+    Sites that fold ``tags`` into a full-text search payload
+    (:data:`_TAG_TEXT_FOLD_SITES`) or pass the tag slug through
+    verbatim into their URL (:data:`_TAG_SLUG_PASSTHROUGH_SITES`)
+    ARE invoked even when the tag isn't pre-mapped — they handle
+    arbitrary tags sensibly, so dropping them would discard real
+    discovery surface. The forbidden set still catches sites whose
+    scrapers genuinely ignore the ``tags`` kwarg entirely.
+    """
     from ffn_dl.erotica import search as erotica_search
+    from ffn_dl.erotica.search import (
+        _TAG_TEXT_FOLD_SITES, _TAG_SLUG_PASSTHROUGH_SITES,
+    )
 
     called: set = set()
 
@@ -427,14 +439,17 @@ def test_search_erotica_tag_only_drops_tag_ignoring_sites(monkeypatch):
         {site: stub_for(site) for site in erotica_search._SITE_FNS},
     )
 
-    # Tag-only "bdsm" search across "all" sites. Only sites that
-    # cover bdsm in TAG_SITE_COVERAGE should be invoked.
     search_erotica("", tags=["bdsm"])
 
-    expected_callers = set(TAG_SITE_COVERAGE["bdsm"])
+    expected_callers = (
+        set(TAG_SITE_COVERAGE["bdsm"])
+        | _TAG_TEXT_FOLD_SITES
+        | _TAG_SLUG_PASSTHROUGH_SITES
+    )
     # AFF / Fictionmania / TGStorytime / Chyoa / DarkWanderer /
-    # GreatFeet aren't in the bdsm coverage list and must NOT be
-    # called for a tag-only bdsm search.
+    # GreatFeet ignore the ``tags`` kwarg entirely and must NOT be
+    # called for a tag-only bdsm search — their scrapers would
+    # silently fall back to a default browse.
     forbidden = {
         "aff", "fictionmania", "tgstorytime", "chyoa",
         "darkwanderer", "greatfeet",
@@ -463,6 +478,122 @@ def test_search_erotica_skips_filter_when_site_explicitly_picked(monkeypatch):
     # should still fire its search.
     search_erotica("", sites=["aff"], tags=["bdsm"])
     assert "aff" in called
+
+
+def test_search_erotica_promotes_known_tag_query(monkeypatch):
+    """Round-7 audit (v2.4.33): when the user types a bare word that is
+    a known erotica tag (e.g. ``feet``) and didn't pick anything in the
+    tag multi-picker, ``search_erotica`` should promote it to a tag
+    search. Tag-capable sites then use their native tag URL instead of
+    falling back to title filtering, which is dramatically better for
+    broad discovery queries."""
+    from ffn_dl.erotica import search as erotica_search
+
+    seen_tags: dict = {}
+
+    def stub_for(site_slug: str):
+        def fn(query, **kwargs):
+            seen_tags[site_slug] = list(kwargs.get("tags") or [])
+            return []
+        return fn
+
+    monkeypatch.setattr(
+        erotica_search, "_SITE_FNS",
+        {site: stub_for(site) for site in erotica_search._SITE_FNS},
+    )
+
+    # User typed "feet" as the query; no tags picked. Expect promotion.
+    search_erotica("feet")
+
+    # GreatFeet is a tag-handler for feet and should now see the tag.
+    assert seen_tags.get("greatfeet") == ["feet"]
+    # Other tag-capable sites also see the promoted tag.
+    assert seen_tags.get("literotica") == ["feet"]
+    # AFF / Fictionmania / DarkWanderer / TGStorytime / Chyoa aren't in
+    # TAG_SITE_COVERAGE["feet"] nor in text-fold/passthrough — they
+    # were dropped from the fan-out.
+    assert "fictionmania" not in seen_tags
+    assert "tgstorytime" not in seen_tags
+
+
+def test_search_erotica_does_not_promote_multiword_query(monkeypatch):
+    """Promotion is exact-match only — multi-word queries that contain
+    a tag word aren't promoted. Otherwise a query like ``"feet first"``
+    would be silently rewritten to the ``feet`` tag, which is far too
+    aggressive."""
+    from ffn_dl.erotica import search as erotica_search
+
+    seen_tags: dict = {}
+
+    def stub_for(site_slug: str):
+        def fn(query, **kwargs):
+            seen_tags[site_slug] = list(kwargs.get("tags") or [])
+            return []
+        return fn
+
+    monkeypatch.setattr(
+        erotica_search, "_SITE_FNS",
+        {site: stub_for(site) for site in erotica_search._SITE_FNS},
+    )
+
+    search_erotica("feet first")
+
+    # No tag was promoted; the fan-out should run with empty tags.
+    for site, tags in seen_tags.items():
+        assert tags == [], f"site {site} unexpectedly saw promoted tags {tags}"
+
+
+def test_search_erotica_total_sites_captures_eligible_cohort(monkeypatch):
+    """``ErotiCAResults.total_sites`` should hold the canonical
+    eligible-sites set so Load More can use it as a stable denominator
+    for its ``all exhausted?`` check. Without this, subsequent pages
+    invoke ``search_erotica`` with a shrunken active set (skip_sites
+    pruned the exhausted ones) and the GUI's len-based comparison
+    spuriously claims end-of-results."""
+    from ffn_dl.erotica import search as erotica_search
+
+    def stub(query, **kwargs):
+        return []
+
+    monkeypatch.setattr(
+        erotica_search, "_SITE_FNS",
+        {site: stub for site in erotica_search._SITE_FNS},
+    )
+
+    # bdsm covers four pre-mapped sites + sexstories (text-fold) +
+    # lushstories (passthrough; already in pre-map). Expect total_sites
+    # to include all six even though every stub returns an empty list.
+    result = search_erotica("", tags=["bdsm"])
+    assert "literotica" in result.total_sites
+    assert "sexstories" in result.total_sites
+    assert "fictionmania" not in result.total_sites
+    # Snapshot must be a SET not a list/None so callers can do set ops.
+    assert isinstance(result.total_sites, set)
+
+
+def test_search_aff_returns_empty_when_no_fandom():
+    """Round-7 audit (v2.4.32): AFF used to default ``fandom=\"hp\"``
+    silently, leaking Harry Potter results into every empty-fandom
+    erotica search. Now an empty fandom yields ``[]`` so the site is
+    obviously skipped in the per-site stats panel."""
+    from ffn_dl.erotica.search import search_aff
+    import ffn_dl.erotica.search as erotica_search
+
+    fetched: list = []
+    original_fetch = erotica_search._fetch
+    try:
+        def remembering_fetch(url):
+            fetched.append(url)
+            return ""
+        erotica_search._fetch = remembering_fetch
+
+        assert search_aff("") == []
+        assert search_aff("any query", fandom="") == []
+        # No fetch should have been issued — the function bails before
+        # touching the network.
+        assert fetched == []
+    finally:
+        erotica_search._fetch = original_fetch
 
 
 def test_search_nifty_returns_empty_for_unsupported_tag_only():

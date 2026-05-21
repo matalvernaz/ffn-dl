@@ -1039,28 +1039,65 @@ def tag_sites_for(tag: str) -> list[str]:
     return list(TAG_SITE_COVERAGE.get(tag.lower(), []))
 
 
-def _site_supports_all_tags(site: str, tags: list[str]) -> bool:
-    """True when ``site`` is listed in :data:`TAG_SITE_COVERAGE` for
-    every tag in ``tags``.
+# Sites that fold ``tags`` into their full-text search payload rather
+# than having a native tag URL. ``search_sexstories`` extends its query
+# terms with ``tags[:3]`` so any tag — including niche ones outside
+# :data:`TAG_SITE_COVERAGE` — narrows the result set in a sensible way.
+# Listing the site here lets the dispatcher include it for arbitrary
+# tags instead of dropping it because our pre-computed coverage map
+# happens to omit the tag.
+_TAG_TEXT_FOLD_SITES: set[str] = {"sexstories"}
 
-    Used by :func:`search_erotica` to skip sites that would otherwise
-    silently fall back to a default browse (recent / popular /
-    homepage) when handed a tag they don't actually filter on — the
-    "tag-only search returns noise" complaint. Empty ``tags`` is a
-    free pass: a non-tag search has no per-site capability to check.
+# Sites whose tag-URL shape passes the slug through verbatim — Lush
+# builds ``/stories/<slug>/`` URLs from whatever the first tag is, and
+# the resulting page usually has stories on it whether the slug is in
+# our pre-map or not. (Nifty is NOT here despite the surface
+# similarity: its ``/nifty/<cat>/`` shape only resolves for the four
+# fixed sexuality categories in :data:`_NIFTY_TAG_CATEGORIES`; other
+# slugs 404 silently and would be dead weight in the fan-out.)
+_TAG_SLUG_PASSTHROUGH_SITES: set[str] = {"lushstories"}
 
-    Tags that aren't in :data:`TAG_SITE_COVERAGE` at all (niche
-    free-text entries the user typed) treat *every* registered site
-    as a non-match — the safer default than letting an arbitrary tag
-    bypass the filter.
+
+def _site_handles_any_tag(site: str, tags: list[str]) -> bool:
+    """True when ``site`` can do *something useful* with at least one
+    tag in ``tags``.
+
+    Replaces the older ``_site_supports_all_tags`` AND-semantics gate.
+    Reasons for the relaxation (per round-7 multi-AI audit):
+
+    * Most per-site scrapers only consume ``tags[0]``, so the AND gate
+      claimed semantics the scrapers never actually delivered.
+    * Sites that fold tags into a full-text query
+      (:data:`_TAG_TEXT_FOLD_SITES`) handle arbitrary tags sensibly but
+      weren't in :data:`TAG_SITE_COVERAGE` for every tag the user might
+      pick — they were silently dropped from the fan-out.
+    * Slug-passthrough sites (:data:`_TAG_SLUG_PASSTHROUGH_SITES`)
+      construct a tag URL from any string and usually return results.
+
+    The gate still skips sites whose scrapers genuinely ignore the
+    ``tags`` kwarg (Fictionmania, TGStorytime, DarkWanderer, etc.) so
+    a tag-only ``feet`` search doesn't include those archives' default
+    browses as noise.
     """
     if not tags:
         return True
     for t in tags:
-        covers = TAG_SITE_COVERAGE.get(t.strip().lower(), [])
-        if site not in covers:
-            return False
-    return True
+        tag_lower = t.strip().lower()
+        if not tag_lower:
+            continue
+        if site in TAG_SITE_COVERAGE.get(tag_lower, []):
+            return True
+        if site in _TAG_TEXT_FOLD_SITES:
+            return True
+        if site in _TAG_SLUG_PASSTHROUGH_SITES:
+            return True
+    return False
+
+
+# Public alias for older callers / tests. Both names point at the new
+# OR-semantics helper above; the older name simply describes the
+# round-1 contract that no longer matches reality.
+_site_supports_all_tags = _site_handles_any_tag
 
 
 def _normalise_sites(sites, sites_choice) -> Optional[list]:
@@ -1108,15 +1145,26 @@ class ErotiCAResults(list):
     dict off an attribute. Callers that don't care keep seeing a list
     of dicts; the erotica SearchFrame peeks at ``.site_stats`` for
     the summary panel and ``.exhausted_sites`` for load-more gating.
+
+    ``total_sites`` is the set of every site the initial search
+    considered eligible — the canonical denominator for "have we
+    exhausted everything?". The GUI used to compute this from
+    ``len(site_stats)``, but on Load More the new call's
+    ``site_stats`` only includes the currently-active sites (the ones
+    not yet exhausted via ``skip_sites``), so the comparison would
+    falsely trigger end-of-results. Tracking the canonical set on the
+    result object keeps the GUI's exhaustion check honest.
     """
 
     site_stats: dict
     exhausted_sites: set
+    total_sites: set
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.site_stats = {}
         self.exhausted_sites = set()
+        self.total_sites = set()
 
 
 def search_erotica(
@@ -1161,6 +1209,24 @@ def search_erotica(
     resolved_sites = _normalise_sites(sites, sites_choice)
     tag_list = _normalise_tags(tags_picked if tags_picked is not None else tags)
     skip_set = set(skip_sites or ())
+
+    # Query-to-tag promotion: when the user typed a word that *is* a
+    # known erotica tag and didn't pick any tags from the multi-picker,
+    # promote the query to a tag search. This is exact-match only —
+    # "feet" gets promoted; "feet fetish" does not — so the rule never
+    # surprises a user who genuinely wanted a free-text search. Tag-
+    # capable sites then use their native tag URL instead of falling
+    # back to title filtering, which is dramatically better for broad
+    # discovery searches like ``feet`` or ``femdom``.
+    if not tag_list and query:
+        normalised_query = query.strip().lower()
+        if normalised_query in EROTICA_TAG_VOCABULARY:
+            tag_list = [normalised_query]
+            logger.info(
+                "erotica: promoting bare query %r to tag-search",
+                normalised_query,
+            )
+
     if resolved_sites is None:
         active = [s for s in _SITE_FNS if s not in skip_set]
     else:
@@ -1170,13 +1236,16 @@ def search_erotica(
 
     # Tag-capability filter: drop sites that don't meaningfully cover
     # the requested tag(s) from this fan-out. Without this, sites
-    # whose adapter ignores the ``tags`` kwarg (AFF / Fictionmania /
-    # TGStorytime / Chyoa / DarkWanderer / GreatFeet — they accept
-    # ``**_: object``) silently fall back to a default browse and
-    # flood the result set with unrelated rows. Honour
-    # :data:`TAG_SITE_COVERAGE` as the single source of truth so the
-    # GUI tag picker's ``[N sites]`` annotation and the dispatcher's
-    # filter never disagree.
+    # whose adapter ignores the ``tags`` kwarg (Fictionmania /
+    # TGStorytime / DarkWanderer / GreatFeet for non-feet tags — they
+    # accept ``**_: object``) silently fall back to a default browse
+    # and flood the result set with unrelated rows.
+    #
+    # Semantics: OR across selected tags. A site stays in the fan-out
+    # if it handles *any* selected tag — most per-site scrapers only
+    # consume ``tags[0]`` anyway, so claiming AND semantics would
+    # misrepresent what the scrapers actually deliver. See
+    # :func:`_site_handles_any_tag` for the per-tag handling lookup.
     #
     # Only applied when the caller didn't restrict ``sites`` to a
     # specific slug — a user who explicitly picks one site has
@@ -1184,10 +1253,17 @@ def search_erotica(
     if tag_list and resolved_sites is None:
         active = [
             s for s in active
-            if _site_supports_all_tags(s, tag_list)
+            if _site_handles_any_tag(s, tag_list)
         ]
+    # ``total_sites`` is captured BEFORE any further filtering so the
+    # GUI's "all sites exhausted?" check has a stable denominator on
+    # Load More — the per-call ``site_stats`` keys shrink as exhausted
+    # sites are removed from subsequent fan-outs.
+    initial_eligible = set(active)
     if not active:
-        return ErotiCAResults()
+        empty = ErotiCAResults()
+        empty.total_sites = initial_eligible
+        return empty
 
     min_words_val = "" if min_words in ("", "any") else min_words
 
@@ -1245,9 +1321,11 @@ def search_erotica(
         new_merged = ErotiCAResults(filtered)
         new_merged.site_stats = site_stats
         new_merged.exhausted_sites = merged.exhausted_sites
+        new_merged.total_sites = initial_eligible
         merged = new_merged
     else:
         merged.site_stats = site_stats
+        merged.total_sites = initial_eligible
 
     # Stable ordering: by site first (alphabetical) then by title — so
     # users can scan results grouped by archive without the run order
