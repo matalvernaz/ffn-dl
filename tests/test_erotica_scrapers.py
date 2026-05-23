@@ -973,6 +973,73 @@ def test_tag_coverage_only_references_registered_sites():
 # ── Per-site tag translation layer ────────────────────────────────
 
 
+def test_refining_tags_for_matts_interests_are_in_vocabulary():
+    """The 2.4.43 expansion added narrower discovery axes under each
+    of Matt's three core interests. Pin them so a future vocab churn
+    can't quietly drop one — the whole point of having
+    ``foot-worship`` separate from ``feet`` is to let users
+    discriminate between them.
+    """
+    foot_refinements = {"foot-worship", "footjob", "trampling"}
+    femdom_refinements = {
+        "pegging", "tease-and-denial", "cfnm", "strap-on",
+        "female-led", "body-worship",
+    }
+    cunnilingus_refinements = {"face-sitting", "queening"}
+    for tag in foot_refinements | femdom_refinements | cunnilingus_refinements:
+        assert tag in EROTICA_TAG_VOCABULARY, f"missing refining tag {tag!r}"
+        # Each must also have at least two sites covering it —
+        # one-site coverage doesn't justify a vocab slot.
+        assert tag_site_count(tag) >= 2, (
+            f"{tag!r} only carries {tag_site_count(tag)} sites — likely a "
+            "wiring bug; refining tags should hit multiple archives"
+        )
+
+
+def test_wattpad_in_erotica_fan_out():
+    """Wattpad must be a fan-out site after 2.4.43, with a real
+    adapter wired in. Verifying via the registry rather than calling
+    live so the test stays offline."""
+    from ffn_dl.erotica.search import _SITE_FNS, EROTICA_SITE_LABELS
+    assert "wattpad" in _SITE_FNS, "wattpad not registered in fan-out"
+    assert callable(_SITE_FNS["wattpad"])
+    assert EROTICA_SITE_LABELS.get("wattpad") == "Wattpad"
+
+
+def test_wattpad_adapter_parses_json_ld_listitems(monkeypatch):
+    """The Wattpad tag-page parser keys off JSON-LD ``ListItem``
+    blocks embedded in the page (more durable than the rotating
+    Tailwind class names Wattpad uses for the rendered cards).
+    Verify a representative ListItem shape extracts cleanly without
+    going to the network.
+    """
+    from ffn_dl.erotica import search as erotica_search
+    from ffn_dl.erotica.search import search_wattpad_erotica
+
+    fake_html = """
+    <html><body>
+    <script type="application/ld+json">{"@context":"http://schema.org",
+    "@type":"ListItem","name":"Test Story",
+    "description":"A test story summary.",
+    "url":"https://www.wattpad.com/story/123456-test-story","position":1}
+    </script>
+    <script>{"@context":"http://schema.org","@type":"ListItem",
+    "name":"Another Story","description":"second summary",
+    "url":"https://www.wattpad.com/story/789012-another-story","position":2}
+    </script>
+    </body></html>
+    """
+
+    def fake_fetch(url):
+        return fake_html
+    monkeypatch.setattr(erotica_search, "_fetch", fake_fetch)
+    results = search_wattpad_erotica("", tags=["femdom"])
+    assert len(results) == 2
+    assert results[0]["title"] == "Test Story"
+    assert results[0]["url"].endswith("/story/123456-test-story")
+    assert results[0]["site"] == "wattpad"
+
+
 def test_translate_tag_resolves_matts_interests():
     """The three interests that drove the 2.4.42 search rework
     (foot fetish, femdom, cunnilingus) must translate to a real

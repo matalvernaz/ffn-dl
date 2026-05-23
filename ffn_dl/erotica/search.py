@@ -55,6 +55,7 @@ EROTICA_SITE_SLUGS: list[str] = [
     "all",
     "literotica",
     "ao3",
+    "wattpad",
     "aff",
     "storiesonline",
     "nifty",
@@ -75,6 +76,7 @@ EROTICA_SITE_LABELS: dict[str, str] = {
     "all": "All erotica sites",
     "literotica": "Literotica",
     "ao3": "AO3 (Explicit)",
+    "wattpad": "Wattpad",
     "aff": "Adult-FanFiction.org",
     "storiesonline": "StoriesOnline",
     "nifty": "Nifty",
@@ -90,15 +92,20 @@ EROTICA_SITE_LABELS: dict[str, str] = {
 }
 
 EROTICA_TAG_VOCABULARY: list[str] = [
-    # The cross-site common denominator — every tag here appears on
-    # at least three of the eight registered sites, so picking one is
-    # a predictable way to narrow results. Site-specific kinks can
-    # still be entered as free-text in the tag box.
+    # The unified discovery axis. Most entries are general kinks
+    # carried by ≥3 sites; a smaller refining-tag set targets
+    # specific sub-interests (foot-worship under feet, pegging /
+    # tease-and-denial / cfnm / strap-on / female-led / body-worship
+    # under femdom, queening under cunnilingus) so users with a
+    # narrower interest aren't forced to wade through the umbrella
+    # tag's broader catalogue.
     "anal",
     "bdsm",
+    "body-worship",
     "bondage",
     "bukkake",
     "celebrity",
+    "cfnm",
     "cheating",
     "chastity",
     "cuckold",
@@ -106,9 +113,12 @@ EROTICA_TAG_VOCABULARY: list[str] = [
     "dominance-submission",
     "exhibitionism",
     "face-sitting",
+    "female-led",
     "femdom",
     "feet",
     "fisting",
+    "foot-worship",
+    "footjob",
     "futanari",
     "gangbang",
     "gay",
@@ -126,15 +136,20 @@ EROTICA_TAG_VOCABULARY: list[str] = [
     "non-consent",
     "oral",
     "orgy",
+    "pegging",
     "polyamory",
     "pregnancy",
     "public-sex",
+    "queening",
     "roleplay",
     "rough",
     "spanking",
+    "strap-on",
     "swinging",
+    "tease-and-denial",
     "teen",
     "threesome",
+    "trampling",
     "transgender",
     "voyeur",
     "watersports",
@@ -251,10 +266,22 @@ def _matches_query(query: str, *fields: str) -> bool:
 
 _LITEROTICA_TAG_SLUGS: dict[str, str] = {
     # tags.literotica.com is permissive — most vocab tags are valid
-    # slugs verbatim. Only override when Literotica uses a different
+    # slugs verbatim and fall through ``_translate_tag`` via the
+    # passthrough path. Only override when Literotica uses a different
     # shape, or when we want to swap to the higher-volume sibling tag.
-    # Verified: ``feet`` returns ~100 cards vs ``foot-fetish`` ~34, so
-    # we keep the broader slug.
+    # Verified May 2026: ``feet`` returns ~100 cards vs ``foot-fetish``
+    # ~34, so we keep the broader slug. All refining tags below
+    # confirmed alive with story cards on the live site.
+    "body-worship": "body-worship",
+    "cfnm": "cfnm",
+    "female-led": "female-led-relationship",
+    "foot-worship": "foot-worship",
+    "footjob": "footjob",
+    "pegging": "pegging",
+    "queening": "queening",
+    "strap-on": "strap-on",
+    "tease-and-denial": "tease-and-denial",
+    "trampling": "trampling",
 }
 
 _LUSH_TAG_SLUGS: dict[str, str] = {
@@ -272,6 +299,8 @@ _LUSH_TAG_SLUGS: dict[str, str] = {
     "face-sitting": "facesitting",  # Lush uses no hyphen
     "femdom": "femdom",
     "feet": "fetish",           # no feet-specific category
+    "foot-worship": "fetish",   # subset of fetish; no narrower slug
+    "footjob": "fetish",        # subset of fetish; no narrower slug
     "gangbang": "group-sex",
     "gay": "gay-male",
     "group-sex": "group-sex",
@@ -285,11 +314,14 @@ _LUSH_TAG_SLUGS: dict[str, str] = {
     "mind-control": "mind-control",
     "non-consent": "reluctance",
     "oral": "oral-sex",
+    "pegging": "strap-on-sex",  # closest Lush bucket for pegging
     "polyamory": "wife-lovers",
     "public-sex": "exhibitionism",
+    "queening": "facesitting",  # queening is a face-sitting variant
     "roleplay": "fantasy-sci-fi",
     "rough": "hardcore",
     "spanking": "spanking",
+    "strap-on": "strap-on-sex",
     "swinging": "swingers",
     "teen": "teen",
     "threesome": "threesomes",
@@ -303,7 +335,9 @@ _SOL_TAG_SLUGS: dict[str, str] = {
     # slugs (``femaledom``) where most sites use a hyphen, and serves
     # the all-tags index for any unrecognised slug — so passing
     # ``feet`` verbatim returned a 50 KB tag-index page that parsed as
-    # zero stories.
+    # zero stories. Refining tags that SOL doesn't carry (foot-worship,
+    # tease-and-denial, cfnm, etc.) are absent here; ``_translate_tag``
+    # returns ``None`` and the dispatcher skips SOL for those tags.
     "anal": "anal",
     "bdsm": "bdsm",
     "bondage": "bondage",
@@ -316,6 +350,8 @@ _SOL_TAG_SLUGS: dict[str, str] = {
     "dominance-submission": "domsub",
     "exhibitionism": "exhibitionism",
     "feet": "foot-fetish",
+    "foot-worship": "foot-fetish",   # SOL only has the umbrella slug
+    "footjob": "foot-fetish",
     "femdom": "femaledom",
     "fisting": "fisting",
     "gangbang": "gangbang",
@@ -334,9 +370,11 @@ _SOL_TAG_SLUGS: dict[str, str] = {
     "non-consent": "rape",
     "oral": "oral-sex",
     "orgy": "orgy",
+    "pegging": "pegging",            # verified live
     "polyamory": "polygamy",
     "pregnancy": "pregnancy",
     "public-sex": "exhibitionism",
+    "queening": "oral-sex",          # closest SOL bucket
     "roleplay": "fan-fiction",
     "rough": "rough",
     "spanking": "spanking",
@@ -352,11 +390,15 @@ _AO3_TAG_SLUGS: dict[str, str] = {
     # AO3 freeform tags are Title-Case with spaces. These are the
     # canonical AO3 tag names — passing them via the ``freeform``
     # filter on :func:`search_ao3` lands on the canonical tag page.
+    # All refining tags verified live May 2026 — each /tags/<Name>
+    # page returns its canonical 20-work batch.
     "anal": "Anal Sex",
     "bdsm": "BDSM",
+    "body-worship": "Body Worship",
     "bondage": "Bondage",
     "bukkake": "Bukkake",
     "celebrity": "Celebrity Crush",
+    "cfnm": "CFNM",
     "cheating": "Infidelity",
     "chastity": "Chastity Device",
     "cuckold": "Cuckolding",
@@ -364,9 +406,12 @@ _AO3_TAG_SLUGS: dict[str, str] = {
     "dominance-submission": "Dom/sub",
     "exhibitionism": "Exhibitionism",
     "face-sitting": "Face-Sitting",
+    "female-led": "Female-Led Relationship",
     "femdom": "Femdom",
     "feet": "Foot Fetish",
     "fisting": "Fisting",
+    "foot-worship": "Foot Worship",
+    "footjob": "Footjob",
     "futanari": "Futanari",
     "gangbang": "Gangbang",
     "gay": "M/M",
@@ -384,18 +429,67 @@ _AO3_TAG_SLUGS: dict[str, str] = {
     "non-consent": "Non-Consensual",
     "oral": "Oral Sex",
     "orgy": "Orgy",
+    "pegging": "Pegging",
     "polyamory": "Polyamory",
     "pregnancy": "Pregnancy",
     "public-sex": "Public Sex",
+    "queening": "Queening",
     "roleplay": "Roleplay",
     "rough": "Rough Sex",
     "spanking": "Spanking",
+    "strap-on": "Strap-On Use",
     "swinging": "Swinging",
+    "tease-and-denial": "Tease and Denial",
     "teen": "Underage",
     "threesome": "Threesome",
+    "trampling": "Trampling",
     "transgender": "Trans Character",
     "voyeur": "Voyeurism",
     "watersports": "Watersports",
+}
+
+_WATTPAD_TAG_SLUGS: dict[str, str] = {
+    # Wattpad's ``/stories/<slug>`` tag pages — verified live against
+    # the JSON-LD ``ListItem`` embed. Wattpad's catalogue skews
+    # romance/female-led; coverage is strong on the femdom side
+    # (femdom=19, pegging=10, cfnm=4, female-led=5) but absent on the
+    # cunnilingus side (every cunnilingus-adjacent slug 404s). Only
+    # tags with verified non-empty pages are mapped here so the
+    # adapter doesn't waste a fan-out slot on dead URLs.
+    "bdsm": "bdsm",
+    "body-worship": "body-worship",
+    "bondage": "bondage",
+    "celebrity": "celebrity",
+    "cfnm": "cfnm",
+    "cheating": "cheating",
+    "chastity": "chastity",
+    "cuckold": "cuckold",
+    "dominance-submission": "dom-sub",
+    "exhibitionism": "exhibitionism",
+    "female-led": "female-led",
+    "femdom": "femdom",
+    "feet": "foot-fetish",
+    "foot-worship": "foot-worship",
+    "gangbang": "gangbang",
+    "gay": "gay",
+    "harem": "harem",
+    "humiliation": "humiliation",
+    "hypnosis": "hypnosis",
+    "interracial": "interracial",
+    "lesbian": "lesbian",
+    "masturbation": "masturbation",
+    "mature": "mature",
+    "non-consent": "noncon",
+    "pegging": "pegging",
+    "polyamory": "polyamory",
+    "spanking": "spanking",
+    "strap-on": "strap-on",
+    "tease-and-denial": "tease",
+    "teen": "teen",
+    "threesome": "threesome",
+    "trampling": "trampling",
+    "transgender": "trans",
+    "voyeur": "voyeur",
 }
 
 _BDSMLIB_TAG_CODES: dict[str, str] = {
@@ -429,6 +523,7 @@ _SITE_TAG_SLUGS: dict[str, dict[str, str]] = {
     "lushstories": _LUSH_TAG_SLUGS,
     "storiesonline": _SOL_TAG_SLUGS,
     "ao3": _AO3_TAG_SLUGS,
+    "wattpad": _WATTPAD_TAG_SLUGS,
     "bdsmlibrary": _BDSMLIB_TAG_CODES,
     # ``mcstories`` is wired in below where ``_MCS_TAG_CODES`` is
     # defined (it predates the translation layer).
@@ -1266,6 +1361,91 @@ def search_ao3_erotica(query: str, *, page: int = 1,
     return results[:PER_SITE_LIMIT]
 
 
+def search_wattpad_erotica(query: str, *, page: int = 1,
+                           tags: Optional[list] = None,
+                           **_: object) -> list[dict]:
+    """Wattpad adapter for the erotica fan-out — uses Wattpad's
+    ``/stories/<tag>`` HTML tag page rather than the v4 API search
+    that :func:`ffn_dl.search.search_wattpad` hits, because the tag
+    page returns a directly-targeted JSON-LD ``ItemList`` block whose
+    relevance is far tighter than an API free-text query for the same
+    tag string.
+
+    Translates vocab tags via :data:`_WATTPAD_TAG_SLUGS` (Wattpad
+    uses ``foot-fetish`` / ``noncon`` / ``trans`` / ``dom-sub`` —
+    slug shapes that don't match our vocab). Tags not in the table
+    return ``[]`` rather than landing on Wattpad's stub 404 page.
+
+    Wattpad's tag pages embed up to ~20 ``ListItem`` JSON-LD entries
+    per page; the adapter parses those and caps at
+    :data:`PER_SITE_LIMIT`. No pagination — multi-page browses would
+    require a different (auth-gated) Wattpad endpoint.
+    """
+    vocab_tags = [t.strip().lower() for t in (tags or []) if t and t.strip()]
+    slug = None
+    if vocab_tags:
+        translated = [_translate_tag("wattpad", t) for t in vocab_tags]
+        translated = [t for t in translated if t]
+        if not translated:
+            return []
+        slug = translated[0]
+
+    if not slug and not query:
+        # No query and no resolvable tag — nothing actionable.
+        return []
+    if not slug:
+        # Free-text fallback uses Wattpad's slug-shape on the query
+        # (lowercase, hyphens). Wattpad serves a search-results page
+        # for arbitrary text inputs, but the tag-page format is what
+        # this adapter parses; for a bare query, fold it into the
+        # slug and let Wattpad decide whether to redirect or 404.
+        slug = re.sub(r"[^a-z0-9]+", "-", query.lower()).strip("-")
+        if not slug:
+            return []
+
+    url = f"https://www.wattpad.com/stories/{slug}"
+    html = _fetch(url)
+    if not html:
+        return []
+    out: list[dict] = []
+    seen = set()
+    # JSON-LD ``ListItem`` blocks embed name + description + url for
+    # each story in the tag listing. Parsing the JSON segment is more
+    # durable than scraping rotating CSS classes. Tolerate optional
+    # whitespace between fields — Wattpad's live response is
+    # contiguous, but pretty-printed copies (and our test fixtures)
+    # break across lines.
+    list_item_re = re.compile(
+        r'"@type":\s*"ListItem"\s*,'
+        r'\s*"name":\s*"([^"]+)"\s*,'
+        r'\s*"description":\s*"([^"]*)"\s*,'
+        r'\s*"url":\s*"(https://www\.wattpad\.com/story/(\d+)-[^"]+)"',
+        re.DOTALL,
+    )
+    for m in list_item_re.finditer(html):
+        title = m.group(1).strip()
+        summary = m.group(2).strip().replace("\\n", " ").replace("\\\"", '"')
+        story_url = m.group(3)
+        sid = m.group(4)
+        if sid in seen or not title:
+            continue
+        if not _matches_query(query, title, summary):
+            continue
+        seen.add(sid)
+        out.append({
+            "title": title,
+            "author": "",
+            "url": story_url,
+            "summary": summary[:500],
+            "words": "?", "chapters": "?",
+            "rating": "M", "fandom": "", "status": "",
+            "site": "wattpad",
+        })
+        if len(out) >= PER_SITE_LIMIT:
+            break
+    return out
+
+
 def search_bdsmlibrary(query: str, *, page: int = 1,
                        tags: Optional[list] = None,
                        **_: object) -> list[dict]:
@@ -1365,6 +1545,7 @@ def search_bdsmlibrary(query: str, *, page: int = 1,
 _SITE_FNS: dict[str, Callable[..., list[dict]]] = {
     "literotica": search_literotica_wrapped,
     "ao3": search_ao3_erotica,
+    "wattpad": search_wattpad_erotica,
     "aff": search_aff,
     "storiesonline": search_sol,
     "nifty": search_nifty,
@@ -1396,14 +1577,16 @@ TAG_SITE_COVERAGE: dict[str, list[str]] = {
     ],
     "bdsm": [
         "literotica", "lushstories", "storiesonline", "mcstories", "ao3",
-        "bdsmlibrary",
+        "wattpad", "bdsmlibrary",
     ],
+    "body-worship": ["literotica", "ao3", "wattpad"],
     "bondage": [
         "literotica", "lushstories", "storiesonline", "mcstories", "ao3",
         "bdsmlibrary",
     ],
     "bukkake": ["literotica", "sexstories", "ao3"],
-    "celebrity": ["literotica", "storiesonline", "sexstories", "ao3"],
+    "celebrity": ["literotica", "storiesonline", "sexstories", "ao3", "wattpad"],
+    "cfnm": ["literotica", "ao3", "wattpad"],
     "cheating": [
         "literotica", "lushstories", "storiesonline", "sexstories",
         "darkwanderer", "ao3",
@@ -1425,11 +1608,19 @@ TAG_SITE_COVERAGE: dict[str, list[str]] = {
     "face-sitting": ["literotica", "lushstories", "ao3"],
     "femdom": [
         "literotica", "lushstories", "storiesonline", "mcstories", "ao3",
-        "bdsmlibrary",
+        "wattpad", "bdsmlibrary",
     ],
     "feet": [
         "literotica", "lushstories", "storiesonline", "greatfeet", "ao3",
-        "bdsmlibrary",
+        "wattpad", "bdsmlibrary",
+    ],
+    "female-led": ["literotica", "ao3", "wattpad"],
+    "foot-worship": [
+        "literotica", "lushstories", "storiesonline", "greatfeet", "ao3",
+        "wattpad",
+    ],
+    "footjob": [
+        "literotica", "lushstories", "storiesonline", "greatfeet", "ao3",
     ],
     "fisting": [
         "literotica", "storiesonline", "sexstories", "ao3", "bdsmlibrary",
@@ -1479,24 +1670,33 @@ TAG_SITE_COVERAGE: dict[str, list[str]] = {
     ],
     "oral": ["literotica", "lushstories", "sexstories", "ao3"],
     "orgy": ["literotica", "storiesonline", "sexstories", "ao3"],
+    "pegging": [
+        "literotica", "lushstories", "storiesonline", "ao3", "wattpad",
+    ],
     "polyamory": ["literotica", "storiesonline", "lushstories", "ao3"],
     "pregnancy": ["literotica", "storiesonline", "sexstories", "ao3"],
     "public-sex": ["literotica", "lushstories", "storiesonline", "ao3"],
+    "queening": ["literotica", "lushstories", "storiesonline", "ao3"],
     "roleplay": ["literotica", "lushstories", "chyoa", "ao3"],
     "rough": ["literotica", "lushstories", "sexstories", "ao3"],
     "spanking": [
-        "literotica", "lushstories", "storiesonline", "ao3", "bdsmlibrary",
+        "literotica", "lushstories", "storiesonline", "ao3", "wattpad",
+        "bdsmlibrary",
     ],
+    "strap-on": ["literotica", "lushstories", "ao3", "wattpad"],
     "swinging": [
         "literotica", "lushstories", "storiesonline", "darkwanderer", "ao3",
     ],
+    "tease-and-denial": ["literotica", "ao3", "wattpad"],
     "teen": [
         "literotica", "lushstories", "storiesonline", "sexstories", "ao3",
         "bdsmlibrary",
     ],
     "threesome": [
         "literotica", "lushstories", "storiesonline", "sexstories", "ao3",
+        "wattpad",
     ],
+    "trampling": ["literotica", "greatfeet", "ao3", "wattpad"],
     "transgender": [
         "literotica", "fictionmania", "tgstorytime", "storiesonline",
         "lushstories", "ao3",

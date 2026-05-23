@@ -56,6 +56,14 @@ class BDSMLibraryScraper(BaseScraper):
 
     site_name = "bdsmlibrary"
 
+    # BDSM Library sends ``Content-Type: text/html; charset=UTF-8``
+    # but the actual bytes are Windows-1252 (the RTF-to-HTML converter
+    # the site uses preserves the original 8-bit smart quotes / dashes
+    # without re-encoding). Trusting the header decodes apostrophes
+    # and curly quotes as U+FFFD; pinning cp1252 keeps the prose
+    # readable on disk.
+    response_encoding = "cp1252"
+
     @staticmethod
     def parse_story_id(url_or_id):
         text = str(url_or_id).strip()
@@ -191,21 +199,30 @@ class BDSMLibraryScraper(BaseScraper):
         }
 
     @staticmethod
-    def _parse_chapter_html(soup) -> str:
+    def _parse_chapter_html(page_html: str) -> str:
         """Extract the prose from a chapter.php page.
 
         BDSM Library wraps the body in ``<div class="storyblock">``,
         which itself contains an embedded mini-document
         (``<html><head>...</head><body>...</body></html>``) — leftovers
-        from the site's RTF-to-HTML converter. We pull the inner
-        ``<body>`` if present, otherwise fall back to the storyblock's
-        decoded contents."""
+        from the site's RTF-to-HTML converter.
+
+        ``lxml`` strips nested ``<html>``/``<body>`` tags during parse,
+        which would leave us with the DOCTYPE / ``<title>`` / ``<style>``
+        chrome inlined into the EPUB. We re-parse the page with
+        ``html.parser`` (which preserves the nested document) so the
+        inner ``<body>`` is reachable, then pull its decoded contents.
+        Takes the raw HTML string rather than a pre-built soup so the
+        caller can't accidentally pass us an lxml-flattened tree.
+        """
+        soup = BeautifulSoup(page_html, "html.parser")
         block = soup.find("div", class_="storyblock")
         if block is None:
             raise ValueError("Could not find BDSM Library storyblock.")
         inner = block.find("body")
         if inner is not None:
             return inner.decode_contents()
+        # Fallback if the converter ever stops wrapping in <html><body>.
         return block.decode_contents()
 
     def get_chapter_count(self, url_or_id):
@@ -276,8 +293,7 @@ class BDSMLibraryScraper(BaseScraper):
             url = self._chapter_url(story_id, int(cid))
             logger.debug("Fetching BDSM Library chapter %d/%d", chap_num, num_chapters)
             page = self._fetch(url)
-            ch_soup = BeautifulSoup(page, "lxml")
-            html = self._parse_chapter_html(ch_soup)
+            html = self._parse_chapter_html(page)
 
             ch = Chapter(number=chap_num, title=ch_title, html=html)
             self._save_chapter_cache(story_id, ch)

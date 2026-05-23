@@ -127,6 +127,16 @@ class BaseScraper:
 
     site_name = "unknown"
 
+    response_encoding: Optional[str] = None
+    """Force ``resp.text`` decoding to this codec instead of trusting
+    the server's Content-Type header. Set on subclasses where the
+    server lies about its charset — BDSM Library, for instance, sends
+    ``Content-Type: text/html; charset=UTF-8`` but the actual bytes
+    are Windows-1252, so smart quotes / em-dashes decode as U+FFFD
+    replacements. Default ``None`` keeps the existing
+    "trust the header" behaviour for every other site.
+    """
+
     def __init_subclass__(cls, **kwargs):
         """Wrap each subclass's ``download`` method so every call runs
         inside a fresh :func:`~ffn_dl.logging_utils.correlation_context`.
@@ -528,6 +538,13 @@ class BaseScraper:
                 continue
 
             if resp.status_code == 200:
+                # Force a non-default decoding codec on sites whose
+                # Content-Type header lies (see ``response_encoding``
+                # on :class:`BaseScraper`). Has to fire before any
+                # ``resp.text`` access — curl_cffi memoises the
+                # decoded text once requested.
+                if self.response_encoding:
+                    resp.encoding = self.response_encoding
                 # ``_check_for_blocks`` raises if Cloudflare served the
                 # "Just a moment…" challenge as HTTP 200 (the standard
                 # CF interstitial shape). The retry loop is the right

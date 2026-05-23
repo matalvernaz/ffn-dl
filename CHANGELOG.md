@@ -1,5 +1,74 @@
 # Changelog
 
+## 2.4.43 — 2026-05-22
+
+Erotica search depth pass — push the three user-named core
+interests (foot fetish, femdom, cunnilingus) as wide and as precise
+as the underlying archives can support.
+
+**Refining-tag vocabulary.** Previously the vocabulary forced
+users to pick one of three umbrella tags per interest. Added ten
+narrower discovery axes verified live against every site that
+carries them:
+
+* Foot family: ``foot-worship``, ``footjob``, ``trampling``
+* Femdom family: ``pegging``, ``tease-and-denial``, ``cfnm``,
+  ``strap-on``, ``female-led``, ``body-worship``
+* Cunnilingus family: ``queening``
+
+Each tag has site-specific translations in the relevant slug
+tables — e.g. ``pegging`` resolves to ``pegging`` on Literotica /
+SOL / AO3 / Wattpad and ``strap-on-sex`` on Lush (closest
+container); ``foot-worship`` resolves to the umbrella ``foot-fetish``
+on SOL where the site has no narrower slug rather than the broader
+``fetish`` (would over-include).
+
+**Wattpad folded into the erotica fan-out.** New
+``search_wattpad_erotica`` adapter scrapes ``/stories/<tag>/`` HTML
+pages via the JSON-LD ``ListItem`` embed — more durable than
+scraping Wattpad's rotating Tailwind class names. Wattpad's
+catalogue skews romance / female-led; coverage is strong on the
+femdom side (femdom=19, mistress=20, pegging=10, cfnm=4,
+female-led=5, body-worship=1) but it has no cunnilingus tag (every
+oral-adjacent slug 404s). Mapped to a 35-entry slug table
+covering everywhere Wattpad has real story volume.
+
+**BDSM Library download path verified end-to-end.** The 2.4.42
+scraper compiled and parsed chapter listings but two latent bugs
+broke actual reads:
+
+* ``_parse_chapter_html`` used the lxml soup the caller built; lxml
+  strips nested ``<html>/<body>`` tags during parse, so the inner
+  body content was unreachable and the entire DOCTYPE / ``<title>``
+  / ``<style>`` chrome leaked into the EPUB. Switched the parser to
+  take the raw page HTML and re-parse with ``html.parser`` which
+  preserves the nested document structure.
+* BDSM Library sends ``Content-Type: text/html; charset=UTF-8`` but
+  the actual bytes are Windows-1252 (the site's RTF-to-HTML
+  converter preserves 8-bit smart quotes / dashes without
+  re-encoding). Trusting the header decoded apostrophes and curly
+  quotes as U+FFFD. New ``response_encoding`` class attribute on
+  ``BaseScraper`` lets a subclass force a codec; BDSM Library pins
+  ``cp1252``.
+
+Net effect on the three core interests after both rounds (2.4.42
+landed the foundation, 2.4.43 the depth):
+
+* ``feet`` umbrella: 55 results across 8/8 fan-out sites.
+* ``foot-worship`` (new refining tag): 39 across 6/7.
+* ``footjob`` (new): 38 across 5/6.
+* ``trampling`` (new): 28 across 4/5.
+* ``femdom`` umbrella: 59 across 8/8.
+* ``pegging`` (new): 42 across 6/6.
+* ``tease-and-denial`` (new): 27 across 4/4.
+* ``cfnm`` (new): 28 across 4/4.
+* ``strap-on`` (new): 35 across 5/5.
+* ``female-led`` (new): 22 across 4/4.
+* ``body-worship`` (new): 17 across 3/4.
+* ``cunnilingus`` umbrella: 37 across 5/5.
+* ``face-sitting``: 32 across 4/4.
+* ``queening`` (new): 37 across 5/5.
+
 ## 2.4.42 — 2026-05-22
 
 Erotica search overhaul — five compounding bugs and a missing
