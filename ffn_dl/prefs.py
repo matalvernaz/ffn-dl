@@ -63,6 +63,10 @@ KEY_LLM_STRIP_NOTES = "llm_strip_notes"
 # scrape. Off by default — FicHub's copy can lag the latest chapters, so
 # it's opt-in and ignored for updates. See ffn_dl/fichub.py.
 KEY_FICHUB = "fichub"
+# webnovel.com logged-in session cookie (a raw "Cookie:" header string).
+# Optional — lets the user pull chapters their account has unlocked.
+# Plain-text in the config file, same as the LLM/Pushover/Discord secrets.
+KEY_WEBNOVEL_COOKIE = "webnovel_cookie"
 KEY_SPEECH_RATE = "speech_rate"
 KEY_ATTRIBUTION_BACKEND = "attribution_backend"
 KEY_ATTRIBUTION_MODEL_SIZE = "attribution_model_size"
@@ -159,6 +163,7 @@ DEFAULTS = {
     KEY_STRIP_NOTES: False,
     KEY_LLM_STRIP_NOTES: False,
     KEY_FICHUB: False,
+    KEY_WEBNOVEL_COOKIE: "",
     KEY_SPEECH_RATE: "0",
     KEY_ATTRIBUTION_BACKEND: "builtin",
     KEY_ATTRIBUTION_MODEL_SIZE: "",

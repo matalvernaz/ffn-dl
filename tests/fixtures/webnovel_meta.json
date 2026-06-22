@@ -1,0 +1,17 @@
+{
+  "code": 0,
+  "msg": "Success",
+  "data": {
+    "bookInfo": {
+      "bookId": "7931338406001705",
+      "bookName": "Release That Witch",
+      "authorName": "Second Eye",
+      "authorItems": [{"name": "Second Eye"}],
+      "actionStatus": 50,
+      "totalChapterNum": 4,
+      "categoryName": "Fantasy",
+      "languageName": "en",
+      "description": "Cheng Yan travels through time, only to end up becoming an honorable prince in the Middle Ages of Europe."
+    }
+  }
+}

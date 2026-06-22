@@ -1,0 +1,18 @@
+{
+  "code": 0,
+  "msg": "Success",
+  "data": {
+    "chapterInfo": {
+      "chapterId": "21417334739406411",
+      "chapterName": "A Family Letter",
+      "isAuth": 0,
+      "vipStatus": 2,
+      "price": 7,
+      "isRichFormat": 0,
+      "contents": [
+        {"content": "The firewood burned, but Gerald Wimbledon felt little heat. \r\n"},
+        {"content": "This is only a teaser preview of a locked chapter. \r\n"}
+      ]
+    }
+  }
+}

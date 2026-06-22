@@ -667,6 +667,17 @@ def _build_scraper(url: str, args: argparse.Namespace):
         depth = getattr(args, "chyoa_max_depth", None)
         if depth is not None:
             kwargs["max_depth"] = depth
+    # webnovel.com optional auth: a logged-in session cookie unlocks the
+    # chapters the user has purchased. Guard by class like the cases above
+    # so the kwarg never reaches a scraper that doesn't accept it.
+    from .webnovel import WebnovelScraper
+    if scraper_cls is WebnovelScraper:
+        cookie = (
+            getattr(args, "webnovel_cookie", None)
+            or os.environ.get("FFN_DL_WEBNOVEL_COOKIE", "")
+        )
+        if cookie:
+            kwargs["session_cookie"] = cookie
     return scraper_cls(**kwargs)
 
 
@@ -3576,6 +3587,21 @@ def _build_parser() -> argparse.ArgumentParser:
             "chapter only, 1 = entry + immediate children, etc. "
             "Omit for an unbounded walk. Skipped branches are logged "
             "by URL so nothing is silently hidden."
+        ),
+    )
+    parser.add_argument(
+        "--webnovel-cookie",
+        type=str,
+        default=None,
+        metavar="COOKIE",
+        help=(
+            "For webnovel.com, a logged-in browser 'Cookie:' header "
+            "string (e.g. 'a=1; b=2'). Lets you download chapters your "
+            "account has personally unlocked; without it only free "
+            "chapters are fetched and locked ones become placeholders. "
+            "Reads $FFN_DL_WEBNOVEL_COOKIE if the flag is omitted. Note: "
+            "downloading purchased chapters is for personal backup and is "
+            "against webnovel's terms; coins are never spent."
         ),
     )
     parser.add_argument(

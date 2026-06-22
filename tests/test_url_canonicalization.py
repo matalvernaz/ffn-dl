@@ -54,6 +54,17 @@ from ffn_dl.sites import canonical_url
             "https://www.wattpad.com/42-some-title",
             "https://www.wattpad.com/story/42",
         ),
+        # Webnovel: /book/<id> and /book/<slug>_<id> both collapse.
+        (
+            "https://www.webnovel.com/book/release-that-witch_7931338406001705",
+            "https://www.webnovel.com/book/7931338406001705",
+        ),
+        # Scheme-optional + www-optional: a bare host pasted without a
+        # scheme still canonicalises (regression guard for the loosened
+        # URL detection).
+        ("fanfiction.net/s/12345", "https://www.fanfiction.net/s/12345"),
+        ("www.royalroad.com/fiction/42", "https://www.royalroad.com/fiction/42"),
+        ("webnovel.com/book/7931338406001705", "https://www.webnovel.com/book/7931338406001705"),
     ],
 )
 def test_canonical_url_collapses_known_variants(raw, expected):

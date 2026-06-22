@@ -30,9 +30,14 @@ from .mediaminer import MediaMinerScraper
 from .royalroad import RoyalRoadScraper
 from .scraper import BaseScraper, FFNScraper
 from .wattpad import WattpadScraper
+from .webnovel import WebnovelScraper
 
 
-_STORY_URL_PATTERNS: list[tuple[type[BaseScraper], re.Pattern[str]]] = [
+# Story-URL patterns are declared with an explicit ``https?://`` scheme for
+# readability, then loosened (see ``_loosen`` below) so a bare host works
+# too — users paste ``fanfiction.net/s/123`` (no scheme, no www) as often
+# as the full URL.
+_STORY_URL_PATTERNS_STRICT: list[tuple[type[BaseScraper], re.Pattern[str]]] = [
     (FicWadScraper, re.compile(r"https?://(?:www\.)?ficwad\.com/story/\d+", re.I)),
     (
         AO3Scraper,
@@ -140,10 +145,55 @@ _STORY_URL_PATTERNS: list[tuple[type[BaseScraper], re.Pattern[str]]] = [
         ),
     ),
     (
+        WebnovelScraper,
+        re.compile(
+            r"https?://(?:www\.|m\.)?webnovel\.com/book/(?:[^/?#]*_)?\d+",
+            re.I,
+        ),
+    ),
+    (
         FFNScraper,
         re.compile(r"https?://(?:www\.)?fanfiction\.net/s/\d+", re.I),
     ),
 ]
+
+
+# Left-boundary guard + optional scheme. The guard (negative lookbehind on
+# word chars, ``@``, ``.``, ``-``) stops a host fragment inside a larger
+# token — ``notfanfiction.net`` — from matching ``fanfiction.net``, which
+# the mandatory scheme used to prevent before it became optional.
+_URL_PREFIX = r"(?<![\w@.\-])(?:https?://)?"
+
+
+def _loosen(pattern: re.Pattern[str]) -> re.Pattern[str]:
+    """Return ``pattern`` with its leading ``https?://`` made optional and
+    the left-boundary guard prepended, so bare-host URLs match too."""
+    src = pattern.pattern
+    if src.startswith("https?://"):
+        src = src[len("https?://"):]
+    return re.compile(_URL_PREFIX + src, pattern.flags)
+
+
+_STORY_URL_PATTERNS: list[tuple[type[BaseScraper], re.Pattern[str]]] = [
+    (scraper_cls, _loosen(pattern))
+    for scraper_cls, pattern in _STORY_URL_PATTERNS_STRICT
+]
+
+_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://", re.I)
+
+
+def _ensure_scheme(url: str) -> str:
+    """Prepend ``https://`` to a bare-host URL (``fanfiction.net/s/1``) so
+    :func:`urlsplit` can populate the hostname. URLs that already carry a
+    scheme, and bare ids / free text with no dotted host, pass through
+    unchanged — preserving the FFN-fallback for bare numeric ids.
+    """
+    s = (url or "").strip()
+    if not s or _SCHEME_RE.match(s):
+        return s
+    head = s.split("/", 1)[0]
+    return f"https://{s}" if "." in head else s
+
 
 # Hostname fragments for sites that don't require the full /s/N etc.
 # path — used when the caller already knows they have a story URL and
@@ -157,6 +207,7 @@ _HOSTNAME_TO_SCRAPER: list[tuple[str, type[BaseScraper]]] = [
     ("mediaminer.org", MediaMinerScraper),
     ("literotica.com", LiteroticaScraper),
     ("wattpad.com", WattpadScraper),
+    ("webnovel.com", WebnovelScraper),
     ("adult-fanfiction.org", AFFScraper),
     ("storiesonline.net", StoriesOnlineScraper),
     ("nifty.org", NiftyScraper),
@@ -181,6 +232,7 @@ ALL_SCRAPERS: list[type[BaseScraper]] = [
     MediaMinerScraper,
     LiteroticaScraper,
     WattpadScraper,
+    WebnovelScraper,
     AFFScraper,
     StoriesOnlineScraper,
     NiftyScraper,
@@ -231,7 +283,7 @@ def detect_scraper(url: str) -> type[BaseScraper]:
     hostnames — FFN has historically been the default "just give me a
     number" behaviour.
     """
-    text = str(url)
+    text = _ensure_scheme(str(url))
     host = ""
     try:
         parsed = urlsplit(text)
@@ -265,7 +317,7 @@ def extract_story_url(text: str) -> Optional[str]:
     for _, pattern in _STORY_URL_PATTERNS:
         match = pattern.search(text)
         if match:
-            return match.group(0)
+            return _ensure_scheme(match.group(0))
     return None
 
 
@@ -334,6 +386,11 @@ _CANONICAL_RULES: list[tuple[str, str, re.Pattern[str], str]] = [
         # Wattpad accepts /story/<id> and /<id>-<slug>; collapse both to
         # the /story/<id> form that the scraper uses as its canonical.
         re.compile(r"^/(?:story/)?(\d+)"), "/story/{}",
+    ),
+    (
+        "webnovel.com", "www.webnovel.com",
+        # /book/<id> or /book/<slug>_<id>; collapse both to bare /book/<id>.
+        re.compile(r"^/book/(?:[^/?#]*_)?(\d+)"), "/book/{}",
     ),
     (
         "storiesonline.net", "storiesonline.net",
@@ -405,7 +462,7 @@ def canonical_url(url: str) -> str:
     """
     if not url:
         return ""
-    raw = url.strip()
+    raw = _ensure_scheme(url.strip())
     parts = urlsplit(raw)
     netloc = parts.netloc.lower()
     path = parts.path

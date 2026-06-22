@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.4.49 — 2026-06-22
+
+**New download source: webnovel.com, and scheme-optional URL detection**
+
+Adds a native scraper for webnovel.com (Cloudary's English web-novel
+platform). It reads the chapter list from the `/catalog` page and pulls
+each chapter through webnovel's `getContent` JSON API, priming the
+`_csrfToken` the API requires. Free chapters download logged-out; locked
+(coins / fast-pass) chapters become a clearly-labelled placeholder rather
+than a silent gap — `chapterInfo.isAuth` is the authoritative readable
+flag, since a locked chapter still returns a teaser.
+
+* Optional authentication for chapters you've personally unlocked: pass a
+  logged-in browser `Cookie:` header via `--webnovel-cookie`, the
+  `FFN_DL_WEBNOVEL_COOKIE` env var, or the new Webnovel.com cookie field
+  in the GUI. Free + authenticated share one code path — the cookie only
+  changes which chapters come back `isAuth=1`. Coins are never spent.
+* URL detection no longer needs a scheme or `www.`: `fanfiction.net/s/123`
+  is recognised the same as the full `https://www.` form, across all
+  sites. A left-boundary guard keeps a host fragment inside a larger token
+  (`notfanfiction.net`) from matching.
+* New `ffn_dl/webnovel.py`; registered in `sites.py` with a canonical-URL
+  rule. New tests for the webnovel scraper and the scheme-optional
+  detection; full suite at 1583 passing.
+
 ## 2.4.48 — 2026-06-12
 
 **FicHub fast-path now tops up the newest chapters from FFN**

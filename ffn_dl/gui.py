@@ -52,6 +52,7 @@ class _DownloadParams:
     speech_rate: Optional[int] = None
     enabled_tts_providers: tuple = ()
     use_fichub: bool = False
+    webnovel_cookie: str = ""
 
 
 logger = logging.getLogger(__name__)
@@ -439,6 +440,34 @@ class MainFrame(wx.Frame):
             wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8,
         )
         root_sizer.Add(opts2, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+
+        # webnovel.com optional auth. A logged-in browser "Cookie:" header
+        # lets the user download chapters their account has unlocked; left
+        # blank, only free chapters are fetched. Password-styled because
+        # the cookie is a session secret; stored plain-text in prefs, the
+        # same as the LLM API key / Pushover / Discord secrets already are.
+        wn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        wn_sizer.Add(
+            wx.StaticText(root, label="&Webnovel.com cookie:"),
+            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4,
+        )
+        self.webnovel_cookie_ctrl = wx.TextCtrl(
+            root, size=(260, -1), style=wx.TE_PASSWORD,
+        )
+        self.webnovel_cookie_ctrl.SetName(
+            "Webnovel.com session cookie — paste a logged-in browser Cookie "
+            "header to download chapters you have unlocked; leave blank for "
+            "free chapters only"
+        )
+        self.webnovel_cookie_ctrl.SetToolTip(
+            "Optional, only used for webnovel.com. Paste the 'Cookie:' "
+            "header from a logged-in webnovel.com browser session to fetch "
+            "chapters your account has unlocked. Leave blank to download "
+            "only the free chapters (locked ones become placeholders). "
+            "Stored in your local settings; coins are never spent."
+        )
+        wn_sizer.Add(self.webnovel_cookie_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
+        root_sizer.Add(wn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
 
         # ── Audiobook settings (visible only when Format = audio) ────
         from . import attribution as _attribution_module
@@ -1252,6 +1281,9 @@ class MainFrame(wx.Frame):
             self.prefs.get_bool(_p.KEY_LLM_STRIP_NOTES)
         )
         self.fichub_ctrl.SetValue(self.prefs.get_bool(_p.KEY_FICHUB))
+        self.webnovel_cookie_ctrl.SetValue(
+            self.prefs.get(_p.KEY_WEBNOVEL_COOKIE) or ""
+        )
 
         try:
             rate = int(self.prefs.get(_p.KEY_SPEECH_RATE) or 0)
@@ -1302,6 +1334,10 @@ class MainFrame(wx.Frame):
             _p.KEY_LLM_STRIP_NOTES, self.llm_strip_notes_ctrl.GetValue(),
         )
         self.prefs.set_bool(_p.KEY_FICHUB, self.fichub_ctrl.GetValue())
+        self.prefs.set(
+            _p.KEY_WEBNOVEL_COOKIE,
+            self.webnovel_cookie_ctrl.GetValue().strip(),
+        )
         self.prefs.set(_p.KEY_SPEECH_RATE, self.speech_rate_ctrl.GetValue())
         self.prefs.set(_p.KEY_ATTRIBUTION_BACKEND, self._selected_attribution_backend())
         self.prefs.set(_p.KEY_ATTRIBUTION_MODEL_SIZE, self._selected_size() or "")
@@ -2167,15 +2203,20 @@ class MainFrame(wx.Frame):
 
     # ── Download worker ──────────────────────────────────────
 
-    def _scraper_for(self, url, *, use_fichub=False):
+    def _scraper_for(self, url, *, use_fichub=False, webnovel_cookie=""):
         from .sites import detect_scraper
         cls = detect_scraper(url)
-        # use_fichub is an FFN-only constructor kwarg; only forward it to
-        # FFNScraper so other site scrapers don't choke on it.
+        # use_fichub / webnovel_cookie are per-site constructor kwargs; only
+        # forward each to the scraper that accepts it so other site
+        # scrapers don't choke on an unexpected kwarg.
         if use_fichub:
             from .scraper import FFNScraper
             if cls is FFNScraper:
                 return cls(use_fichub=True)
+        if webnovel_cookie:
+            from .webnovel import WebnovelScraper
+            if cls is WebnovelScraper:
+                return cls(session_cookie=webnovel_cookie)
         return cls()
 
     def _snapshot_download_params(self) -> _DownloadParams:
@@ -2217,6 +2258,7 @@ class MainFrame(wx.Frame):
                 tuple(self._enabled_tts_providers()) if fmt == "audio" else ()
             ),
             use_fichub=self.fichub_ctrl.GetValue(),
+            webnovel_cookie=self.webnovel_cookie_ctrl.GetValue().strip(),
         )
 
     def _resolve_output_dir(self, story, params: _DownloadParams) -> str:
@@ -2552,6 +2594,7 @@ class MainFrame(wx.Frame):
             # scrapers too.
             scraper = self._scraper_for(
                 url, use_fichub=(params.use_fichub and not is_update),
+                webnovel_cookie=params.webnovel_cookie,
             )
 
             if not is_update and AO3Scraper.is_bookmarks_url(url):
