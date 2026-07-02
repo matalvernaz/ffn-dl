@@ -66,6 +66,54 @@ class SexStoriesScraper(BaseScraper):
     def is_author_url(url):
         return bool(SS_AUTHOR_URL_RE.search(str(url)))
 
+    def scrape_author_works(self, url, max_results=None, cancel_event=None):
+        """Return ``(author_name, [work_dict])`` from a
+        ``/profile<N>/`` page. Submissions are ``/story/<id>/`` anchors;
+        the member name renders as an ``<h3>`` like
+        "ArchiesHard Member since 2017/03/06". Single page."""
+        m = SS_AUTHOR_URL_RE.search(str(url))
+        if not m:
+            raise ValueError(f"Not a SexStories profile URL: {url}")
+        profile_id = m.group("id")
+        html = self._fetch(str(url))
+        soup = BeautifulSoup(html, "lxml")
+
+        author = ""
+        for h3 in soup.find_all("h3"):
+            text = h3.get_text(" ", strip=True)
+            if "Member since" in text:
+                author = text.split("Member since", 1)[0].strip()
+                break
+
+        works: list[dict] = []
+        seen: set[str] = set()
+        for a in soup.find_all("a", href=re.compile(r"^/story/\d+")):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            sm = re.match(r"^/story/(\d+)(?:/(?P<slug>[^/?#\s]+))?", a.get("href", ""))
+            if not sm or sm.group(1) in seen:
+                continue
+            title = a.get_text(" ", strip=True)
+            if not title:
+                continue
+            seen.add(sm.group(1))
+            works.append({
+                "title": title,
+                "url": self._story_url(int(sm.group(1)), sm.group("slug") or ""),
+                "author": author or f"profile{profile_id}",
+                "summary": "", "words": "?", "chapters": "?",
+                "rating": "M", "fandom": "", "status": "",
+                "updated": "", "section": "own",
+            })
+            if max_results and len(works) >= max_results:
+                break
+        return author or f"profile{profile_id}", works
+
+    def scrape_author_stories(self, url):
+        """CLI shape: ``(author_name, [story_url, ...])``."""
+        author, works = self.scrape_author_works(url)
+        return author, [w["url"] for w in works]
+
     @staticmethod
     def _story_url(story_id: int, slug: str = "") -> str:
         return f"{SS_BASE}/story/{story_id}/{slug}" if slug else f"{SS_BASE}/story/{story_id}"

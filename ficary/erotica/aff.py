@@ -47,6 +47,14 @@ AFF_URL_RE = re.compile(
 everything else (chapter, reviews, etc.) is query-string variation off
 the same path."""
 
+AFF_AUTHOR_URL_RE = re.compile(
+    r"adult-fanfiction\.org/(?:profile\.php\?id=|authorlinks?\.php\?no=)(?P<id>\d+)",
+    re.I,
+)
+"""Author profile URL — current ``members.…/profile.php?id=N`` plus the
+legacy ``authorlinks.php?no=N`` shape (same catalogue of historical
+variants as ``_AUTHOR_HREF_PATTERNS`` below)."""
+
 
 class AFFScraper(BaseScraper):
     """Scraper for Adult-FanFiction.org stories."""
@@ -93,6 +101,63 @@ class AFFScraper(BaseScraper):
             if sub and sub != "www":
                 return sub
         return AFF_DEFAULT_SUBDOMAIN
+
+    @staticmethod
+    def is_author_url(url):
+        return bool(AFF_AUTHOR_URL_RE.search(str(url)))
+
+    def scrape_author_works(self, url, max_results=None, cancel_event=None):
+        """Return ``(author_name, [work_dict])`` from an AFF member
+        profile. Profile pages list every story as an absolute
+        ``https://<fandom>.adult-fanfiction.org/story.php?no=N`` anchor —
+        the subdomain is load-bearing (stories only resolve on their home
+        subdomain), so hrefs are kept verbatim. Single page; AFF profiles
+        don't paginate."""
+        if not self.is_author_url(url):
+            raise ValueError(f"Not an AFF author/profile URL: {url}")
+        html = self._fetch(url)
+        soup = BeautifulSoup(html, "lxml")
+
+        author = ""
+        title_tag = soup.find("title")
+        if title_tag:
+            # "Wilde_Guess's Profile - AFF Fiction Portal"
+            raw = title_tag.get_text(strip=True)
+            m = re.match(r"^(?P<name>.+?)'s Profile\b", raw)
+            if m:
+                author = m.group("name").strip()
+
+        works: list[dict] = []
+        seen: set[str] = set()
+        for a in soup.find_all("a", href=re.compile(r"story\.php\?no=\d+", re.I)):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            href = a.get("href", "")
+            m = re.search(r"no=(\d+)", href)
+            if not m or m.group(1) in seen:
+                continue
+            title = a.get_text(" ", strip=True)
+            if not title:
+                continue
+            seen.add(m.group(1))
+            full = href if href.startswith("http") else (
+                f"https://{AFF_DEFAULT_SUBDOMAIN}.adult-fanfiction.org/{href.lstrip('/')}"
+            )
+            sub = self.parse_subdomain(full)
+            works.append({
+                "title": title, "url": full, "author": author,
+                "summary": "", "words": "?", "chapters": "?",
+                "rating": "M", "fandom": sub, "status": "",
+                "updated": "", "section": "own",
+            })
+            if max_results and len(works) >= max_results:
+                break
+        return author or "AFF author", works
+
+    def scrape_author_stories(self, url):
+        """CLI shape: ``(author_name, [story_url, ...])``."""
+        author, works = self.scrape_author_works(url)
+        return author, [w["url"] for w in works]
 
     @staticmethod
     def _story_url(sub: str, story_id: int, chapter: int = 1) -> str:

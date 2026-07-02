@@ -107,6 +107,9 @@ _SCRAPER_CLASS_TO_SITE_KEY: dict[str, str] = {
     "WattpadScraper": "wattpad",
     "FicWadScraper": "ficwad",
     "MediaMinerScraper": "mediaminer",
+    "AFFScraper": "aff",
+    "StoriesOnlineScraper": "storiesonline",
+    "SexStoriesScraper": "sexstories",
 }
 
 # Sites whose ``search.search_<key>`` function is implemented. Search

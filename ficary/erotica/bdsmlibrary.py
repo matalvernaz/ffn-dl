@@ -83,6 +83,12 @@ class BDSMLibraryScraper(BaseScraper):
 
     @staticmethod
     def is_author_url(url):
+        # No scrape_author_works to go with this: BDSM Library's
+        # author.php pages render server-side EMPTY for anonymous
+        # users — "Stories by" with no name and no story rows (probed
+        # five authorids live, 2026-07-02). Nothing to parse until the
+        # site fixes it; the classifier falls through to "unknown" for
+        # these URLs, same as before.
         return bool(BDSMLIB_AUTHOR_URL_RE.search(str(url)))
 
     @staticmethod

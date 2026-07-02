@@ -1,0 +1,649 @@
+
+
+<script type="text/javascript">
+<!--
+document.cookie='a2r=noref#!; path=/;'
+document.cookie='a2x=#!; path=/;'
+document.cookie='a2u=0#!; path=/;'
+// -->
+</script>
+ 
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+	"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1"></meta>
+
+
+<link rel="stylesheet" href="/stories.css" type="text/css"></link>
+<link rel="stylesheet" href="/phplayersmenu/layersmenu-gtk2.css" type="text/css"></link>
+<link rel="shortcut icon" href="/phplayersmenu/LOGOS/shortcut_icon_phplm.png"></link>
+<title>BDSM Library - Stories by </title>
+
+<script language="JavaScript" type="text/javascript">
+<!--
+// PHP Layers Menu 3.1.1 (C) 2001-2003 Marco Pratesi (marco at telug dot it)
+
+DOM = (document.getElementById) ? 1 : 0;
+NS4 = (document.layers) ? 1 : 0;
+// We need to explicitly detect Konqueror
+// because Konqueror 3 sets IE = 1 ... AAAAAAAAAARGHHH!!!
+Konqueror = (navigator.userAgent.indexOf("Konqueror") > -1) ? 1 : 0;
+// We need to detect Konqueror 2.2 as it does not handle the window.onresize event
+Konqueror22 = (navigator.userAgent.indexOf("Konqueror 2.2") > -1 || navigator.userAgent.indexOf("Konqueror/2.2") > -1) ? 1 : 0;
+Opera = (navigator.userAgent.indexOf("Opera") > -1) ? 1 : 0;
+Opera5 = (navigator.userAgent.indexOf("Opera 5") > -1 || navigator.userAgent.indexOf("Opera/5") > -1) ? 1 : 0;
+Opera6 = (navigator.userAgent.indexOf("Opera 6") > -1 || navigator.userAgent.indexOf("Opera/6") > -1) ? 1 : 0;
+Opera56 = Opera5 || Opera6;
+IE = (navigator.userAgent.indexOf("MSIE") > -1) ? 1 : 0;
+IE = IE && !Opera;
+IE5 = IE && DOM;
+IE4 = (document.all) ? 1 : 0;
+IE4 = IE4 && IE && !DOM;
+
+
+function MM_preloadImages() { //v3.0
+  var d=document; if(d.images){ if(!d.MM_p) d.MM_p=new Array();
+    var i,j=d.MM_p.length,a=MM_preloadImages.arguments; for(i=0; i<a.length; i++)
+    if (a[i].indexOf("#")!=0){ d.MM_p[j]=new Image; d.MM_p[j++].src=a[i];}}
+}
+
+function MM_swapImgRestore() { //v3.0
+  var i,x,a=document.MM_sr; for(i=0;a&&i<a.length&&(x=a[i])&&x.oSrc;i++) x.src=x.oSrc;
+}
+
+function MM_findObj(n, d) { //v4.01
+  var p,i,x;  if(!d) d=document; if((p=n.indexOf("?"))>0&&parent.frames.length) {
+    d=parent.frames[n.substring(p+1)].document; n=n.substring(0,p);}
+  if(!(x=d[n])&&d.all) x=d.all[n]; for (i=0;!x&&i<d.forms.length;i++) x=d.forms[i][n];
+  for(i=0;!x&&d.layers&&i<d.layers.length;i++) x=MM_findObj(n,d.layers[i].document);
+  if(!x && d.getElementById) x=d.getElementById(n); return x;
+}
+
+function MM_swapImage() { //v3.0
+  var i,j=0,x,a=MM_swapImage.arguments; document.MM_sr=new Array; for(i=0;i<(a.length-2);i+=3)
+   if ((x=MM_findObj(a[i]))!=null){document.MM_sr[j++]=x; if(!x.oSrc) x.oSrc=x.src; x.src=a[i+2];}
+}
+// -->
+</script>
+<script language="JavaScript" type="text/javascript" src="/phplayersmenu/libjs/layersmenu-library.js"></script>
+<script language="JavaScript" type="text/javascript" src="/phplayersmenu/libjs/layersmenu.js"></script>
+
+<!-- PHP Layers Menu 3.1.1 (C) 2001-2003 Marco Pratesi (marco at telug dot it) -->
+
+<script language="JavaScript" type="text/javascript">
+<!--
+
+menuTopShift = 6;
+menuRightShift = 7;
+menuLeftShift = 2;
+
+var thresholdY = 1;
+var abscissaStep = 140;
+
+toBeHidden = new Array();
+toBeHiddenLeft = new Array();
+toBeHiddenTop = new Array();
+
+listl = ['L1','L5','L10','L14','L29','L35'];
+var numl = listl.length;
+
+father = new Array();
+for (i=1; i<=39; i++) {
+	father["L" + i] = "";
+}
+father_keys = ['L2','L3','L4','L5','L6','L7','L8','L9','L11','L12','L13','L14','L15','L16','L17','L18','L19','L20','L21','L22','L23','L24','L25','L26','L27','L28','L30','L31','L32','L33','L34','L36','L37','L38','L39'];
+father_vals = ['L1','L1','L1','L1','L5','L1','L1','L1','L10','L10','L10','L10','L14','L14','L14','L14','L14','L14','L14','L14','L14','L14','L10','L10','L10','L10','L29','L29','L29','L29','L29','L35','L35','L35','L35'];
+for (i=0; i<father_keys.length; i++) {
+	father[father_keys[i]] = father_vals[i];
+}
+
+lwidth = new Array();
+var lwidthDetected = 0;
+
+function moveLayers() {
+	if (!lwidthDetected) {
+		for (i=0; i<numl; i++) {
+			lwidth[listl[i]] = getOffsetWidth(listl[i]);
+		}
+		lwidthDetected = 1;
+	}
+	if (IE4) {
+		for (i=0; i<numl; i++) {
+			setWidth(listl[i], abscissaStep);
+		}
+	}
+	var hormenu1TOP = getOffsetTop('hormenu1L1');
+	var hormenu1HEIGHT = getOffsetHeight('hormenu1L1');
+	setTop('L1', hormenu1TOP + hormenu1HEIGHT);
+	moveLayerX1('L1', 'hormenu1');
+	setTop('L10', hormenu1TOP + hormenu1HEIGHT);
+	moveLayerX1('L10', 'hormenu1');
+	setTop('L29', hormenu1TOP + hormenu1HEIGHT);
+	moveLayerX1('L29', 'hormenu1');
+	setTop('L35', hormenu1TOP + hormenu1HEIGHT);
+	moveLayerX1('L35', 'hormenu1');
+
+}
+
+back = new Array();
+for (i=1; i<=39; i++) {
+	back["L" + i] = 0;
+}
+
+// -->
+</script>
+
+<!-- PHP Layers Menu 3.1.1 (C) 2001-2003 Marco Pratesi (marco at telug dot it) -->
+
+</head>
+<body bgcolor="#FFFFFF" link="#990000" vlink="#000066" onLoad="MM_preloadImages('/images/l2d/navtop_members_up.gif','/images/l2d/navtop_library_up.gif','/images/l2d/navtop_community_up.gif','/images/l2d/navtop_others_up.gif')">
+
+<table width="100%" border="0" cellspacing="0" cellpadding="0">
+  <tr>
+    <td align="center" valign="middle"><a href="/stories/"><img src="/images/l2d/logo.gif" width="250" height="60" border="0" /></td>
+    <td align="right" valign="middle"><div align="center">
+<script language='JavaScript' type='text/javascript' src='http://www.bdsmlibrary.com/ads/adx.js'></script>
+<script language='JavaScript' type='text/javascript'>
+<!--
+   if (!document.phpAds_used) document.phpAds_used = ',';
+   phpAds_random = new String (Math.random()); phpAds_random = phpAds_random.substring(2,11);
+   
+   document.write ("<" + "script language='JavaScript' type='text/javascript' src='");
+   document.write ("http://www.bdsmlibrary.com/ads/adjs.php?n=" + phpAds_random);
+   document.write ("&amp;what=zone:1&amp;target=_blank&amp;block=1");
+   document.write ("&amp;exclude=" + document.phpAds_used);
+   if (document.referrer)
+      document.write ("&amp;referer=" + escape(document.referrer));
+   document.write ("'><" + "/script>");
+//-->
+</script><noscript><a href='http://www.bdsmlibrary.com/ads/adclick.php?n=a1ac53d4' target='_blank'><img src='http://www.bdsmlibrary.com/ads/adview.php?what=zone:1&amp;n=a1ac53d4' border='0' alt=''></a></noscript>
+</div></td>
+  </tr>
+</table>
+<table width="100%" border="0" cellpadding="0" cellspacing="0" background="/images/l2d/navtop_bg.gif">
+<tr align="left" valign="top" background="/images/l2d/navtop_bg.gif">
+<td width="10"><img src="/images/l2d/navtop_left.gif" width="10" height="40"></td>
+<td><div id="hormenu1L1" onmouseover="clearLMTO();" onmouseout="setLMTO();">
+<a href="/site/members/" onmouseover="moveLayerX1('L1', 'hormenu1') ; LMPopUp('L1', false);" title="For members Only"><span onmouseover="MM_swapImage('top_members','','/images/l2d/navtop_members_up.gif',1);" onmouseout="MM_swapImgRestore();"><img src="/images/l2d/navtop_members_down.gif" name="top_members" width="100" height="40" border="0" align="absmiddle" id="top_members"></span></a>&nbsp;</div></td>
+<td><div id="hormenu1L10" onmouseover="clearLMTO();" onmouseout="setLMTO();">
+<a href="/site/library/" onmouseover="moveLayerX1('L10', 'hormenu1') ; LMPopUp('L10', false);" title="Read the stories"><span onmouseover="MM_swapImage('top_library','','/images/l2d/navtop_library_up.gif',1);" onmouseout="MM_swapImgRestore();"><img src="/images/l2d/navtop_library_down.gif" name="top_library" width="100" height="40" border="0" align="absmiddle" id="top_library"></span></a>&nbsp;</div></td>
+<td><div id="hormenu1L29" onmouseover="clearLMTO();" onmouseout="setLMTO();">
+<a href="/site/community/" onmouseover="moveLayerX1('L29', 'hormenu1') ; LMPopUp('L29', false);" title="Join the community"><span onmouseover="MM_swapImage('top_community','','/images/l2d/navtop_community_up.gif',1);" onmouseout="MM_swapImgRestore();"><img src="/images/l2d/navtop_community_down.gif" name="top_community" width="100" height="40" border="0" align="absmiddle" id="top_community"></span></a>&nbsp;</div></td>
+<td><div id="hormenu1L35" onmouseover="clearLMTO();" onmouseout="setLMTO();">
+<a href="#" onmouseover="moveLayerX1('L35', 'hormenu1') ; LMPopUp('L35', false);"><span onmouseover="MM_swapImage('top_others','','/images/l2d/navtop_others_up.gif',1);" onmouseout="MM_swapImgRestore();"><img src="/images/l2d/navtop_others_down.gif" name="top_others" width="100" height="40" border="0" align="absmiddle" id="top_others"></span></a>&nbsp;</div></td>
+<td width="9"><img src="/images/l2d/navtop_right.gif" width="9" height="40"></td>
+</tr>
+</table>
+<p align="center">
+<!--INSERT AD -->
+</p>
+<script language="JavaScript" type="text/JavaScript">
+<!--
+function MM_preloadImages() { //v3.0
+  var d=document; if(d.images){ if(!d.MM_p) d.MM_p=new Array();
+    var i,j=d.MM_p.length,a=MM_preloadImages.arguments; for(i=0; i<a.length; i++)
+    if (a[i].indexOf("#")!=0){ d.MM_p[j]=new Image; d.MM_p[j++].src=a[i];}}
+}
+
+function MM_swapImgRestore() { //v3.0
+  var i,x,a=document.MM_sr; for(i=0;a&&i<a.length&&(x=a[i])&&x.oSrc;i++) x.src=x.oSrc;
+}
+
+function MM_findObj(n, d) { //v4.01
+  var p,i,x;  if(!d) d=document; if((p=n.indexOf("?"))>0&&parent.frames.length) {
+    d=parent.frames[n.substring(p+1)].document; n=n.substring(0,p);}
+  if(!(x=d[n])&&d.all) x=d.all[n]; for (i=0;!x&&i<d.forms.length;i++) x=d.forms[i][n];
+  for(i=0;!x&&d.layers&&i<d.layers.length;i++) x=MM_findObj(n,d.layers[i].document);
+  if(!x && d.getElementById) x=d.getElementById(n); return x;
+}
+
+function MM_swapImage() { //v3.0
+  var i,j=0,x,a=MM_swapImage.arguments; document.MM_sr=new Array; for(i=0;i<(a.length-2);i+=3)
+   if ((x=MM_findObj(a[i]))!=null){document.MM_sr[j++]=x; if(!x.oSrc) x.oSrc=x.src; x.src=a[i+2];}
+}
+//-->
+</script>
+<body onLoad="MM_preloadImages('/images/l2d/navside_news_up.gif','/images/l2d/navside_storylist_up.gif','/images/l2d/navside_submit_up.gif','/images/l2d/navside_forums_up.gif','/images/l2d/navside_links_up.gif','/images/l2d/navside_members_up.gif','/images/l2d/navside_faq_up.gif','/images/l2d/navside_contact_up.gif')"><table width="100%" border="0" cellspacing="5" cellpadding="0">
+  <tr> 
+    <td width="150" valign="top"> 
+      <table width="100%" border="0" cellspacing="0" cellpadding="0">
+        <tr> 
+          <td align="center" valign="middle"><img src="/images/l2d/navside_top.gif" width="150" height="13"></td>
+        </tr>
+        <tr> 
+          <td align="center" valign="middle" background="/images/l2d/navside_bg.gif"><a href="/stories/index.php" onMouseOver="MM_swapImage('news','','/images/l2d/navside_news_up.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="/images/l2d/navside_news_down.gif" name="news" width="150" height="26" border="0" id="news"></a><br>
+            <a href="/site/library/list.php" onMouseOver="MM_swapImage('storylist','','/images/l2d/navside_storylist_up.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="/images/l2d/navside_storylist_down.gif" name="storylist" width="150" height="26" border="0" id="storylist"></a><br>
+            <a href="/stories/story_submit.php" onMouseOver="MM_swapImage('submit','','/images/l2d/navside_submit_up.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="/images/l2d/navside_submit_down.gif" name="submit" width="150" height="26" border="0" id="submit"></a><br>
+            <a href="/forums/index.php" onMouseOver="MM_swapImage('fourms','','/images/l2d/navside_forums_up.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="/images/l2d/navside_forums_down.gif" name="fourms" width="150" height="26" border="0" id="fourms"></a><br>            <a href="/links/index.php" onMouseOver="MM_swapImage('links','','/images/l2d/navside_links_up.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="/images/l2d/navside_links_down.gif" name="links" width="150" height="26" border="0" id="links"><br>
+            </a><a href="/site/members/" onMouseOver="MM_swapImage('members','','/images/l2d/navside_members_up.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="/images/l2d/navside_members_down.gif" name="members" width="150" height="26" border="0" id="members"></a> 
+            <hr width="100" size="2">
+            <a href="/faq.html" onMouseOver="MM_swapImage('faq','','/images/l2d/navside_faq_up.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="/images/l2d/navside_faq_down.gif" name="faq" width="150" height="26" border="0" id="faq"></a><br>
+            <a href="/contact.html" onMouseOver="MM_swapImage('contact','','/images/l2d/navside_contact_up.gif',1)" onMouseOut="MM_swapImgRestore()"><img src="/images/l2d/navside_contact_down.gif" name="contact" width="150" height="26" border="0" id="contact"></a></td>
+        </tr>
+        <tr> 
+          <td align="center" valign="middle"><img src="/images/l2d/navside_bottom.gif" width="150" height="10"></td>
+        </tr>
+      </table>
+      <br>
+      <table width="100%" border="0" cellspacing="0" cellpadding="0">
+        <tr>
+          <td align="center" valign="middle"><img src="/images/l2d/navside_top.gif" width="150" height="13"></td>
+        </tr>
+        <tr>
+          <td align="center" valign="middle" background="/images/l2d/navside_bg.gif"><form method="post" action="/stories/search.php">
+            <select name="field">
+              <option value="title" selected>Story Title</option>
+              <option value="author">Author</option>
+              <option value="synopsis">Synopsis</option>
+            </select>
+            <br>
+            <input type="text" name="term" size="15">
+            <br>
+            <input type="hidden" name="searchit" value="1">
+            <input type="submit" name="submit" value="Search">
+            <br>
+            <a href="/stories/search.php"><span class="content">advanced
+            search</span></a>
+                              </form></td>
+        </tr>
+        <tr>
+          <td align="center" valign="middle"><img src="/images/l2d/navside_bottom.gif" width="150" height="10"></td>
+        </tr>
+      </table>
+      <br>
+      <table width="100%" border="0" cellpadding="0" cellspacing="0">
+        <tr>
+          <td align="center" valign="middle"><img src="/images/l2d/navside_top.gif" width="150" height="13"></td>
+        </tr>
+        <tr>
+          <td align="left" valign="middle" background="/images/l2d/navside_bg.gif"><table width="100%"  border="0" cellspacing="0" cellpadding="3">
+            <tr>
+              <td><p class="contentstrong" align="center">List Stories</p>
+                <p class="content"><img src="/images/l2d/dot.gif" width="5" height="5"> <a href="/stories/list.php?pos=0&sortby1=moddate&arrange1=DESC">Newest
+                    Stories</a><br>
+                    <img src="/images/l2d/dot.gif" width="5" height="5"> <a href="/stories/list.php?pos=0&sortby1=average&arrange1=DESC">Highest
+                    Rated</a><br>
+                    <img src="/images/l2d/dot.gif" width="5" height="5"> <a href="/stories/list.php?pos=0&sortby1=vote&arrange1=DESC">Most
+                    Voted</a><br>
+                    <img src="/images/l2d/dot.gif" width="5" height="5"> <a href="/stories/list.php?pos=0&sortby1=size&arrange1=DESC">The
+                    Longest</a><br>
+                    <img src="/images/l2d/dot.gif" width="5" height="5"> <a href="/stories/list.php?pos=0&sortby1=currenthit&arrange1=DESC">Recent
+                    Pop</a><br>
+                    <img src="/images/l2d/dot.gif" width="5" height="5"> <a href="/stories/list.php?pos=0&sortby1=hit&arrange1=DESC">Overall
+                    Pop</a><br>
+                    <img src="/images/l2d/dot.gif" width="5" height="5"> <a href="/stories/list.php?pos=0&sortby1=title&arrange1=ASC">List
+                    by Title</a><br>
+                    <img src="/images/l2d/dot.gif" width="5" height="5"> <a href="/stories/list.php?pos=0&sortby1=author&arrange1=ASC">List
+              by Author</a></p>
+              <p align="right"><a href="/site/library/list.php">More ...</a></p></td>
+            </tr>
+          </table></td>
+        </tr>
+        <tr>
+          <td align="center" valign="middle"><img src="/images/l2d/navside_bottom.gif" width="150" height="10"></td>
+        </tr>
+      </table>
+      </td>
+    <td width="100%" valign="top"> 
+
+<p><font size="5"><b></b></font><b>
+	(This page has been viewed  times since  0, 0)</b><br>
+	(Author: if you want to add/change/update any information below, please 
+  <a href="mailto:webmaster@bdsmlibrary.com">email me</a>)</p>
+<dl> 
+  <dt><b>Author's Words:</b></dt>
+  <dd><b></b></dd>
+  <dt><b>Author's Homepage: </b><a href="" target="_blank"></a></dt>
+  <dt><b>Send Author Email: </b>We don't have the author's email</dt></dl>
+<table width="600" border="0" align="center">
+  <tr align="center"> 
+    <td> 
+      <h3>Total  Stories by </h3>
+    </td>
+  </tr>
+</table>
+
+<br>
+
+<p align="center"><b>(No story to display)</b></p>
+</td>
+    <td valign="top"> 
+      <table width="100%" border="0" cellspacing="0" cellpadding="0">
+        <tr> 
+          <td><img src="/images/l2d/block_coolsites.gif" width="150" height="29" class="sidemenu"></td>
+        </tr>
+        <tr> 
+          <td background="/images/l2d/block_bg.gif"><table width="100%" border="0" cellspacing="3" cellpadding="0">
+              <tr> 
+                <td class="sidemenu">
+                  <p><img src="/images/dot.gif"> <a href="/traffic/out.php?perm=bdsmforall.com">BDSM for All</a><br>
+                  <img src="/images/dot.gif"> <a href="/traffic/out.php?perm=asexstories.com">Free sex stories</a></p>
+                  <div align="center"><p>(This Month)</p>
+                </div>
+                </td>
+              </tr>
+        <tr> 
+          <td> 
+            <div align="right"><font size="2" face="Arial, Helvetica, sans-serif"> 
+              <b><a href="/links/coolnow.php?pos=10">More...</a></b></font></div>
+          </td>
+        </tr>
+            </table></td>
+        </tr>
+        <tr> 
+          <td><img src="/images/l2d/block_bottom.gif" width="150" height="11"></td>
+        </tr>
+      </table>
+      <br>
+      <table width="100%" border="0" cellspacing="0" cellpadding="0">
+        <tr> 
+          <td><img src="/images/l2d/block_topsite.gif" width="150" height="29" class="sidemenu"></td>
+        </tr>
+        <tr> 
+          <td background="/images/l2d/block_bg.gif"><table width="100%" border="0" cellspacing="3" cellpadding="0">
+              <tr> 
+                <td class="sidemenu"><img src="/images/l2d/spacer.gif" width="5" height="1"><img src="/images/l2d/dot.gif" width="5" height="5" align="absmiddle"> 
+                  <a href="http://www.thebondagelist.com/cgi-bin/top100/rankem.cgi?id=bdsm">Bondage 
+                  List</a><br>
+                  <img src="/images/l2d/spacer.gif" width="5" height="1"><img src="/images/l2d/dot.gif" width="5" height="5" align="absmiddle"> 
+                  <a href="http://www.bdsmtop-50.com/tts-cgi/tts-in.cgi?1010511-1">Catholic 
+                  Guilt</a></td>
+              </tr>
+            </table></td>
+        </tr>
+        <tr> 
+          <td><img src="/images/l2d/block_bottom.gif" width="150" height="11"></td>
+        </tr>
+      </table>
+      
+    </td>
+  </tr>
+</table>
+<br>
+<div align="center">
+<script language='JavaScript' type='text/javascript' src='http://www.bdsmlibrary.com/ads/adx.js'></script>
+<script language='JavaScript' type='text/javascript'>
+<!--
+   if (!document.phpAds_used) document.phpAds_used = ',';
+   phpAds_random = new String (Math.random()); phpAds_random = phpAds_random.substring(2,11);
+   
+   document.write ("<" + "script language='JavaScript' type='text/javascript' src='");
+   document.write ("http://www.bdsmlibrary.com/ads/adjs.php?n=" + phpAds_random);
+   document.write ("&amp;what=zone:1&amp;target=_blank&amp;block=1");
+   document.write ("&amp;exclude=" + document.phpAds_used);
+   if (document.referrer)
+      document.write ("&amp;referer=" + escape(document.referrer));
+   document.write ("'><" + "/script>");
+//-->
+</script><noscript><a href='http://www.bdsmlibrary.com/ads/adclick.php?n=a1ac53d4' target='_blank'><img src='http://www.bdsmlibrary.com/ads/adview.php?what=zone:1&amp;n=a1ac53d4' border='0' alt=''></a></noscript>
+</div>
+
+<div align="center">
+<style>
+table.ax5558Table (  width: 720; background-color: ffffff;)
+td.axProf5558TD (  width: 120; vertical-align: top;  background-color: ffffff;  font-size: 10pt;  color: 000000;  font-style: normal;  font-family: verdana;  font-weight: normal;  text-align: center;)
+td.axHead5558TD (     font-style: normal;  font-family: verdana;  font-weight: normal;  text-align: left;)
+td.axBottom5558TD (    font-style: normal;  font-family: verdana;  font-weight: normal;  text-align: left;)
+td.axLogo5558TD ( width: 120;  text-align: left; )
+.axProf5558TD a:link (  text-decoration: none;  color: ff0000;   font-weight: bold;)
+.axProf5558TD a:visited(  text-decoration: none;  color: ff0000;  font-weight: bold;)
+.axHead5558TD a:link (  text-decoration: none;     font-weight: normal;)
+.axHead5558TD a:visited(  text-decoration: none;   font-weight: normal;)
+.axBottom5558TD a:link (  text-decoration: none;   font-weight: normal;)
+.axBottom5558TD a:visited(  text-decoration: none;   font-weight: normal;)
+.axLogo5558TD a:link (   text-decoration: none;  font-weight: normal; font-size: 7pt;)
+.axLogo5558TD a:visited(   text-decoration: none;  font-weight: normal; font-size: 7pt;)
+</style>
+<script language="JavaScript" src="http://ttiger.axelsfun.com:8080/geo?&imtype=wc&picture=1&profile=1&headline=1&location=1&format=row&maxage=30&minage=18&size=n&count=6&headtext=&bottomtext=&rname=5558&imlink=[D]&imsafe=b&menimsafe=s&mencount=0&imethnic="></script>
+
+</div>
+<!-- PHP Layers Menu 3.1.1 (C) 2001-2003 Marco Pratesi (marco at telug dot it) -->
+
+
+<div id="L1" class="submenu" onmouseover="clearLMTO();" onmouseout="setLMTO();">
+<table border="0" cellspacing="0" cellpadding="0">
+<tr>
+<td nowrap="nowrap">
+<div class="subframe">
+<div id="refL2" class="item">
+<a href="/about.php" onmouseover="LMPopUp('L1', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />About&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL3" class="item">
+<a href="http://www.erotologist.com/signup.php" onmouseover="LMPopUp('L1', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Sign Up&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL4" class="item">
+<a href="#" onmouseover="LMPopUp('L1', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL5" class="item">
+<a href="http://www.erotologist.com/eroticart/index.php" onmouseover="moveLayerX('L5') ; moveLayerY('L5') ; LMPopUp('L5', false);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Erotic Art&nbsp;<img
+class="fwdarr" src="/phplayersmenu/images/forward-arrow.png" width="4" height="7"
+border="0" alt=">>" />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL8" class="item">
+<a href="#" onmouseover="LMPopUp('L1', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL9" class="item">
+<a href="http://www.erotologist.com/service.html" onmouseover="LMPopUp('L1', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Member Service&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+</div>
+</td>
+</tr>
+</table>
+</div>
+
+<div id="L5" class="submenu" onmouseover="clearLMTO();" onmouseout="setLMTO();">
+<table border="0" cellspacing="0" cellpadding="0">
+<tr>
+<td nowrap="nowrap">
+<div class="subframe">
+<div id="refL6" class="item">
+<a href="http://www.erotologist.com/members/eroticart/index.php" onmouseover="LMPopUp('L5', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Member Access&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+</div>
+</td>
+</tr>
+</table>
+</div>
+
+<div id="L10" class="submenu" onmouseover="clearLMTO();" onmouseout="setLMTO();">
+<table border="0" cellspacing="0" cellpadding="0">
+<tr>
+<td nowrap="nowrap">
+<div class="subframe">
+<div id="refL11" class="item">
+<a href="/site/library/" onmouseover="LMPopUp('L10', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />About&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL12" class="item">
+<a href="/stories/" onmouseover="LMPopUp('L10', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Story News&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL13" class="item">
+<a href="/stories/submit_story.php" onmouseover="LMPopUp('L10', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Submit Story&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL14" class="item">
+<a href="/site/library/list.php" onmouseover="moveLayerX('L14') ; moveLayerY('L14') ; LMPopUp('L14', false);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />List Stories&nbsp;<img
+class="fwdarr" src="/phplayersmenu/images/forward-arrow.png" width="4" height="7"
+border="0" alt=">>" />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL25" class="item">
+<a href="/stories/shelf_admin.php" onmouseover="LMPopUp('L10', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />My BDSM-Shelf&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL26" class="item">
+<a href="#" onmouseover="LMPopUp('L10', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />My Reviews (coming soon)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL27" class="item">
+<a href="/topusers.php" onmouseover="LMPopUp('L10', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Top Reviewers&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL28" class="item">
+<a href="/contest/" onmouseover="LMPopUp('L10', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Contest&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+</div>
+</td>
+</tr>
+</table>
+</div>
+
+<div id="L14" class="submenu" onmouseover="clearLMTO();" onmouseout="setLMTO();">
+<table border="0" cellspacing="0" cellpadding="0">
+<tr>
+<td nowrap="nowrap">
+<div class="subframe">
+<div id="refL15" class="item">
+<a href="/stories/list.php?pos=0&sortby1=moddate&arrange1=DESC" onmouseover="LMPopUp('L14', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Newest Stories&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL16" class="item">
+<a href="/stories/list.php?pos=0&sortby1=average&arrange1=DESC" onmouseover="LMPopUp('L14', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Highest Rated&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL17" class="item">
+<a href="/stories/list.php?pos=0&sortby1=vote&arrange1=DESC" onmouseover="LMPopUp('L14', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Most Voted&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL18" class="item">
+<a href="/stories/list.php?pos=0&sortby1=size&arrange1=DESC" onmouseover="LMPopUp('L14', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Longest Stories&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL19" class="item">
+<a href="/stories/list.php?pos=0&sortby1=currenthit&arrange1=DESC" onmouseover="LMPopUp('L14', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Recent Popular&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL20" class="item">
+<a href="/stories/list.php?pos=0&sortby1=hit&arrange1=DESC" onmouseover="LMPopUp('L14', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Overall Popular&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL21" class="item">
+<a href="/stories/list.php?pos=0&sortby1=title&arrange1=ASC" onmouseover="LMPopUp('L14', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />List by Title&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL22" class="item">
+<a href="/stories/list.php?pos=0&sortby1=author&arrange1=ASC" onmouseover="LMPopUp('L14', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />List by Author&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL23" class="item">
+<a href="#" onmouseover="LMPopUp('L14', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL24" class="item">
+<a href="/site/library/list.php" onmouseover="LMPopUp('L14', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />More List Options&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+</div>
+</td>
+</tr>
+</table>
+</div>
+
+<div id="L29" class="submenu" onmouseover="clearLMTO();" onmouseout="setLMTO();">
+<table border="0" cellspacing="0" cellpadding="0">
+<tr>
+<td nowrap="nowrap">
+<div class="subframe">
+<div id="refL30" class="item">
+<a href="/site/community/" onmouseover="LMPopUp('L29', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />About&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL31" class="item">
+<a href="/dungeon/" onmouseover="LMPopUp('L29', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Academy in Dungeon&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL32" class="item">
+<a href="/forums/" onmouseover="LMPopUp('L29', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Forums&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL33" class="item">
+<a href="/chat/" onmouseover="LMPopUp('L29', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Chat Room&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL34" class="item">
+<a href="/topusers.php" onmouseover="LMPopUp('L29', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Top Users&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+</div>
+</td>
+</tr>
+</table>
+</div>
+
+<div id="L35" class="submenu" onmouseover="clearLMTO();" onmouseout="setLMTO();">
+<table border="0" cellspacing="0" cellpadding="0">
+<tr>
+<td nowrap="nowrap">
+<div class="subframe">
+<div id="refL36" class="item">
+<a href="/faq.html" onmouseover="LMPopUp('L35', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />F.A.Q.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL37" class="item">
+<a href="/links/" onmouseover="LMPopUp('L35', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Links&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+<div id="refL38" class="item">
+<a href="/contact.html" onmouseover="LMPopUp('L35', true);"><img
+align="top" src="/phplayersmenu/images/transparent.png" width="1" height="16" border="0"
+alt="" />Contact&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</a>
+</div>
+</div>
+</td>
+</tr>
+</table>
+</div>
+
+
+<script language="JavaScript" type="text/javascript">
+<!--
+loaded = 1;
+// -->
+</script>
+
+<!-- PHP Layers Menu 3.1.1 (C) 2001-2003 Marco Pratesi (marco at telug dot it) -->
+
+</body>
+</html>

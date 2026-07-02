@@ -667,8 +667,9 @@ class AddURLWatchDialog(wx.Dialog):
             "FicWad, Royal Road, MediaMiner, Literotica, Wattpad)."
             if expected_type == WATCH_TYPE_STORY
             else "Paste the author/profile page URL from any supported "
-            "site. New works appearing under that author will trigger "
-            "a notification."
+            "site (including AFF, StoriesOnline, and SexStories "
+            "profiles). New works appearing under that author will "
+            "trigger a notification."
         )
         hint = wx.StaticText(panel, label=hint_text)
         hint.Wrap(520)

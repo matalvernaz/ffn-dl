@@ -67,6 +67,70 @@ class StoriesOnlineScraper(BaseScraper):
     def is_author_url(url):
         return bool(SOL_AUTHOR_URL_RE.search(str(url)))
 
+    def scrape_author_works(self, url, max_results=None, cancel_event=None):
+        """Return ``(author_name, [work_dict])`` from a ``/a/<slug>``
+        author page. Rows are the same ``h3.sname`` shape the free tag
+        browse uses; author pages link stories as ``/s/<id>/<slug>``
+        directly (tag listings use ``/n/`` redirects — accept both).
+        Pagination is a trailing ``/<page>`` segment; the walk stops
+        when a page adds nothing new (or at a safety cap)."""
+        m = SOL_AUTHOR_URL_RE.search(str(url))
+        if not m:
+            raise ValueError(f"Not a StoriesOnline author URL: {url}")
+        author_slug = m.group("slug")
+        base = f"{SOL_BASE}/a/{author_slug}"
+
+        author = ""
+        works: list[dict] = []
+        seen: set[str] = set()
+        max_pages = 100
+        for page in range(1, max_pages + 1):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            if max_results and len(works) >= max_results:
+                break
+            page_url = base if page == 1 else f"{base}/{page}"
+            html = self._fetch(page_url)
+            soup = BeautifulSoup(html, "lxml")
+            if not author:
+                title_tag = soup.find("title")
+                if title_tag:
+                    # "Fan Fiction Man: Stories"
+                    raw = title_tag.get_text(strip=True)
+                    author = raw.split(":", 1)[0].strip() or author_slug
+            new_on_page = 0
+            for h3 in soup.find_all("h3", class_="sname"):
+                anchor = h3.find("a", href=True)
+                if anchor is None:
+                    continue
+                sm = re.match(r"^/[sn]/(\d+)/([^/?#\s]+)", anchor.get("href", ""))
+                if not sm or sm.group(1) in seen:
+                    continue
+                title = anchor.get_text(" ", strip=True)
+                if not title:
+                    continue
+                seen.add(sm.group(1))
+                works.append({
+                    "title": title,
+                    "url": f"{SOL_BASE}/s/{sm.group(1)}/{sm.group(2)}",
+                    "author": author or author_slug,
+                    "summary": "", "words": "?", "chapters": "?",
+                    "rating": "M", "fandom": "", "status": "",
+                    "updated": "", "section": "own",
+                })
+                new_on_page += 1
+                if max_results and len(works) >= max_results:
+                    break
+            if new_on_page == 0:
+                break
+            self._delay()
+        return author or author_slug, works
+
+    def scrape_author_stories(self, url):
+        """CLI shape: ``(author_name, [story_url, ...])``."""
+        author, works = self.scrape_author_works(url)
+        return author, [w["url"] for w in works]
+
     @staticmethod
     def is_series_url(url):
         # SOL's "universes" (/univ/) and "series" (/ser/) both behave
