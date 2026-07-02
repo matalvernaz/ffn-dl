@@ -1,5 +1,84 @@
 # Changelog
 
+## 2.6.1 — 2026-07-01
+
+Audit round 10 — the whole v2.5–2.6 surface (reader, audio engine,
+soundscapes, Webnovel, FicHub fast path, new GUI/CLI flags) got the same
+multi-AI deep-audit treatment as rounds 1–9, plus the round-9 deferred
+backlog. ~60 verified fixes; the ones you'd notice:
+
+**Reader / audio**
+
+* Pause/resume no longer skips the rest of the current sentence — pausing
+  used to permanently drop everything unspoken in the chunk.
+* Stop actually stops: a slow voice synthesis could previously play one
+  more full chunk *after* Stop (or after switching chapters, with the old
+  chapter's audio and highlight landing on the new chapter's text).
+* Arrowing through the chapter list no longer loads every chapter you pass
+  and steal focus — browse with arrows, open with Enter. Restored reading
+  positions and bookmark offsets survive (they were reset to the chapter
+  top by a re-entrant event).
+* Opening a third-party EPUB (Calibre, FanFicFare, publisher) or a `.htm`
+  file shows a clear error / just works instead of failing silently.
+* Soundscapes: per-sound volumes actually work (fades flattened the mix to
+  one level), first assignment to a story takes effect immediately, the
+  close fade-out is audible, swapping mid-narration keeps the bed ducked,
+  and building the bed no longer freezes the window while ffmpeg decodes.
+* App-voice respects your speech-rate setting, retries a failed sentence
+  once, and tells you when sections couldn't be synthesized instead of
+  silently skipping them. New: auto-advance to the next chapter on natural
+  chapter end (Preferences default on).
+* Audiobook renders are cancellable — new "Cancel render" button. Corrupt
+  reader state files rebuild instead of locking the reader out. Fixed
+  several per-chunk resource leaks (temp files, audio sources, file
+  descriptors) that accumulated over long listening sessions.
+
+**Downloads**
+
+* Wattpad and Webnovel chapter caches are keyed on the site's stable
+  chapter id: a chapter inserted or deleted mid-story no longer makes
+  updates silently serve the *previous* chapter's text under the new
+  numbering.
+* Webnovel: an all-paywalled update prints a friendly message instead of a
+  crash; locked-chapter placeholders are refetched on the next update with
+  --webnovel-cookie once you've unlocked them (they used to be permanent).
+* FicHub fast path verifies FicHub's copy still lines up with FFN
+  (chapter count and titles) before topping up — a deleted or inserted
+  chapter used to produce a silently wrong book.
+* GUI updates dedupe re-published chapters exactly like the CLI (a
+  republished chapter N used to appear twice in the merged file).
+* AO3: the bookmarks picker, batch picker, series-merge, and voice preview
+  all use your session cookie now — private bookmarks actually list.
+  Marked-for-later URLs open the reading list instead of silently listing
+  your *authored* works. Extraction respects Max results / Cancel while
+  walking pages instead of afterwards.
+* FFN search: `--fandom` now works on FFN (fandom browse mode), activating
+  the seven `--ffn-*` filters that shipped dead in 2.6.0; new
+  `--ffn-category` pins the category when a name exists in several.
+
+**Self-update**
+
+* The release zip ships an `ffn-dl.exe` compatibility copy so 2.4.x
+  installs can update across the rename — every existing install's
+  auto-updater refused the renamed zip and was stranded on 2.4.x.
+
+**Hardening**
+
+* LLM story-analysis prompt is injection-fenced like the attribution
+  prompts, and the pronunciation map it seeds is capped and shape-checked
+  — a hostile fic could previously persist a map that rewrote common words
+  ("she"→"he") in every future render.
+* Corrupt hand-edited accent/profile/pronunciation sidecars are
+  quarantined (recoverable) instead of silently rebuilt from scratch;
+  UTF-16 saves from Windows editors no longer crash the render.
+* Verb-then-name dialogue attribution is gated on verbs that genuinely
+  invert — `"...," shook Hermione's hand` no longer voices the line as
+  Hermione.
+* Dozens more: torn cf-solve installs detected, watchlist autopoll
+  restart race, self-update Abort thread-safety, stats report contract,
+  duplicate-copy promotion, sleep-timer restart race, chunker offset
+  drift, mnemonic collisions.
+
 ## 2.6.0 — 2026-07-01
 
 **In-app reader**
