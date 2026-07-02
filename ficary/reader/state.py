@@ -45,11 +45,41 @@ class ReaderStateDB:
     def __init__(self, db_path: Optional[Path] = None):
         self._path = Path(db_path) if db_path is not None else default_db_path()
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.execute("PRAGMA synchronous = NORMAL")
-        self._conn.execute("PRAGMA busy_timeout = 5000")
+        try:
+            self._conn = self._connect()
+        except sqlite3.DatabaseError:
+            # Corrupt DB file. Positions/bookmarks are rebuildable-loss
+            # data — quarantine and start fresh rather than making the
+            # reader permanently unopenable (house convention for corrupt
+            # cache/state files).
+            self._quarantine_corrupt()
+            self._conn = self._connect()
         self._init_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA busy_timeout = 5000")
+        except sqlite3.DatabaseError:
+            conn.close()
+            raise
+        return conn
+
+    def _quarantine_corrupt(self) -> None:
+        quarantined = self._path.with_name(self._path.name + ".corrupt")
+        try:
+            quarantined.unlink(missing_ok=True)
+            self._path.replace(quarantined)
+        except OSError:
+            self._path.unlink(missing_ok=True)
+        for suffix in ("-wal", "-shm"):
+            sidecar = self._path.with_name(self._path.name + suffix)
+            try:
+                sidecar.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _init_schema(self) -> None:
         c = self._conn

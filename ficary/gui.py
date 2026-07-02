@@ -1457,6 +1457,22 @@ class MainFrame(wx.Frame):
             except (RuntimeError, AttributeError):
                 logger.debug("frame.Destroy on close failed", exc_info=True)
         self._search_frames.clear()
+        # The reader is a child frame: parent Destroy skips its EVT_CLOSE,
+        # which is the only place the session reading position, state-DB
+        # close, and sleep-timer cancel happen. Close() (not Destroy) runs
+        # that handler.
+        if getattr(self, "_reader_frame", None) is not None:
+            try:
+                self._reader_frame.Close()
+            except (RuntimeError, AttributeError):
+                logger.debug("reader frame close failed", exc_info=True)
+            self._reader_frame = None
+        # Release the audio device + poller/fade threads if audio was used.
+        try:
+            from .audio.engine import shutdown_engine
+            shutdown_engine()
+        except Exception:
+            logger.debug("audio engine shutdown failed", exc_info=True)
         if getattr(self, "_watchlist_poller", None) is not None:
             self._watchlist_poller.stop()
         try:
@@ -3295,7 +3311,7 @@ class MainFrame(wx.Frame):
         from .reader.source import StorySource, ReaderSourceError
         try:
             source = StorySource.from_file(path, url=url, title=title, author=author)
-        except ReaderSourceError as exc:
+        except (ReaderSourceError, OSError) as exc:
             wx.MessageBox(str(exc), "Reader", wx.OK | wx.ICON_ERROR, self)
             return
         self._show_reader(source)

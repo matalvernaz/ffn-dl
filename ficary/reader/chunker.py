@@ -5,15 +5,24 @@ the reader displays, so a highlight range or caret position lines up with the
 text. Paragraphs are the natural unit (``html_to_text`` separates them with a
 blank line); an oversized paragraph is sub-split at sentence boundaries so
 live-TTS first-audio latency stays about one sentence rather than a whole
-paragraph. Used by the screen-reader view (paragraph navigation) and, in
-Phase 2, by live TTS.
+paragraph.
+
+Splitting is positional — spans are computed directly over the original
+string, never by re-finding rejoined pieces (which drifted whenever sentences
+were separated by two spaces or newlines and broke the ``text[start:end]``
+contract). Used by the screen-reader view (paragraph navigation) and live TTS.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 # A chunk longer than this is sub-split at sentence boundaries.
 MAX_CHUNK_CHARS = 400
+
+# End-of-sentence punctuation, optional closing quotes/brackets, then the
+# whitespace that separates it from the next sentence.
+_SENT_BREAK = re.compile(r'[.!?…]+["\'”’)\]]*\s+')
 
 
 @dataclass
@@ -26,24 +35,77 @@ class Chunk:
 
 def chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[Chunk]:
     """Return ordered chunks whose ``text`` equals ``text[start:end]``."""
-    from ..tts import _split_oversized_text  # lazy: avoids importing tts at reader load
-
     chunks: list[Chunk] = []
     index = 0
     for para_start, para_end in _paragraph_spans(text):
-        para = text[para_start:para_end]
-        pieces = [para] if len(para) <= max_chars else _split_oversized_text(para, max_chars)
-        search_from = para_start
-        for piece in pieces:
-            if not piece.strip():
+        if para_end - para_start <= max_chars:
+            spans = [(para_start, para_end)]
+        else:
+            spans = _packed_sentence_spans(text, para_start, para_end, max_chars)
+        for start, end in spans:
+            while end > start and text[end - 1] in " \t\n":
+                end -= 1
+            if end <= start or not text[start:end].strip():
                 continue
-            found = text.find(piece, search_from, para_end)
-            start = found if found >= 0 else search_from
-            end = start + len(piece)
-            chunks.append(Chunk(index=index, start=start, end=end, text=piece))
+            chunks.append(Chunk(index=index, start=start, end=end,
+                                text=text[start:end]))
             index += 1
-            search_from = end
     return chunks
+
+
+def _packed_sentence_spans(text: str, start: int, end: int,
+                           max_chars: int) -> list[tuple[int, int]]:
+    """Split ``text[start:end]`` into spans of at most ``max_chars``,
+    breaking at sentence boundaries, falling back to word boundaries for a
+    single overlong sentence."""
+    out: list[tuple[int, int]] = []
+    cur_start: int | None = None
+    for s, e in _sentence_spans(text, start, end):
+        if e - s > max_chars:
+            if cur_start is not None:
+                out.append((cur_start, s))
+                cur_start = None
+            out.extend(_hard_split(text, s, e, max_chars))
+        elif cur_start is None:
+            cur_start = s
+        elif e - cur_start > max_chars:
+            out.append((cur_start, s))
+            cur_start = s
+        # else: sentence fits in the current chunk — extend by continuing
+    if cur_start is not None:
+        out.append((cur_start, end))
+    return out
+
+
+def _sentence_spans(text: str, start: int, end: int) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    pos = start
+    for match in _SENT_BREAK.finditer(text, start, end):
+        spans.append((pos, match.end()))
+        pos = match.end()
+    if pos < end:
+        spans.append((pos, end))
+    return spans
+
+
+def _hard_split(text: str, start: int, end: int,
+                max_chars: int) -> list[tuple[int, int]]:
+    """A single sentence longer than ``max_chars``: break at the last space
+    inside each window, or hard-cut when there is none."""
+    out: list[tuple[int, int]] = []
+    pos = start
+    while end - pos > max_chars:
+        window_end = pos + max_chars
+        cut = text.rfind(" ", pos + 1, window_end)
+        if cut <= pos:
+            cut = window_end
+        out.append((pos, cut))
+        pos = cut
+        while pos < end and text[pos] == " ":
+            pos += 1
+    if pos < end:
+        out.append((pos, end))
+    return out
 
 
 def _paragraph_spans(text: str) -> list[tuple[int, int]]:

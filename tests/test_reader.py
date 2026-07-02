@@ -129,3 +129,73 @@ class TestTheme:
         assert theme.clamp_font_pt(999) == theme.MAX_FONT_PT
         assert theme.clamp_font_pt("bad") == theme.DEFAULT_FONT_PT
         assert theme.clamp_font_pt(16) == 16
+
+
+class TestRound10Fixes:
+    def test_corrupt_state_db_rebuilds(self, tmp_path):
+        """A corrupt reader-state.db used to raise sqlite3.DatabaseError out
+        of ReaderFrame.__init__ forever; now it quarantines and rebuilds."""
+        from ficary.reader.state import ReaderStateDB
+        db_path = tmp_path / "reader-state.db"
+        db_path.write_bytes(b"this is not a sqlite database at all........")
+        db = ReaderStateDB(db_path)
+        db.save_position("k", 3, 17)
+        assert db.load_position("k") == (3, 17)
+        db.close()
+        assert (tmp_path / "reader-state.db.corrupt").exists()
+
+    def test_from_file_translates_reader_errors(self, tmp_path):
+        """read_chapters raises ChaptersNotReadableError — a sibling of
+        ReaderSourceError — which used to escape the GUI's except clause."""
+        import pytest
+        from ficary.reader.source import ReaderSourceError, StorySource
+        bad = tmp_path / "story.txt"  # TXT is always ChaptersNotReadable
+        bad.write_text("plain text", encoding="utf-8")
+        with pytest.raises(ReaderSourceError):
+            StorySource.from_file(bad)
+
+    def test_htm_suffix_reads_like_html(self, tmp_path):
+        """The reader's file dialog offers *.htm; read_chapters used to
+        reject the suffix outright."""
+        import shutil
+        from ficary.exporters import export_html
+        from ficary.models import Chapter, Story
+        from ficary.updater import read_chapters
+        story = Story(id=1, title="T", author="A", summary="S",
+                      url="https://www.fanfiction.net/s/1")
+        story.chapters = [Chapter(number=1, title="One", html="<p>body</p>")]
+        html_path = export_html(story, str(tmp_path))
+        htm_path = tmp_path / "story.htm"
+        shutil.copyfile(html_path, htm_path)
+        via_htm = read_chapters(htm_path)
+        assert [c.number for c in via_htm] == [1]
+        assert "<p>body</p>" in via_htm[0].html
+
+    def test_chunk_offsets_exact_with_double_spaces(self):
+        """Sentences separated by two spaces (ubiquitous in older fanfic)
+        used to break the text[start:end] contract via lossy re-joining."""
+        from ficary.reader.chunker import chunk_text
+        sentence = "This is a sentence that is meant to pad out the paragraph nicely."
+        text = ("  ".join([sentence] * 12)) + "\n\nShort second paragraph."
+        chunks = chunk_text(text, max_chars=200)
+        assert len(chunks) > 2
+        for c in chunks:
+            assert c.text == text[c.start:c.end]
+        assert chunks[-1].text == "Short second paragraph."
+
+    def test_chunk_offsets_exact_with_newline_separated_sentences(self):
+        from ficary.reader.chunker import chunk_text
+        line = "A songfic line that goes on for quite a while, la la la."
+        text = "\n".join([line] * 10)  # single paragraph, newline-separated
+        chunks = chunk_text(text, max_chars=150)
+        for c in chunks:
+            assert c.text == text[c.start:c.end]
+        joined = "".join(text[c.start:c.end] for c in chunks)
+        assert line[:20] in joined and joined.count("la la la") == 10
+
+    def test_oversized_single_word_hard_splits(self):
+        from ficary.reader.chunker import chunk_text
+        text = "x" * 950
+        chunks = chunk_text(text, max_chars=400)
+        assert all(len(c.text) <= 400 for c in chunks)
+        assert "".join(c.text for c in chunks) == text

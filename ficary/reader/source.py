@@ -105,7 +105,14 @@ class StorySource:
         """Build from an exported EPUB/HTML file (a library entry)."""
         from ..updater import read_chapters
         path = Path(path)
-        chapters = read_chapters(path)
+        try:
+            chapters = read_chapters(path)
+        except Exception as exc:
+            # read_chapters raises ChaptersNotReadableError (a sibling of
+            # ReaderSourceError, not a subclass) for third-party EPUBs,
+            # corrupt zips, and unsupported suffixes — translate so the
+            # GUI's single except clause catches everything.
+            raise ReaderSourceError(f"Can't read {path.name}: {exc}") from exc
         if not chapters:
             raise ReaderSourceError(f"No chapters found in {path}")
         by_number = {c.number: c for c in chapters}

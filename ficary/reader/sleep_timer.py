@@ -16,6 +16,8 @@ MAX_MINUTES = 120
 class SleepTimer:
     def __init__(self, on_expire: Callable[[], None]):
         self._on_expire = on_expire
+        self._lock = threading.Lock()
+        self._gen = 0  # bumps on start/cancel; a stale expiry must not fire
         self._timer: Optional[threading.Timer] = None
         self._deadline: Optional[float] = None  # time.monotonic() target
 
@@ -23,23 +25,35 @@ class SleepTimer:
         """Start (or restart) the timer. Clamps to [MIN, MAX]; returns the
         clamped minute count actually used."""
         minutes = max(MIN_MINUTES, min(MAX_MINUTES, int(minutes)))
-        self.cancel()
         secs = minutes * 60
-        self._deadline = time.monotonic() + secs
-        self._timer = threading.Timer(secs, self._fire)
-        self._timer.daemon = True
-        self._timer.start()
+        with self._lock:
+            self._gen += 1
+            if self._timer is not None:
+                self._timer.cancel()
+            self._deadline = time.monotonic() + secs
+            timer = threading.Timer(secs, self._fire, args=(self._gen,))
+            timer.daemon = True
+            self._timer = timer
+            timer.start()
         return minutes
 
     def cancel(self) -> None:
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
-        self._deadline = None
+        with self._lock:
+            self._gen += 1
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            self._deadline = None
 
-    def _fire(self) -> None:
-        self._timer = None
-        self._deadline = None
+    def _fire(self, gen: Optional[int] = None) -> None:
+        with self._lock:
+            if gen is not None and gen != self._gen:
+                # A restart/cancel raced this expiry: Timer.cancel() can't
+                # stop a callback that already began, but the state belongs
+                # to the newer timer now — don't clobber it or fire.
+                return
+            self._timer = None
+            self._deadline = None
         self._on_expire()
 
     @property
@@ -47,6 +61,8 @@ class SleepTimer:
         return self._deadline is not None
 
     def remaining_seconds(self) -> int:
-        if self._deadline is None:
+        with self._lock:
+            deadline = self._deadline
+        if deadline is None:
             return 0
-        return max(0, int(round(self._deadline - time.monotonic())))
+        return max(0, int(round(deadline - time.monotonic())))

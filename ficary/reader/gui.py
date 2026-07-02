@@ -10,6 +10,7 @@ so the audio layer can hook in without touching this file.
 from __future__ import annotations
 
 import logging
+import threading
 
 import wx
 
@@ -18,6 +19,7 @@ from ..audio.events import Event, ReaderEvent
 from ..soundscape import library as _sc_library
 from ..soundscape.session import SoundscapeSession
 from ..prefs import (
+    KEY_READER_AUTOADVANCE,
     KEY_READER_FONT_PT,
     KEY_READER_THEME,
     KEY_READER_TTS_MODE,
@@ -51,6 +53,8 @@ class ReaderFrame(wx.Frame):
         self._paused = False
         self._engine = get_engine()
         self._live = None
+        self._resolving_voice = False
+        self._last_voice = ""
         self._soundscape_session = None
         self._sleep_timer = SleepTimer(on_expire=lambda: wx.CallAfter(self._on_sleep_expire))
 
@@ -78,10 +82,10 @@ class ReaderFrame(wx.Frame):
         self._mi_smaller = menu.Append(wx.ID_ANY, "&Smaller text\tCtrl+-")
         self._mi_theme = menu.Append(wx.ID_ANY, "Cycle &theme\tCtrl+T")
         menu.AppendSeparator()
-        self._mi_play = menu.Append(wx.ID_ANY, "&Play/Pause (app voice)\tCtrl+P")
-        self._mi_stop = menu.Append(wx.ID_ANY, "&Stop reading\tCtrl+.")
-        self._mi_soundscape = menu.Append(wx.ID_ANY, "&Soundscape for this story...\tCtrl+Shift+A")
-        self._mi_sleep = menu.Append(wx.ID_ANY, "Set sleep &timer...\tCtrl+Shift+T")
+        self._mi_play = menu.Append(wx.ID_ANY, "Play/Pause (app &voice)\tCtrl+P")
+        self._mi_stop = menu.Append(wx.ID_ANY, "Stop &reading\tCtrl+.")
+        self._mi_soundscape = menu.Append(wx.ID_ANY, "S&oundscape for this story...\tCtrl+Shift+A")
+        self._mi_sleep = menu.Append(wx.ID_ANY, "Set sleep t&imer...\tCtrl+Shift+T")
         self._mi_sleep_status = menu.Append(wx.ID_ANY, "Sleep timer stat&us\tCtrl+Shift+S")
         menu.AppendSeparator()
         self._mi_close = menu.Append(wx.ID_CLOSE, "&Close\tCtrl+W")
@@ -112,7 +116,11 @@ class ReaderFrame(wx.Frame):
             panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL, size=(240, -1))
         self.chapter_list.InsertColumn(0, "Chapter", width=230)
         self.chapter_list.SetName("Chapters")
-        self.chapter_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_chapter_selected)
+        # ACTIVATED (Enter/double-click) only. Binding SELECTED as well made
+        # every arrow keypress load a chapter and yank focus to the text
+        # control (the list was unbrowsable by keyboard), and _load_chapter's
+        # own programmatic Select() re-entered the handler with caret=0,
+        # clobbering every restored reading position.
         self.chapter_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_chapter_selected)
         left.Add(self.chapter_list, 1, wx.EXPAND | wx.ALL, 4)
 
@@ -172,6 +180,11 @@ class ReaderFrame(wx.Frame):
         self._load_chapter(chapter, caret=offset)
 
     def _save_position(self) -> None:
+        if self._current_rc is None:
+            # No chapter ever loaded (e.g. the restore-target chapter failed
+            # to read) — saving now would overwrite the stored position
+            # with (1, 0).
+            return
         try:
             offset = self.text.GetInsertionPoint()
         except RuntimeError:
@@ -289,7 +302,32 @@ class ReaderFrame(wx.Frame):
                 self._live.pause()
                 self._paused = True
             return
+        if not self._engine.available:
+            wx.MessageBox(
+                "Audio playback isn't available — PyOpenAL or an audio "
+                "device is missing. Install the playback feature to use "
+                "app-voice reading; screen-reader mode works without it.",
+                "Reader", wx.OK | wx.ICON_INFORMATION, self)
+            return
+        if self._resolving_voice:
+            return
+        # Voice resolution can hit the network (edge-tts fetches its voice
+        # catalog on first use) — run it off the GUI thread so a slow or
+        # offline first Play doesn't freeze the window.
+        self._resolving_voice = True
+        threading.Thread(
+            target=self._resolve_voice_and_play, daemon=True,
+            name="ficary-reader-voice",
+        ).start()
+
+    def _resolve_voice_and_play(self) -> None:
         voice = self._default_voice()
+        wx.CallAfter(self._begin_playback, voice)
+
+    def _begin_playback(self, voice: str) -> None:
+        self._resolving_voice = False
+        if not self._alive:
+            return
         if not voice:
             wx.MessageBox(
                 "No TTS voice is available. Install the audio feature "
@@ -297,14 +335,40 @@ class ReaderFrame(wx.Frame):
                 "Reader", wx.OK | wx.ICON_INFORMATION, self)
             return
         self._paused = False
-        self._live = LiveTTSController(
+        self._last_voice = voice
+        controller = LiveTTSController(
             self._engine, voice=voice,
             rate=str(self.prefs.get(KEY_SPEECH_RATE) or "0"),
             on_highlight=lambda c: wx.CallAfter(self._highlight_chunk, c),
+            on_complete=lambda failed: wx.CallAfter(self._on_tts_complete, failed),
             story_key=self.source.story_key,
         )
+        self._live = controller
         text = self._current_rc.text if self._current_rc else ""
-        self._live.start(text, self._current_chapter)
+        controller.start(text, self._current_chapter)
+
+    def _on_tts_complete(self, failed_chunks: int) -> None:
+        """Natural end-of-chapter: announce any skipped sections, then
+        auto-advance when the pref asks for it."""
+        if not self._alive:
+            return
+        if failed_chunks:
+            wx.MessageBox(
+                f"{failed_chunks} section(s) of this chapter couldn't be "
+                "converted to speech and were skipped.",
+                "Reader", wx.OK | wx.ICON_WARNING, self)
+        if not self.prefs.get_bool(KEY_READER_AUTOADVANCE):
+            return
+        if self._current_chapter >= self.source.chapter_count():
+            return
+        if self._live is None or self._paused:
+            return
+        voice = self._last_voice
+        self._load_chapter(self._current_chapter + 1)
+        if voice:
+            # Reuse the resolved voice — no need to re-hit the catalog
+            # between chapters.
+            self._begin_playback(voice)
 
     def _on_stop_tts(self, event) -> None:
         if self._live is not None:
@@ -314,7 +378,9 @@ class ReaderFrame(wx.Frame):
         self._clear_highlight()
 
     def _highlight_chunk(self, chunk) -> None:
-        if not self._alive:
+        if not self._alive or self._live is None:
+            # A CallAfter queued just before Stop (or from a superseded
+            # worker) must not repaint a highlight nothing is reading.
             return
         pal = _theme.palette(self.prefs.get(KEY_READER_THEME))
         self._clear_highlight()

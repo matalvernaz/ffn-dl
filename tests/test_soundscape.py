@@ -52,6 +52,7 @@ class FakeEngine:
     def __init__(self):
         self.calls = []
         self.subscribed = None
+        self._next_handle = 1
 
     def subscribe(self, cb):
         self.subscribed = cb
@@ -61,6 +62,12 @@ class FakeEngine:
 
     def add_looping_source(self, path, **kw):
         self.calls.append(("add", path))
+        handle = self._next_handle
+        self._next_handle += 1
+        return handle
+
+    def set_gain(self, ch, gain):
+        self.calls.append(("set_gain", ch, gain))
 
     def set_reverb_room_size(self, size):
         self.calls.append(("reverb", size))
@@ -94,6 +101,7 @@ class TestSession:
         sess = SoundscapeSession(eng, self._sc())
         assert eng.subscribed is not None  # session subscribed to the bus
         sess._on_event(Event(ReaderEvent.READER_OPENED))
+        sess._join_build()
         assert "add" in eng._kinds() and "fade_in" in eng._kinds()
 
     def test_ducks_under_tts_then_restores(self, monkeypatch):
@@ -101,6 +109,7 @@ class TestSession:
         eng = FakeEngine()
         sess = SoundscapeSession(eng, self._sc())
         sess._on_event(Event(ReaderEvent.READER_OPENED))
+        sess._join_build()
         sess._on_event(Event(ReaderEvent.TTS_STARTED))
         sess._on_event(Event(ReaderEvent.TTS_STOPPED))
         assert "duck" in eng._kinds() and "restore" in eng._kinds()
@@ -110,6 +119,7 @@ class TestSession:
         eng = FakeEngine()
         sess = SoundscapeSession(eng, self._sc())
         sess._on_event(Event(ReaderEvent.READER_OPENED))
+        sess._join_build()
         sess._on_event(Event(ReaderEvent.READER_CLOSED))
         assert "fade_out" in eng._kinds()
 
@@ -118,6 +128,7 @@ class TestSession:
         eng = FakeEngine()
         sess = SoundscapeSession(eng, self._sc())
         sess._on_event(Event(ReaderEvent.READER_OPENED))
+        sess._join_build()
         assert "fade_in" not in eng._kinds()
 
     def test_no_soundscape_is_inert(self):
@@ -136,3 +147,58 @@ class TestAssignment:
         db.set_soundscape("k", None)
         assert db.get_soundscape("k") is None
         db.close()
+
+
+class TestSessionFixes:
+    def _sc(self, name="Rain"):
+        return Soundscape(name, [Sound("rain.ogg", 0.5)], master_volume=0.8)
+
+    def test_first_assignment_while_reader_open_builds(self, monkeypatch):
+        """Assigning a soundscape to a story that had none used to be a
+        silent no-op until the reader was reopened."""
+        monkeypatch.setattr("ficary.soundscape.library.resolve_source", lambda s: Path("/x"))
+        eng = FakeEngine()
+        sess = SoundscapeSession(eng, None)  # opened with no soundscape
+        sess._on_event(Event(ReaderEvent.READER_OPENED))
+        sess._join_build()
+        assert eng.calls == []
+        sess.set_soundscape(self._sc())
+        sess._join_build()
+        assert "add" in eng._kinds() and "fade_in" in eng._kinds()
+
+    def test_swap_while_narrating_reapplies_duck(self, monkeypatch):
+        monkeypatch.setattr("ficary.soundscape.library.resolve_source", lambda s: Path("/x"))
+        eng = FakeEngine()
+        sess = SoundscapeSession(eng, self._sc())
+        sess._on_event(Event(ReaderEvent.READER_OPENED))
+        sess._join_build()
+        sess._on_event(Event(ReaderEvent.TTS_STARTED))
+        eng.calls.clear()
+        sess.set_soundscape(self._sc("Fire"))
+        sess._join_build()
+        assert "duck" in eng._kinds()  # new bed comes up ducked, not on top
+
+    def test_close_after_fade_out_does_not_hard_cut(self, monkeypatch):
+        """READER_CLOSED starts the graceful fade; close() must not stop the
+        channel immediately after (which made the fade inaudible)."""
+        monkeypatch.setattr("ficary.soundscape.library.resolve_source", lambda s: Path("/x"))
+        eng = FakeEngine()
+        sess = SoundscapeSession(eng, self._sc())
+        sess._on_event(Event(ReaderEvent.READER_OPENED))
+        sess._join_build()
+        sess._on_event(Event(ReaderEvent.READER_CLOSED))
+        eng.calls.clear()
+        sess.close()
+        assert "stop" not in eng._kinds()
+
+    def test_assignment_after_sleep_fadeout_rebuilds(self, monkeypatch):
+        monkeypatch.setattr("ficary.soundscape.library.resolve_source", lambda s: Path("/x"))
+        eng = FakeEngine()
+        sess = SoundscapeSession(eng, self._sc())
+        sess._on_event(Event(ReaderEvent.READER_OPENED))
+        sess._join_build()
+        sess.fade_out()  # sleep timer
+        eng.calls.clear()
+        sess.set_soundscape(self._sc("Fire"))
+        sess._join_build()
+        assert "add" in eng._kinds() and "fade_in" in eng._kinds()

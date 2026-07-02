@@ -1118,7 +1118,7 @@ def read_chapters(filepath: Path | str) -> list[Chapter]:
         raise ChaptersNotReadableError(f"File not found: {path}")
 
     suffix = path.suffix.lower()
-    if suffix == ".html":
+    if suffix in (".html", ".htm"):
         return _read_html_chapters(path)
     if suffix == ".epub":
         return _read_epub_chapters(path)
