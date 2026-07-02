@@ -106,6 +106,7 @@ class FullHealResult:
     watchlist_heal: WatchlistHealResult | None = None
     cache_pruned: int = 0
     cache_bytes_freed: int = 0
+    cache_quarantine_dir: Path | None = None
     index_backups: list[Path] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -189,17 +190,19 @@ def heal_all(
     index: LibraryIndex | None = None,
     watchlist: WatchlistStore | None = None,
     auto_backup: bool = True,
+    destructive: bool = False,
 ) -> FullHealResult:
-    """Apply a safe cross-surface heal.
+    """Apply a cross-surface heal.
 
-    "Safe" here means: every sub-doctor's full set of heal flags is
-    enabled, because the individual sub-doctor CLI entry points
-    already gate the destructive ones behind ``--heal``. By the time
-    the caller opts into :func:`heal_all`, they've already committed
-    to the full repair.
-
-    A pre-heal backup of the library index is taken by default so a
-    misdiagnosed heal can be rolled back with ``--restore-index``.
+    With ``destructive=False`` (the default) only the reversible fixes
+    run: stat-cache refresh and orphan-file indexing. Everything that
+    REMOVES data — dropping missing/stale index entries, deleting
+    unrepairable watches, pruning orphan caches — requires
+    ``destructive=True`` (the CLI's ``--heal-all``), and callers are
+    expected to snapshot the watchlist and write a heal manifest first
+    (the library index is snapshotted here via ``auto_backup``). The
+    rounds-8/9 audits both found doctor paths destroying data on a
+    misdiagnosis; opt-in plus manifest is the systemic fix.
     """
     if index is None:
         index = LibraryIndex.load()
@@ -223,10 +226,10 @@ def heal_all(
             continue
         result.library_heals[root] = heal_library(
             root, index, lib_report,
-            drop_missing=True,
+            drop_missing=destructive,
             refresh_drift=True,
-            prune_untrackable=True,
-            prune_duplicates=True,
+            prune_untrackable=destructive,
+            prune_duplicates=destructive,
             scan_orphans=True,
         )
 
@@ -241,7 +244,7 @@ def heal_all(
     ):
         index.save()
 
-    if watchlist is not None and report.watchlist_report is not None:
+    if destructive and watchlist is not None and report.watchlist_report is not None:
         result.watchlist_heal = heal_watchlist(
             watchlist, report.watchlist_report,
             drop_invalid_type=True,
@@ -251,9 +254,14 @@ def heal_all(
             drop_duplicates=True,
         )
 
-    if report.cache_report is not None and report.cache_report.orphan_entries:
+    if (
+        destructive
+        and report.cache_report is not None
+        and report.cache_report.orphan_entries
+    ):
         prune_result = prune_cache(report.cache_report)
         result.cache_pruned = prune_result.pruned
         result.cache_bytes_freed = prune_result.bytes_freed
+        result.cache_quarantine_dir = prune_result.quarantine_dir
 
     return result

@@ -132,7 +132,9 @@ class TestHealAll:
         wl.add(_make_watch(target=""))
 
         report = check_all(index=idx, watchlist=wl, cache_root=tmp_path / "cache")
-        result = heal_all(report, index=idx, watchlist=wl, auto_backup=False)
+        # Dropping entries/watches is opt-in since round 10 (F1).
+        result = heal_all(report, index=idx, watchlist=wl,
+                          auto_backup=False, destructive=True)
 
         # Library entry dropped.
         assert root in result.library_heals
@@ -176,7 +178,8 @@ class TestHealAll:
         wl.add(_make_watch(target=""))
 
         report = check_all(index=idx, watchlist=wl, cache_root=tmp_path / "cache")
-        result = heal_all(report, index=idx, watchlist=wl, auto_backup=False)
+        result = heal_all(report, index=idx, watchlist=wl,
+                          auto_backup=False, destructive=True)
         summary = result.summary()
         assert "Library" in summary
         assert "Watchlist" in summary
@@ -189,3 +192,24 @@ class TestHealAll:
             report, index=idx, watchlist=wl, auto_backup=False,
         )
         assert result.summary() == "No changes."
+
+
+class TestHealAllSafeDefault:
+    def test_default_heal_is_non_destructive(self, tmp_path):
+        """Round-10 F1: without destructive=True, heal_all must not drop
+        index entries, delete watches, or prune caches."""
+        idx = _fresh_index(tmp_path)
+        wl = _fresh_watchlist(tmp_path)
+        root = tmp_path / "lib"
+        root.mkdir()
+        _seed_lib(idx, root, "https://x/1", "missing.epub")
+        wl.add(_make_watch(target=""))
+
+        report = check_all(index=idx, watchlist=wl, cache_root=tmp_path / "cache")
+        result = heal_all(report, index=idx, watchlist=wl, auto_backup=False)
+
+        heals = result.library_heals.get(root)
+        assert heals is None or heals.removed_missing == 0
+        assert result.watchlist_heal is None  # watches untouched
+        assert result.cache_pruned == 0
+        assert len(wl.all()) == 1  # the bad watch survives

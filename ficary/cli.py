@@ -1903,35 +1903,61 @@ def _handle_library_doctor(args: argparse.Namespace) -> None:
     if report.is_clean():
         sys.exit(0)
 
-    if not args.heal:
+    drop_missing = args.heal_drop_missing or args.heal_all
+    prune_stale = args.heal_prune_stale or args.heal_all
+    any_heal = args.heal or args.heal_all or drop_missing or prune_stale
+    if not any_heal:
         print(
-            "\nRun again with --heal to apply fixes "
-            "(drop missing entries, index orphan files, refresh stat "
-            "cache, prune stale records).",
+            "\nRun again with --heal for the safe fixes (index orphan "
+            "files, refresh stat cache); add --heal-drop-missing / "
+            "--heal-prune-stale (or --heal-all) for the fixes that "
+            "remove index entries.",
         )
         # Exit non-zero so shell callers can detect drift programmatically.
         sys.exit(2)
 
-    # Take a snapshot before mutating the index so a misdiagnosed heal
-    # can be rolled back with --restore-index. snapshot_before logs at
-    # INFO with the operation label so the operator can later map the
-    # backup file back to the user action that triggered it.
-    backup_path = snapshot_before(f"--heal on {root_resolved}", idx.path)
+    destructive = drop_missing or prune_stale
+    backup_path = None
+    if destructive:
+        # Take a snapshot before mutating the index so a misdiagnosed
+        # heal can be rolled back with --doctor-restore-last (or
+        # --restore-index). snapshot_before logs at INFO with the
+        # operation label so the operator can map the backup back to
+        # the user action that triggered it.
+        backup_path = snapshot_before(f"--heal on {root_resolved}", idx.path)
 
     result = heal(
         root_resolved,
         idx,
         report,
-        drop_missing=True,
+        drop_missing=drop_missing,
         refresh_drift=True,
-        prune_untrackable=True,
-        prune_duplicates=True,
+        prune_untrackable=prune_stale,
+        prune_duplicates=prune_stale,
         scan_orphans=True,
     )
     idx.save()
     print("\n" + result.summary())
-    if backup_path is not None:
-        print(f"(Pre-heal backup: {backup_path})")
+    if destructive:
+        from .heal_manifest import HealManifest, write_manifest
+        dropped = (
+            getattr(result, "removed_missing", 0)
+            + getattr(result, "removed_stale_untrackable", 0)
+            + getattr(result, "removed_stale_duplicates", 0)
+        )
+        manifest_path = write_manifest(HealManifest(
+            label=f"--library-doctor heal on {root_resolved}",
+            index_snapshot=str(backup_path) if backup_path else None,
+            dropped_index_entries=int(dropped or 0),
+        ))
+        print(f"(Pre-heal backup: {backup_path}; manifest: {manifest_path};"
+              " undo with --doctor-restore-last)")
+    else:
+        print(
+            "\nSafe fixes applied. Fixes that remove index entries were "
+            "NOT (--heal-drop-missing / --heal-prune-stale, or "
+            "--heal-all, to opt in)."
+        )
     sys.exit(0)
 
 
@@ -2157,9 +2183,19 @@ def _handle_cache_doctor(args: argparse.Namespace) -> None:
     if args.prune and report.orphan_entries:
         result = prune(report)
         print("\n" + result.summary())
+        if result.quarantine_dir is not None:
+            from .heal_manifest import HealManifest, write_manifest
+            manifest_path = write_manifest(HealManifest(
+                label="--cache-doctor --prune",
+                cache_quarantine_dir=str(result.quarantine_dir),
+                pruned_cache_entries=int(result.pruned or 0),
+            ))
+            print(f"(Manifest: {manifest_path}; undo with "
+                  "--doctor-restore-last)")
     elif report.orphan_entries and not args.prune:
         print(
-            "\nRun again with --prune to delete the orphan entries.",
+            "\nRun again with --prune to quarantine the orphan entries "
+            "(recoverable for 14 days via --doctor-restore-last).",
         )
     sys.exit(0)
 
@@ -2248,11 +2284,55 @@ def _handle_full_doctor(args: argparse.Namespace) -> None:
     print(report.summary())
     if report.is_clean():
         sys.exit(0)
-    if not args.heal:
-        print("\nRun again with --heal to apply all safe fixes.")
+    destructive = args.heal_all or (
+        args.heal_drop_missing and args.heal_prune_stale
+        and args.heal_drop_watches
+    )
+    if not (args.heal or destructive):
+        print(
+            "\nRun again with --heal for the safe fixes; --heal-all "
+            "also drops missing/stale index entries, deletes "
+            "unrepairable watches, and quarantines orphan caches "
+            "(snapshotted; undo with --doctor-restore-last)."
+        )
         sys.exit(2)
-    result = heal_all(report)
+
+    watchlist_snapshot = None
+    if destructive:
+        from .library.backup import snapshot_before
+        from .watchlist import WatchlistStore
+        try:
+            store = WatchlistStore.load_default()
+            watchlist_snapshot = snapshot_before("--doctor --heal-all", store.path)
+        except Exception:
+            logger.debug("Watchlist snapshot failed", exc_info=True)
+
+    result = heal_all(report, destructive=destructive)
     print("\n" + result.summary())
+    if destructive:
+        from .heal_manifest import HealManifest, write_manifest
+        index_snapshot = (
+            str(result.index_backups[0]) if result.index_backups else None
+        )
+        manifest_path = write_manifest(HealManifest(
+            label="--doctor --heal-all",
+            index_snapshot=index_snapshot,
+            watchlist_snapshot=str(watchlist_snapshot) if watchlist_snapshot else None,
+            cache_quarantine_dir=(
+                str(result.cache_quarantine_dir)
+                if result.cache_quarantine_dir else None
+            ),
+            dropped_watches=int(
+                result.watchlist_heal.removed if result.watchlist_heal else 0
+            ),
+            pruned_cache_entries=int(result.cache_pruned or 0),
+        ))
+        print(f"(Manifest: {manifest_path}; undo with --doctor-restore-last)")
+    else:
+        print(
+            "\nSafe fixes applied. Data-removing fixes were NOT "
+            "(--heal-all to opt in)."
+        )
     sys.exit(0)
 
 
@@ -2309,13 +2389,18 @@ def _handle_watchlist_doctor(args: argparse.Namespace) -> None:
     print(report.summary())
     if report.is_clean():
         sys.exit(0)
-    if not args.heal:
+    if not (args.heal_drop_watches or args.heal_all):
         print(
-            "\nRun again with --heal to drop unrepairable entries "
-            "(invalid type, empty target, unsupported site, "
-            "unresolvable URL, duplicates).",
+            "\nDropping unrepairable entries (invalid type, empty "
+            "target, unsupported site, unresolvable URL, duplicates) "
+            "DELETES watches — opt in with --heal-drop-watches (or "
+            "--heal-all). The watchlist is snapshotted first and "
+            "--doctor-restore-last undoes it.",
         )
         sys.exit(2)
+    from .heal_manifest import HealManifest, write_manifest
+    from .library.backup import snapshot_before
+    snapshot = snapshot_before("--watchlist-doctor heal", store.path)
     result = heal_watchlist(
         store,
         report,
@@ -2326,6 +2411,13 @@ def _handle_watchlist_doctor(args: argparse.Namespace) -> None:
         drop_duplicates=True,
     )
     print("\n" + result.summary())
+    manifest_path = write_manifest(HealManifest(
+        label="--watchlist-doctor heal",
+        watchlist_snapshot=str(snapshot) if snapshot else None,
+        dropped_watches=int(result.removed or 0),
+    ))
+    print(f"(Watchlist snapshot: {snapshot}; manifest: {manifest_path}; "
+          "undo with --doctor-restore-last)")
     sys.exit(0)
 
 
@@ -2410,6 +2502,79 @@ def _handle_restore_index(args: argparse.Namespace) -> None:
     idx_path = default_index_path()
     restore(backup_path, idx_path)
     print(f"Restored {idx_path} from {backup_path}.")
+    sys.exit(0)
+
+
+def _handle_doctor_restore_last() -> None:
+    """Roll back the most recent destructive doctor heal: restore the
+    snapshots named in the newest heal manifest and move quarantined
+    cache entries back into place."""
+    from .heal_manifest import latest_manifest, mark_restored
+    from .library.backup import restore
+    from .library.index import default_index_path
+
+    manifest = latest_manifest()
+    if manifest is None or not manifest.has_anything_to_restore():
+        print(
+            "No heal manifest with anything to restore. Destructive "
+            "heals (--heal-drop-missing/--heal-prune-stale/"
+            "--heal-drop-watches/--heal-all, --cache-doctor --prune) "
+            "write one automatically.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"Restoring heal from {manifest.created_at} ({manifest.label})")
+    if manifest.restored_at:
+        print(f"  Note: already restored once at {manifest.restored_at}.")
+
+    if manifest.index_snapshot:
+        snap = Path(manifest.index_snapshot)
+        if snap.exists():
+            restore(snap, default_index_path())
+            print(f"  Library index restored from {snap.name}.")
+        else:
+            print(f"  Index snapshot missing: {snap}", file=sys.stderr)
+
+    if manifest.watchlist_snapshot:
+        from .watchlist import WatchlistStore
+        snap = Path(manifest.watchlist_snapshot)
+        if snap.exists():
+            store = WatchlistStore.load_default()
+            restore(snap, store.path)
+            print(f"  Watchlist restored from {snap.name}.")
+        else:
+            print(f"  Watchlist snapshot missing: {snap}", file=sys.stderr)
+
+    if manifest.cache_quarantine_dir:
+        quarantine = Path(manifest.cache_quarantine_dir)
+        if quarantine.is_dir():
+            cache_root = quarantine.parent.parent  # <root>/.trash/<stamp>
+            moved = skipped = 0
+            for entry in quarantine.iterdir():
+                target = cache_root / entry.name
+                if target.exists():
+                    skipped += 1
+                    continue
+                try:
+                    os.replace(entry, target)
+                    moved += 1
+                except OSError:
+                    skipped += 1
+            print(
+                f"  Cache: {moved} quarantined entr"
+                f"{'y' if moved == 1 else 'ies'} moved back"
+                + (f", {skipped} skipped (already present/locked)"
+                   if skipped else "") + "."
+            )
+            try:
+                quarantine.rmdir()
+            except OSError:
+                pass
+        else:
+            print(f"  Quarantine dir missing: {quarantine}", file=sys.stderr)
+
+    mark_restored(manifest)
     sys.exit(0)
 
 
@@ -3175,9 +3340,58 @@ def _build_parser() -> argparse.ArgumentParser:
         "--heal",
         action="store_true",
         help=(
-            "With --library-doctor: apply every recommended fix "
-            "(drop missing entries, index orphan files, refresh stat "
-            "cache, prune stale untrackable/duplicate records)."
+            "With the doctor flags: apply the SAFE fixes only (refresh "
+            "stat cache, index orphan files). Data-removing fixes need "
+            "their own opt-in: --heal-drop-missing, --heal-prune-stale, "
+            "--heal-drop-watches, or --heal-all for everything."
+        ),
+    )
+    parser.add_argument(
+        "--heal-drop-missing",
+        action="store_true",
+        help=(
+            "With --library-doctor/--doctor: also DROP index entries "
+            "whose files are missing on disk. Snapshots the index and "
+            "writes a heal manifest first (--doctor-restore-last "
+            "rolls it back)."
+        ),
+    )
+    parser.add_argument(
+        "--heal-prune-stale",
+        action="store_true",
+        help=(
+            "With --library-doctor/--doctor: also PRUNE stale "
+            "untrackable and duplicate records from the index. "
+            "Snapshot + manifest as with --heal-drop-missing."
+        ),
+    )
+    parser.add_argument(
+        "--heal-drop-watches",
+        action="store_true",
+        help=(
+            "With --watchlist-doctor/--doctor: also DELETE unrepairable "
+            "watches (invalid type, empty target, unsupported site, "
+            "unresolvable URL, duplicates). Snapshots the watchlist "
+            "and writes a heal manifest first."
+        ),
+    )
+    parser.add_argument(
+        "--heal-all",
+        action="store_true",
+        help=(
+            "Shorthand for --heal plus every destructive heal category "
+            "(drop-missing, prune-stale, drop-watches, cache prune "
+            "with --doctor). Everything is snapshotted and recorded in "
+            "a heal manifest; undo with --doctor-restore-last."
+        ),
+    )
+    parser.add_argument(
+        "--doctor-restore-last",
+        action="store_true",
+        help=(
+            "Undo the most recent destructive heal: restore the "
+            "library-index and watchlist snapshots named in the newest "
+            "heal manifest and move quarantined cache entries back."
         ),
     )
     parser.add_argument(
@@ -4582,6 +4796,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.restore_index:
         _handle_restore_index(args)
+        return
+    if args.doctor_restore_last:
+        _handle_doctor_restore_last()
         return
     if args.discard_bad_index:
         _handle_discard_bad_index()

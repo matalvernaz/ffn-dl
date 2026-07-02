@@ -22,6 +22,7 @@ that no read ever triggers.
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -152,37 +153,77 @@ def check_cache(
 class PruneResult:
     pruned: int = 0
     bytes_freed: int = 0
+    quarantine_dir: Path | None = None
 
     def summary(self) -> str:
         if not self.pruned:
             return "Nothing pruned."
+        where = (
+            f"; recoverable from {self.quarantine_dir} until the next sweep"
+            if self.quarantine_dir else ""
+        )
         return (
             f"Pruned {self.pruned} cache entr"
             f"{'y' if self.pruned == 1 else 'ies'} "
-            f"({_format_bytes(self.bytes_freed)})."
+            f"({_format_bytes(self.bytes_freed)}{where})."
         )
 
 
-def prune(report: CacheReport) -> PruneResult:
-    """Delete every cache directory flagged as an orphan in ``report``.
+_TRASH_DIRNAME = ".trash"
+_TRASH_MAX_AGE_DAYS = 14
 
-    Safe to call with an empty orphan list — returns an empty
-    :class:`PruneResult`. Not atomic: if the directory tree has open
-    handles (shouldn't happen in a single-process run, but worth
-    noting), the offender is left in place and counted in the
-    remaining total on the next check.
+
+def prune(report: CacheReport) -> PruneResult:
+    """Quarantine every cache directory flagged as an orphan in
+    ``report``.
+
+    Orphans are MOVED into ``<cache_root>/.trash/<stamp>/`` (same
+    filesystem, so the rename is atomic) rather than deleted — the
+    rounds-8/9 audits both found doctor paths destroying data on a
+    misdiagnosis, and re-acquiring a pruned chapter cache costs hours
+    at FFN's rate-limit floor. Quarantine batches older than
+    ``_TRASH_MAX_AGE_DAYS`` are deleted on the next prune, so disk is
+    eventually reclaimed. Safe to call with an empty orphan list.
     """
     import shutil
+    import time
     result = PruneResult()
+    if not report.orphan_entries:
+        return result
+    cache_root = report.orphan_entries[0].parent
+    _sweep_old_trash(cache_root / _TRASH_DIRNAME)
+    batch = cache_root / _TRASH_DIRNAME / time.strftime("%Y%m%d-%H%M%S")
     for path in report.orphan_entries:
         size = _dir_size(path)
         try:
-            shutil.rmtree(path)
+            batch.mkdir(parents=True, exist_ok=True)
+            os.replace(path, batch / path.name)
         except OSError:
-            continue
+            # Cross-device or locked — fall back to outright removal so
+            # the orphan doesn't survive the prune it was flagged for.
+            try:
+                shutil.rmtree(path)
+            except OSError:
+                continue
         result.pruned += 1
         result.bytes_freed += size
+    if batch.is_dir():
+        result.quarantine_dir = batch
     return result
+
+
+def _sweep_old_trash(trash_root: Path) -> None:
+    import shutil
+    import time
+    if not trash_root.is_dir():
+        return
+    cutoff = time.time() - _TRASH_MAX_AGE_DAYS * 24 * 3600
+    for batch in trash_root.iterdir():
+        try:
+            if batch.is_dir() and batch.stat().st_mtime < cutoff:
+                shutil.rmtree(batch, ignore_errors=True)
+        except OSError:
+            continue
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -215,6 +256,8 @@ _NON_STORY_CACHE_PREFIXES = frozenset({
     "huggingface",
     "llm_an",
     "cf-cookies",
+    # Quarantined prune batches — never re-reported as orphans.
+    ".trash",
 })
 
 _NON_STORY_CACHE_NAME_PREFIXES = (
