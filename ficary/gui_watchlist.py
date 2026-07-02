@@ -538,8 +538,20 @@ class WatchlistFrame(wx.Frame):
         # frame's _store reference isn't shared into the worker.
         try:
             store = WatchlistStore.load_default()
+            downloader = None
+            if any(
+                getattr(w, "auto_download", False) for w in store.all()
+            ):
+                try:
+                    from .cli import make_watch_downloader
+                    downloader = make_watch_downloader(self.prefs)
+                except Exception:
+                    logger.exception(
+                        "Auto-download setup failed; polling notify-only.",
+                    )
             results = run_once(
                 store, self.prefs, watch_ids=watch_ids,
+                downloader=downloader,
             )
         except Exception as exc:
             logger.exception("Manual watchlist poll failed")
@@ -699,18 +711,22 @@ class AddURLWatchDialog(wx.Dialog):
         label_row.Add(self.label_ctrl, 1)
         sizer.Add(label_row, 0, wx.EXPAND | wx.ALL, pad)
 
-        self.auto_download_ctrl = wx.CheckBox(
-            panel, label="Auto-&download new items and attach the saved path")
-        self.auto_download_ctrl.SetName(
-            "Automatically download new items for this watch")
-        sizer.Add(self.auto_download_ctrl, 0, wx.ALL, pad)
-
         sizer.Add(
             wx.StaticText(panel, label="&Channels:"),
             0, wx.LEFT | wx.RIGHT | wx.TOP, pad,
         )
         self.channel_group = _ChannelCheckGroup(panel, channels)
         sizer.Add(self.channel_group, 1, wx.EXPAND | wx.ALL, pad)
+
+        self.auto_download_ctrl = wx.CheckBox(
+            panel, label="Auto-&download updates (saved path in the alert)",
+        )
+        self.auto_download_ctrl.SetName(
+            "Auto-download updates. When an update is detected, also "
+            "download and export it; the alert includes the saved file "
+            "path. A long download can delay a concurrent Run Now."
+        )
+        sizer.Add(self.auto_download_ctrl, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
 
         btn_row = wx.StdDialogButtonSizer()
         ok_btn = wx.Button(panel, wx.ID_OK, "&Add")
@@ -734,7 +750,7 @@ class AddURLWatchDialog(wx.Dialog):
         return self.channel_group.picked()
 
     def auto_download_value(self):
-        return self.auto_download_ctrl.GetValue()
+        return bool(self.auto_download_ctrl.GetValue())
 
 
 class AddSearchWatchDialog(wx.Dialog):
@@ -799,9 +815,12 @@ class AddSearchWatchDialog(wx.Dialog):
         sizer.Add(label_row, 0, wx.EXPAND | wx.ALL, pad)
 
         self.auto_download_ctrl = wx.CheckBox(
-            panel, label="Auto-&download new items and attach the saved path")
+            panel, label="Auto-&download updates (saved path in the alert)")
         self.auto_download_ctrl.SetName(
-            "Automatically download new items for this watch")
+            "Auto-download updates. When an update is detected, also "
+            "download and export it; the alert includes the saved file "
+            "path. A long download can delay a concurrent Run Now."
+        )
         sizer.Add(self.auto_download_ctrl, 0, wx.ALL, pad)
 
         sizer.Add(

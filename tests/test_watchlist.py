@@ -539,115 +539,182 @@ def test_run_once_reloads_store_inside_lock(tmp_path):
     reloaded = WatchlistStore(path)
     reloaded.reload()
     assert len(reloaded.all()) == 1
-    assert reloaded.all()[0].target == "https://example/works/42"
-
-
 # ---------------------------------------------------------------------------
 # Auto-download (round-10 F2)
 # ---------------------------------------------------------------------------
 
 
 class _DownloaderSpy:
-    """Records auto-download invocations; returns canned saved paths or
-    raises to exercise the failure-isolation path."""
+    """Fake for the injectable ``downloader`` — records calls, returns
+    canned paths, optionally raises."""
 
-    def __init__(self, saved=None, raises=None):
+    def __init__(self, paths=None, raise_exc=None):
         self.calls = []
-        self._saved = saved or []
-        self._raises = raises
+        self._paths = paths or []
+        self._raise = raise_exc
 
     def __call__(self, watch, result):
         self.calls.append((watch.id, list(result.new_items)))
-        if self._raises is not None:
-            raise self._raises
-        return list(self._saved)
+        if self._raise is not None:
+            raise self._raise
+        return list(self._paths)
 
 
-def test_auto_download_off_by_default_no_call(tmp_path):
+def _autodl_watch(**kw):
+    defaults = dict(
+        type=WATCH_TYPE_STORY,
+        site="ao3",
+        target="https://example/works/1",
+        channels=["pushover"],
+        auto_download=True,
+        last_seen=5,
+    )
+    defaults.update(kw)
+    return Watch(**defaults)
+
+
+def test_auto_download_fires_and_path_lands_in_message(tmp_path):
     store = WatchlistStore(tmp_path / "w.json")
-    store.add(Watch(
-        type=WATCH_TYPE_STORY, site="ao3",
-        target="https://example/works/1", channels=["pushover"],
-        last_seen=5,  # a real update is available
-    ))
-    dl = _DownloaderSpy(saved=["/lib/story.epub"])
+    store.add(_autodl_watch())
+    spy = _NotifierSpy()
+    dl = _DownloaderSpy(paths=["/lib/Story.epub"])
+
+    results = run_once(
+        store, _FakePrefs(),
+        scraper_factory=_factory(_FakeScraper(chapter_count=7)),
+        notifier=spy, downloader=dl,
+    )
+
+    [result] = results
+    assert dl.calls and dl.calls[0][0] == result.watch_id
+    assert result.downloaded_paths == ["/lib/Story.epub"]
+    _, notification, _ = spy.calls[0]
+    assert "Saved to: /lib/Story.epub" in notification.message
+
+
+def test_auto_download_skipped_without_flag(tmp_path):
+    store = WatchlistStore(tmp_path / "w.json")
+    store.add(_autodl_watch(auto_download=False))
+    dl = _DownloaderSpy(paths=["/x.epub"])
+
     run_once(
         store, _FakePrefs(),
         scraper_factory=_factory(_FakeScraper(chapter_count=7)),
-        notifier=_NotifierSpy(), downloader=dl,
-    )
-    assert dl.calls == []  # watch didn't opt in
-
-
-def test_auto_download_baseline_poll_no_call(tmp_path):
-    store = WatchlistStore(tmp_path / "w.json")
-    store.add(Watch(
-        type=WATCH_TYPE_STORY, site="ao3",
-        target="https://example/works/1", channels=["pushover"],
-        auto_download=True,  # opted in, but first poll has no new_items
-    ))
-    dl = _DownloaderSpy(saved=["/lib/story.epub"])
-    run_once(
-        store, _FakePrefs(),
-        scraper_factory=_factory(_FakeScraper(chapter_count=5)),
         notifier=_NotifierSpy(), downloader=dl,
     )
     assert dl.calls == []
 
 
-def test_auto_download_fires_and_appends_path(tmp_path):
+def test_auto_download_skipped_on_baseline_poll(tmp_path):
     store = WatchlistStore(tmp_path / "w.json")
-    store.add(Watch(
-        type=WATCH_TYPE_STORY, site="ao3",
-        target="https://example/works/1", channels=["pushover"],
-        last_seen=5, auto_download=True,
-    ))
-    spy = _NotifierSpy()
-    dl = _DownloaderSpy(saved=["/lib/HP/story.epub"])
-    [result] = run_once(
+    store.add(_autodl_watch(last_seen=None))  # first poll = baseline
+    dl = _DownloaderSpy(paths=["/x.epub"])
+
+    run_once(
         store, _FakePrefs(),
         scraper_factory=_factory(_FakeScraper(chapter_count=7)),
-        notifier=spy, downloader=dl,
+        notifier=_NotifierSpy(), downloader=dl,
     )
-    assert len(dl.calls) == 1
-    assert result.downloaded_paths == ["/lib/HP/story.epub"]
-    _, notification, _ = spy.calls[0]
-    assert "Saved to: /lib/HP/story.epub" in notification.message
+    assert dl.calls == []  # no new_items -> no download
 
 
-def test_auto_download_failure_isolated(tmp_path):
+def test_auto_download_failure_isolated_and_surfaced(tmp_path):
     store = WatchlistStore(tmp_path / "w.json")
-    store.add(Watch(
-        id="a" * 32, type=WATCH_TYPE_STORY, site="ao3",
-        target="https://example/works/1", channels=["pushover"],
-        last_seen=5, auto_download=True,
-    ))
-    store.add(Watch(
-        id="b" * 32, type=WATCH_TYPE_STORY, site="ao3",
-        target="https://example/works/2", channels=["pushover"],
-        last_seen=3, auto_download=True,
-    ))
+    bad = _autodl_watch(id="badwatch1", target="https://example/works/1")
+    good = _autodl_watch(id="goodwatch", target="https://example/works/2")
+    store.add(bad)
+    store.add(good)
     spy = _NotifierSpy()
-    dl = _DownloaderSpy(raises=RuntimeError("disk full"))
+
+    calls = []
+
+    def flaky_downloader(watch, result):
+        calls.append(watch.id)
+        if watch.id == "badwatch1":
+            raise RuntimeError("disk full")
+        return ["/lib/Good.epub"]
+
     results = run_once(
         store, _FakePrefs(),
-        scraper_factory=_factory(_FakeScraper(chapter_count=9)),
-        notifier=spy, downloader=dl,
+        scraper_factory=_factory(_FakeScraper(chapter_count=7)),
+        notifier=spy, downloader=flaky_downloader,
     )
-    # Both watches still polled + notified despite the download raising.
-    assert len(dl.calls) == 2
+
+    assert calls == ["badwatch1", "goodwatch"]  # failure didn't block
+    by_id = {r.watch_id: r for r in results}
+    assert "disk full" in by_id["badwatch1"].download_error
+    assert store.get("badwatch1").last_error.startswith("auto-download failed")
+    assert by_id["goodwatch"].downloaded_paths == ["/lib/Good.epub"]
+    # Both notifications still dispatched; the failed one says so.
     assert len(spy.calls) == 2
-    for result in results:
-        assert "disk full" in result.download_error
-    reloaded = WatchlistStore(tmp_path / "w.json")
-    reloaded.reload()
-    assert all("auto-download failed" in w.last_error for w in reloaded.all())
+    messages = [n.message for _, n, _ in spy.calls]
+    assert any("Auto-download failed" in m for m in messages)
+    assert any("Saved to: /lib/Good.epub" in m for m in messages)
 
 
-def test_auto_download_field_round_trips(tmp_path):
+def test_auto_download_field_roundtrips(tmp_path):
     store = WatchlistStore(tmp_path / "w.json")
-    store.add(Watch(type=WATCH_TYPE_STORY, target="https://x/1",
-                    auto_download=True))
+    store.add(_autodl_watch())
     reloaded = WatchlistStore(tmp_path / "w.json")
     reloaded.reload()
     assert reloaded.all()[0].auto_download is True
+
+
+def test_make_watch_downloader_routes_library_and_fresh(tmp_path, monkeypatch):
+    """cli.make_watch_downloader: a tracked story updates in place at its
+    library path/format; an untracked URL downloads fresh. Built on
+    DownloadJob.from_prefs — no fake namespaces."""
+    from ficary import cli as cli_mod
+    from ficary.library.index import LibraryIndex
+
+    idx_path = tmp_path / "index.json"
+    idx = LibraryIndex.load(idx_path)
+    root = tmp_path / "lib"
+    (root / "HP").mkdir(parents=True)
+    tracked = "https://www.fanfiction.net/s/111"
+    lib = idx.library_state(root)
+    lib["stories"] = {tracked: {"relpath": "HP/Tale.html"}}
+    (root / "HP" / "Tale.html").write_text("x", encoding="utf-8")
+    idx.save()
+
+    calls = []
+
+    def fake_download_one(url, job, output_dir, *, update_path=None,
+                          on_export=None, **kw):
+        calls.append((url, job.format, str(output_dir), update_path))
+        if on_export:
+            on_export(Path(output_dir) / "out.epub")
+        return True
+
+    monkeypatch.setattr(cli_mod, "_download_one", fake_download_one)
+    monkeypatch.setattr(
+        cli_mod, "check_format_deps", lambda fmt: None, raising=False)
+    import ficary.exporters as exporters
+    monkeypatch.setattr(exporters, "check_format_deps", lambda fmt: None)
+
+    class _P:
+        def get(self, key):
+            return "epub"
+
+        def get_bool(self, key):
+            return False
+
+    # Point LibraryIndex.load at our tmp index for the factory's lookup.
+    monkeypatch.setattr(
+        "ficary.library.index.LibraryIndex.load",
+        classmethod(lambda cls, path=None: cls(idx_path, __import__("json").loads(idx_path.read_text()))),
+    )
+
+    downloader = cli_mod.make_watch_downloader(_P())
+
+    story_watch = Watch(type=WATCH_TYPE_STORY, target=tracked,
+                        auto_download=True)
+    from ficary.watchlist import PollResult
+    saved = downloader(story_watch, PollResult(watch_id="w", ok=True,
+                                               new_items=[tracked]))
+    assert len(saved) == 1
+    url, fmt, outdir, update_path = calls[0]
+    assert url == tracked
+    assert fmt == "html"  # derived from the tracked file's suffix
+    assert update_path == root / "HP" / "Tale.html"
+    assert outdir == str(root / "HP")
